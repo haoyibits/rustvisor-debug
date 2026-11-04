@@ -164,7 +164,9 @@ pub fn attach_commands(config: &Config) -> Vec<String> {
 /// The commands that reset the chip through the debugger and stop the core
 /// at the reset vector. `SYStem.RESet` clears every SYStem setting, so the
 /// CPU, memory access and core assignment are set again before `SYStem.Mode
-/// Up`, and the JTAG clock after it, in the order the flash scripts use.
+/// Up`, and the JTAG clock and dual-port access after it, in the order the
+/// flash scripts and `setup_debug` use. Without the dual port, memory reads
+/// fail once the core runs ("access timeout, target running").
 /// A project that wrote this sequence by hand once left out `CORE.ASSIGN`,
 /// and `SYStem.Mode Up` failed with "debug port fail".
 pub fn reset_commands(config: &Config) -> Vec<String> {
@@ -181,6 +183,9 @@ pub fn reset_commands(config: &Config) -> Vec<String> {
     commands.push("SYStem.Mode Up".into());
     if !config.jtag_clock.is_empty() {
         commands.push(format!("SYStem.JtagClock {}", config.jtag_clock));
+    }
+    if !config.dual_port.is_empty() {
+        commands.push(format!("SYStem.Option.DUALPORT {}", config.dual_port));
     }
     commands
 }
@@ -500,6 +505,7 @@ pub mod tests {
         let (_dir, mut config) = fixture();
         config.mem_access = "AXI".into();
         config.jtag_clock = "10MHz".into();
+        config.dual_port = "ON".into();
         assert_eq!(
             reset_commands(&config),
             [
@@ -509,11 +515,13 @@ pub mod tests {
                 "SYStem.MemAccess AXI",
                 "CORE.ASSIGN 1.",
                 "SYStem.Mode Up",
-                "SYStem.JtagClock 10MHz"
+                "SYStem.JtagClock 10MHz",
+                "SYStem.Option.DUALPORT ON"
             ]
         );
         config.mem_access.clear();
         config.jtag_clock.clear();
+        config.dual_port.clear();
         config.cores.clear();
         assert_eq!(
             reset_commands(&config),

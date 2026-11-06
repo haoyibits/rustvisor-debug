@@ -9,7 +9,7 @@ rustvisor 板子的调试工具：经 Lauterbach TRACE32 或 ST 的 StellarLINK 
 | [`rvdbg`](#rvdbgtrace32-和-stellarlink-共用的前端) | rustvisor 项目：两种调试器共用一套命令，按插着的调试器自动选择 | `rvdbg.toml` |
 | [`tracebridge`](#tracebridge从命令行使用-trace32) | 任何用 TRACE32 PowerView 调试的项目；也是 rvdbg 和 rustvisor-sdk 板级 runner 使用的 TRACE32 库 | `trace32.toml` |
 
-两个程序在同一个 release 里发布。[agent skill](skills/) 告诉 AI agent 哪个命令做什么。支持的主机：Apple 芯片的 macOS 和 Linux（x86_64、aarch64）。
+release 只发布 rvdbg（tracebridge 的二进制发布到 0.1.20 为止）；tracebridge 需要从源码构建。[agent skill](skills/) 告诉 AI agent 哪个命令做什么。支持的主机：Apple 芯片的 macOS 和 Linux（x86_64、aarch64）。
 
 ## rvdbg：TRACE32 和 StellarLINK 共用的前端
 
@@ -98,7 +98,6 @@ Rust 调用者使用 `tracebridge::backend::{Project, Session}`：配置加载�
 
 ```sh
 brew install haoyibits/tap/rvdbg          # rvdbg，连同 openocd-stellar
-brew install haoyibits/tap/tracebridge    # tracebridge
 ```
 
 或者用安装脚本：
@@ -107,17 +106,17 @@ brew install haoyibits/tap/tracebridge    # tracebridge
 curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download/install.sh | sh
 ```
 
-安装脚本只装 tracebridge（rvdbg 需要 Homebrew 的 openocd-stellar），默认装到 `~/.local/bin`：用 `TRACEBRIDGE_INSTALL_DIR` 改目录，用 `TRACEBRIDGE_VERSION=v0.1.0` 固定版本。这个目录需要在 `PATH` 里。
+安装脚本装 rvdbg，默认装到 `~/.local/bin`：用 `RVDBG_INSTALL_DIR` 改目录，用 `RVDBG_VERSION=v0.1.21` 固定版本。这个目录需要在 `PATH` 里。它不装 StellarLINK 后端需要的 openocd-stellar；只用 TRACE32 时不需要。
 
 **macOS 用浏览器下载时**：下载的文件会被加上隔离属性，Gatekeeper 会拒绝运行。执行一次：
 
 ```sh
-xattr -d com.apple.quarantine /path/to/tracebridge
+xattr -d com.apple.quarantine /path/to/rvdbg
 ```
 
 用 `install.sh`（curl）安装不会带这个属性；如果有，脚本会顺手去掉。
 
-从源码安装：`cargo install --path crates/tracebridge` 或 `cargo install --path crates/rustvisor-debug`。
+从源码安装：`cargo install --path crates/rustvisor-debug`；tracebridge 不再随 release 发布，需要时用 `cargo install --path crates/tracebridge`。
 
 ## 前提
 

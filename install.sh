@@ -1,18 +1,20 @@
 #!/bin/sh
-# Install tracebridge from GitHub releases.
+# Install rvdbg from GitHub releases. The StellarLINK backend also needs the
+# patched OpenOCD (Homebrew: haoyibits/tap/openocd-stellar), which this
+# script does not install.
 #
 #   curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download/install.sh | sh
 #
 # Environment:
-#   TRACEBRIDGE_VERSION      release tag to install (default: latest), e.g. v0.1.0
-#   TRACEBRIDGE_INSTALL_DIR  target directory (default: ~/.local/bin)
-#   TRACEBRIDGE_REPO         GitHub repository (default: haoyibits/rustvisor-debug)
-#   TRACEBRIDGE_BASE_URL     download from this URL instead of GitHub (mirrors, testing)
+#   RVDBG_VERSION      release tag to install (default: latest), e.g. v0.1.0
+#   RVDBG_INSTALL_DIR  target directory (default: ~/.local/bin)
+#   RVDBG_REPO         GitHub repository (default: haoyibits/rustvisor-debug)
+#   RVDBG_BASE_URL     download from this URL instead of GitHub (mirrors, testing)
 set -eu
 
-repo="${TRACEBRIDGE_REPO:-haoyibits/rustvisor-debug}"
-version="${TRACEBRIDGE_VERSION:-latest}"
-install_dir="${TRACEBRIDGE_INSTALL_DIR:-$HOME/.local/bin}"
+repo="${RVDBG_REPO:-haoyibits/rustvisor-debug}"
+version="${RVDBG_VERSION:-latest}"
+install_dir="${RVDBG_INSTALL_DIR:-$HOME/.local/bin}"
 
 fail() {
     echo "install.sh: $*" >&2
@@ -31,9 +33,9 @@ case "$(uname -m)" in
 esac
 [ "$os-$arch" = apple-darwin-x86_64 ] && fail "Intel Macs are not supported; use an Apple silicon Mac"
 target="$arch-$os"
-asset="tracebridge-$target.tar.gz"
-if [ -n "${TRACEBRIDGE_BASE_URL:-}" ]; then
-    base="$TRACEBRIDGE_BASE_URL"
+asset="rvdbg-$target.tar.gz"
+if [ -n "${RVDBG_BASE_URL:-}" ]; then
+    base="$RVDBG_BASE_URL"
 elif [ "$version" = latest ]; then
     base="https://github.com/$repo/releases/latest/download"
 else
@@ -58,14 +60,14 @@ fi
 
 tar -xzf "$temporary/$asset" -C "$temporary"
 mkdir -p "$install_dir"
-cp "$temporary/tracebridge-$target/tracebridge" "$install_dir/tracebridge.new"
-chmod 755 "$install_dir/tracebridge.new"
+cp "$temporary/rvdbg-$target/rvdbg" "$install_dir/rvdbg.new"
+chmod 755 "$install_dir/rvdbg.new"
 if [ "$os" = apple-darwin ]; then
-    xattr -d com.apple.quarantine "$install_dir/tracebridge.new" 2>/dev/null || true
+    xattr -d com.apple.quarantine "$install_dir/rvdbg.new" 2>/dev/null || true
 fi
-mv -f "$install_dir/tracebridge.new" "$install_dir/tracebridge"
+mv -f "$install_dir/rvdbg.new" "$install_dir/rvdbg"
 
-echo "Installed $("$install_dir/tracebridge" --version) to $install_dir/tracebridge"
+echo "Installed $("$install_dir/rvdbg" --version) to $install_dir/rvdbg"
 case ":$PATH:" in
     *":$install_dir:"*) ;;
     *) echo "Note: $install_dir is not on PATH; add it to your shell profile, e.g. export PATH=\"$install_dir:\$PATH\"" ;;

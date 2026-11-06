@@ -12,7 +12,8 @@ configuration file.
 | [`rvdbg`](#rvdbg-one-front-end-for-trace32-and-stellarlink) | rustvisor projects: one command set for both probes, picked from what is plugged in | `rvdbg.toml` |
 | [`tracebridge`](#tracebridge-trace32-from-the-command-line) | any project debugged with TRACE32 PowerView; also the TRACE32 library rvdbg and rustvisor-sdk's board runner use | `trace32.toml` |
 
-Both come from the same release. The [agent skills](skills/) tell an AI
+Releases ship rvdbg only (tracebridge binaries up to 0.1.20); tracebridge
+is built from source. The [agent skills](skills/) tell an AI
 agent which command does what. Supported hosts: macOS on Apple silicon and
 Linux (x86_64, aarch64).
 
@@ -135,7 +136,6 @@ With Homebrew (macOS or Linux):
 
 ```sh
 brew install haoyibits/tap/rvdbg          # rvdbg, with openocd-stellar
-brew install haoyibits/tap/tracebridge    # tracebridge
 ```
 
 Or with the install script:
@@ -144,13 +144,12 @@ Or with the install script:
 curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download/install.sh | sh
 ```
 
-This installs `tracebridge` (not rvdbg, which needs openocd-stellar from
-Homebrew) into `~/.local/bin` (set `TRACEBRIDGE_INSTALL_DIR`
-to change it, `TRACEBRIDGE_VERSION=v0.1.0` to pin a release). Make sure the
-directory is on your `PATH`.
+This installs `rvdbg` into `~/.local/bin` (set `RVDBG_INSTALL_DIR` to change
+it, `RVDBG_VERSION=v0.1.21` to pin a release). Make sure the directory is on
+your `PATH`. It does not install openocd-stellar, which the StellarLINK
+backend needs; TRACE32 works without it.
 
-Manual install: download `tracebridge-<target>.tar.gz` or
-`rvdbg-<target>.tar.gz` from the releases page, check it against the
+Manual install: download `rvdbg-<target>.tar.gz` from the releases page, check it against the
 `.sha256` file, and copy the binary somewhere on your `PATH`.
 
 **macOS and browser downloads:** a binary downloaded with a web browser is
@@ -158,13 +157,14 @@ quarantined and Gatekeeper refuses to run it ("cannot be opened because the
 developer cannot be verified"). Remove the attribute once:
 
 ```sh
-xattr -d com.apple.quarantine /path/to/tracebridge
+xattr -d com.apple.quarantine /path/to/rvdbg
 ```
 
 `install.sh` (curl) does not set the attribute and removes it if present.
 
-From source: `cargo install --path crates/tracebridge` or
-`cargo install --path crates/rustvisor-debug`.
+From source: `cargo install --path crates/rustvisor-debug`, or
+`cargo install --path crates/tracebridge` for tracebridge, which is no longer
+in releases.
 
 ## Requirements
 

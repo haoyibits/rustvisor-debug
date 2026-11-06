@@ -48,20 +48,18 @@ jobs:
         shell: bash
         run: |
           export TRACEBRIDGE_GIT_HASH="${GITHUB_SHA::10}"
-          cargo build --release --locked --target ${{ matrix.target }} -p tracebridge -p rustvisor-debug
+          cargo build --release --locked --target ${{ matrix.target }} -p rustvisor-debug
       - name: Check that Linux binaries are static
         if: contains(matrix.target, 'musl')
         run: |
-          for program in tracebridge rvdbg; do
-            file target/${{ matrix.target }}/release/$program
-            ! ldd target/${{ matrix.target }}/release/$program 2>/dev/null | grep -q '=>'
-          done
+          file target/${{ matrix.target }}/release/rvdbg
+          ! ldd target/${{ matrix.target }}/release/rvdbg 2>/dev/null | grep -q '=>'
       - name: Package
         shell: bash
         run: |
-          # One archive per program: tracebridge (TRACE32 only) and rvdbg
-          # (rustvisor's front end for TRACE32 and StellarLINK).
-          for program in tracebridge rvdbg; do
+          # Only rvdbg is released; tracebridge stays a library (and a binary
+          # for building from source).
+          for program in rvdbg; do
             name=$program-${{ matrix.target }}
             mkdir -p dist/$name
             cp target/${{ matrix.target }}/release/$program README.md LICENSE NOTICE dist/$name/
@@ -93,12 +91,11 @@ jobs:
           merge-multiple: true
       - name: Homebrew bottles
         run: |
-          packaging/homebrew/bottles.sh "${GITHUB_REF_NAME#v}" dist tracebridge
           packaging/homebrew/bottles.sh "${GITHUB_REF_NAME#v}" dist rvdbg
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/* install.sh \
-            --title "tracebridge and rvdbg ${GITHUB_REF_NAME}" --generate-notes
+            --title "rvdbg ${GITHUB_REF_NAME}" --generate-notes
 

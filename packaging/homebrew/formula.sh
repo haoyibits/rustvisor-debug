@@ -3,8 +3,8 @@
 #
 #   packaging/homebrew/formula.sh <version> <dist dir> [owner/repo] [program] > <program>.rb
 #
-# program: tracebridge (the default) or rvdbg, which also installs the
-# patched OpenOCD (openocd-stellar) from the same tap.
+# program: rvdbg (the default), which also installs the patched OpenOCD
+# (openocd-stellar) from the same tap, or tracebridge (releases up to 0.1.20).
 #
 # <dist dir> holds the release archives' .sha256 files
 # (<program>-<target>.tar.gz.sha256) and, when present, the bottles' .sha256
@@ -17,7 +17,7 @@ set -eu
 version="${1:?version, e.g. 0.1.0}"
 dist="${2:?directory with the .sha256 files}"
 repo="${3:-haoyibits/rustvisor-debug}"
-program="${4:-tracebridge}"
+program="${4:-rvdbg}"
 base="https://github.com/$repo/releases/download/v$version"
 
 case "$program" in

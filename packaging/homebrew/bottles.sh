@@ -3,8 +3,8 @@
 #
 #   packaging/homebrew/bottles.sh <version> <dist dir> [program]
 #
-# For every <program>-<target>.tar.gz in <dist dir> (program: tracebridge,
-# the default, or rvdbg), writes <program>-<version>.<tag>.bottle.tar.gz and
+# For every <program>-<target>.tar.gz in <dist dir> (program: rvdbg,
+# the default, or tracebridge for releases up to 0.1.20), writes <program>-<version>.<tag>.bottle.tar.gz and
 # its .sha256 next to it. A bottle is the installed keg as a tarball:
 # <program>/<version>/bin/...
 # Homebrew pours a bottle without building anything, so installing from the
@@ -18,7 +18,7 @@ set -eu
 
 version="${1:?version, e.g. 0.1.0}"
 dist="${2:?directory with <program>-<target>.tar.gz}"
-program="${3:-tracebridge}"
+program="${3:-rvdbg}"
 
 tag_of() {
     case "$1" in

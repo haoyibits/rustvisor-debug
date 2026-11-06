@@ -10,12 +10,13 @@ pub(crate) mod check;
 pub(crate) mod clock;
 mod clockhtml;
 pub(crate) mod commands;
-mod decode;
 pub(crate) mod elf;
 mod perfile;
 pub(crate) mod probe;
 mod repl;
 mod trace;
+
+use probecore::decode;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -6,3 +6,6 @@
 //! reads; this crate knows nothing about a particular probe, board or
 //! hypervisor.
 #![forbid(unsafe_code)]
+
+pub mod decode;
+pub mod style;

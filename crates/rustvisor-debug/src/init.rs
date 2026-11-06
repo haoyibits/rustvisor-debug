@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 
 use toml::{Table, Value};
 
-use crate::config::{
-    self, Backend, FILE_NAME, FLASH_KEYS, RTOS_KEYS, RTT_KEYS, TARGET_KEYS, TRACE32_KEYS,
-};
+use crate::config::{self, FILE_NAME, FLASH_KEYS, RTOS_KEYS, RTT_KEYS, TARGET_KEYS, TRACE32_KEYS};
 
 /// `(key, default)` pairs in the order they are written.
 type Defaults = &'static [(&'static str, Default)];
@@ -115,7 +113,7 @@ fn sub<'a>(document: Option<&'a Table>, key: &str) -> Option<&'a Table> {
 }
 
 /// The text of `rvdbg.toml`; `imported` is a parsed trace32.toml.
-pub fn render(backend: Backend, imported: Option<&Table>) -> String {
+pub fn render(imported: Option<&Table>) -> String {
     let mut text = String::new();
     text.push_str(
         "# rvdbg project configuration, written by 'rvdbg init'.\n\
@@ -127,9 +125,11 @@ pub fn render(backend: Backend, imported: Option<&Table>) -> String {
     }
     text.push_str(
         "\n[project]\n\
-         # trace32: Lauterbach TRACE32 PowerView. openocd: StellarLINK through openocd-stellar.\n",
+         # The backend follows the connected probe: a Lauterbach probe or a running\n\
+         # PowerView means trace32 (TRACE32), a StellarLINK means openocd; with both,\n\
+         # trace32. 'rvdbg --backend <name>' or this key fixes it.\n\
+         # backend = \"openocd\"\n",
     );
-    text.push_str(&line("backend", &Value::String(backend.name().into())));
     text.push_str(&section(
         PROJECT,
         sub(imported, "project"),
@@ -188,7 +188,7 @@ pub fn render(backend: Backend, imported: Option<&Table>) -> String {
 }
 
 /// Write `rvdbg.toml` into `directory`; never overwrites.
-pub fn init(directory: &Path, backend: Backend) -> Result<PathBuf, String> {
+pub fn init(directory: &Path) -> Result<PathBuf, String> {
     let path = directory.join(FILE_NAME);
     if path.exists() {
         return Err(format!(
@@ -207,7 +207,7 @@ pub fn init(directory: &Path, backend: Backend) -> Result<PathBuf, String> {
     } else {
         None
     };
-    let text = render(backend, imported.as_ref());
+    let text = render(imported.as_ref());
     // What is written must load.
     config::parse(&text, &path, directory).map_err(|error| {
         format!("internal error: the generated {FILE_NAME} is invalid: {error}")
@@ -223,10 +223,10 @@ mod tests {
 
     #[test]
     fn defaults_load_for_both_backends() {
-        for backend in [Backend::Trace32, Backend::OpenOcd] {
-            let text = render(backend, None);
+        {
+            let text = render(None);
             let config = config::parse(&text, Path::new("/p/rvdbg.toml"), Path::new("/p")).unwrap();
-            assert_eq!(config.backend, backend);
+            assert_eq!(config.backend, None);
             assert_eq!(config.program, "boot_diagnostic");
             assert_eq!(config.extra_elf.len(), 1);
             let openocd = config.openocd.unwrap();
@@ -262,7 +262,7 @@ mod tests {
         "#
         .parse()
         .unwrap();
-        let text = render(Backend::Trace32, Some(&imported));
+        let text = render(Some(&imported));
         assert!(text.contains("taken from trace32.toml"), "{text}");
         let config = config::parse(&text, Path::new("/p/rvdbg.toml"), Path::new("/p")).unwrap();
         assert_eq!(config.program, "app");
@@ -283,9 +283,9 @@ mod tests {
     #[test]
     fn init_never_overwrites() {
         let dir = tempfile::tempdir().unwrap();
-        let path = init(dir.path(), Backend::OpenOcd).unwrap();
+        let path = init(dir.path()).unwrap();
         assert!(path.is_file());
-        let error = init(dir.path(), Backend::Trace32).unwrap_err();
+        let error = init(dir.path()).unwrap_err();
         assert!(error.contains("already exists"), "{error}");
     }
 }

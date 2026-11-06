@@ -1,15 +1,16 @@
 //! `rvdbg`: rustvisor-specific debugging front end. It reads `rvdbg.toml`
-//! and runs each command on the backend the project chose: TRACE32 through
-//! tracebridge, or StellarLINK through OpenOCD (stellarbridge).
+//! and runs each command on the backend of the connected probe: TRACE32
+//! through tracebridge, or StellarLINK through OpenOCD (stellarbridge).
 //!
 //! The TRACE32 IDE files and the PowerView toolbar run
 //! `<exe> --config <file> adapter|flash|load`, the way tracebridge's do, so
-//! rvdbg accepts the same command names.
+//! rvdbg accepts the same command names; `adapter` is always TRACE32.
 #![forbid(unsafe_code)]
 
 mod config;
 mod init;
 mod openocd;
+mod probe;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -35,6 +36,10 @@ struct Cli {
     #[arg(long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
 
+    /// Use this backend instead of the one of the connected probe
+    #[arg(long, global = true, value_enum)]
+    backend: Option<BackendArg>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -47,13 +52,21 @@ enum BackendArg {
     Openocd,
 }
 
+impl From<BackendArg> for Backend {
+    fn from(argument: BackendArg) -> Backend {
+        match argument {
+            BackendArg::Trace32 => Backend::Trace32,
+            BackendArg::Openocd => Backend::OpenOcd,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Write rvdbg.toml in the current directory (values from trace32.toml if there is one)
-    Init {
-        #[arg(long, value_enum)]
-        backend: BackendArg,
-    },
+    Init,
+    /// Show the configuration, the connected probes and the backend they select
+    Config,
     /// Flash the ELF and the extra images, then run
     Flash {
         /// OpenOCD: do not compare the written segments with flash
@@ -71,15 +84,17 @@ enum Commands {
     Load,
     /// Run the debug server in the foreground for the IDE: TRACE32's DAP
     /// adapter, or OpenOCD's GDB server
-    #[command(alias = "adapter")]
     Debug {
         /// OpenOCD: keep serving after GDB detaches (until Ctrl-C)
         #[arg(long)]
         keep: bool,
     },
-    /// Write the debug configuration into .vscode/ (launch.json, tasks.json)
+    /// TRACE32's DAP adapter (what the TRACE32 IDE configurations run)
+    #[command(hide = true)]
+    Adapter,
+    /// Write the debug configurations of both backends into .vscode/
     Vscode,
-    /// TRACE32: write the RustRover run configuration (.run/, LSP4IJ)
+    /// Write the RustRover run configuration for TRACE32 (.run/, LSP4IJ)
     Rustrover,
 }
 
@@ -96,29 +111,31 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    if let Commands::Init { backend } = cli.command {
-        return init_command(&cwd, backend);
+    if let Commands::Init = cli.command {
+        return init_command(&cwd);
     }
     let path = config::find(cli.config.as_deref(), &cwd)?;
     let config = config::load(&path)?;
+    let flag = cli.backend.map(Backend::from);
     match cli.command {
-        Commands::Init { .. } => unreachable!("handled above"),
+        Commands::Init => unreachable!("handled above"),
+        Commands::Config => show_config(&config, flag),
         Commands::Flash {
             no_verify,
             no_run,
             write_otp,
         } => {
             check_images(&config)?;
-            match config.backend {
+            match select(&config, flag)? {
                 Backend::OpenOcd => openocd::flash(&config, !no_verify, !no_run, write_otp),
                 Backend::Trace32 => {
-                    for (set, flag) in [
+                    for (set, option) in [
                         (no_verify, "--no-verify"),
                         (no_run, "--no-run"),
                         (write_otp, "--write-otp"),
                     ] {
                         if set {
-                            return Err(format!("{flag} applies to the openocd backend only"));
+                            return Err(format!("{option} applies to the openocd backend only"));
                         }
                     }
                     trace32(&config)?.flash().map_err(text)?;
@@ -126,7 +143,7 @@ fn run(cli: Cli) -> Result<u8, String> {
                 }
             }
         }
-        Commands::Load => match config.backend {
+        Commands::Load => match select(&config, flag)? {
             Backend::Trace32 => {
                 trace32(&config)?.load_symbols().map_err(text)?;
                 Ok(0)
@@ -137,42 +154,35 @@ fn run(cli: Cli) -> Result<u8, String> {
                     .into(),
             ),
         },
-        Commands::Debug { keep } => match config.backend {
+        Commands::Debug { keep } => match select(&config, flag)? {
             Backend::OpenOcd => openocd::debug(&config, keep),
             Backend::Trace32 => {
                 if keep {
                     return Err("--keep applies to the openocd backend only".into());
                 }
-                let project = trace32(&config)?;
-                // The adapter needs PowerView; start it like 'flash' would.
-                project.open().map_err(text)?;
-                project.run_adapter().map_err(text)?;
-                Ok(0)
+                trace32_debug(&config)
             }
         },
-        Commands::Vscode => match config.backend {
-            Backend::OpenOcd => openocd::vscode(&config, &current_exe()?),
-            Backend::Trace32 => {
-                trace32(&config)?
-                    .install_vscode(&current_exe()?)
-                    .map_err(text)?;
-                Ok(0)
+        Commands::Adapter => {
+            if flag == Some(Backend::OpenOcd) {
+                return Err("'adapter' is TRACE32's DAP adapter; use 'rvdbg debug'".into());
             }
-        },
-        Commands::Rustrover => match config.backend {
-            Backend::Trace32 => {
-                trace32(&config)?
-                    .install_rustrover(&current_exe()?)
-                    .map_err(text)?;
-                Ok(0)
+            trace32_debug(&config)
+        }
+        Commands::Vscode => {
+            let exe = current_exe()?;
+            trace32(&config)?.install_vscode(&exe).map_err(text)?;
+            if config.openocd.is_some() {
+                openocd::vscode(&config, &exe)?;
             }
-            Backend::OpenOcd => Err(
-                "RustRover is set up for the trace32 backend only so far; with openocd use \
-                 'rvdbg vscode', or a GDB Remote Debug configuration on localhost:<gdb_port> \
-                 with 'rvdbg debug' running"
-                    .into(),
-            ),
-        },
+            Ok(0)
+        }
+        Commands::Rustrover => {
+            trace32(&config)?
+                .install_rustrover(&current_exe()?)
+                .map_err(text)?;
+            Ok(0)
+        }
     }
 }
 
@@ -180,12 +190,79 @@ fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
-fn init_command(cwd: &Path, backend: BackendArg) -> Result<u8, String> {
-    let backend = match backend {
-        BackendArg::Trace32 => Backend::Trace32,
-        BackendArg::Openocd => Backend::OpenOcd,
+/// `--backend`, else `project.backend`, with where it came from.
+fn fixed(config: &Config, flag: Option<Backend>) -> Option<(Backend, &'static str)> {
+    match (flag, config.backend) {
+        (Some(backend), _) => Some((backend, "--backend")),
+        (None, Some(backend)) => Some((backend, "project.backend in rvdbg.toml")),
+        (None, None) => None,
+    }
+}
+
+/// The backend for a command: `--backend`, else `project.backend`, else
+/// the connected probe. Says which on stderr.
+fn select(config: &Config, flag: Option<Backend>) -> Result<Backend, String> {
+    let fixed = fixed(config, flag);
+    let found = match fixed {
+        Some(_) => Vec::new(),
+        None => probe::detect(config)?,
     };
-    let path = init::init(cwd, backend)?;
+    let choice = probe::choose(fixed, &found)?;
+    eprintln!(
+        "{} {}",
+        Style::stderr().label("[rvdbg] backend"),
+        choice.reason
+    );
+    Ok(choice.backend)
+}
+
+/// PowerView (started if needed), then the DAP adapter.
+fn trace32_debug(config: &Config) -> Result<u8, String> {
+    let project = trace32(config)?;
+    project.open().map_err(text)?;
+    project.run_adapter().map_err(text)?;
+    Ok(0)
+}
+
+fn show_config(config: &Config, flag: Option<Backend>) -> Result<u8, String> {
+    let style = Style::stdout();
+    println!("{} {}", style.label("config "), config.file.display());
+    for image in config.images() {
+        let status = if image.is_file() {
+            style.good("ok")
+        } else {
+            style.bad("MISSING")
+        };
+        println!("{} {status} {}", style.label("image  "), image.display());
+    }
+    if let Some(openocd) = &config.openocd {
+        println!(
+            "{} {} tcl {} gdb {} ({})",
+            style.label("openocd"),
+            openocd.executable.display(),
+            openocd.tcl_port,
+            openocd.gdb_port,
+            openocd.gdb_target.as_deref().unwrap_or("every target")
+        );
+    }
+    println!("{} rcl {}", style.label("trace32"), probe::rcl_port(config));
+    let found = probe::detect(config)?;
+    if found.is_empty() {
+        println!("{} none", style.label("probe  "));
+    }
+    for item in &found {
+        println!("{} {item}", style.label("probe  "));
+    }
+    let fixed = fixed(config, flag);
+    match probe::choose(fixed, &found) {
+        Ok(choice) => println!("{} {}", style.label("backend"), style.good(choice.reason)),
+        Err(error) => println!("{} {}", style.label("backend"), style.warn(error)),
+    }
+    Ok(0)
+}
+
+fn init_command(cwd: &Path) -> Result<u8, String> {
+    let path = init::init(cwd)?;
     let style = Style::stdout();
     println!("{} {}", style.good("wrote"), path.display());
     if cwd.join("trace32.toml").is_file() {
@@ -194,8 +271,13 @@ fn init_command(cwd: &Path, backend: BackendArg) -> Result<u8, String> {
             style.dim("  images and TRACE32 settings taken from trace32.toml")
         );
     }
+    println!(
+        "{}",
+        style.dim("  the backend follows the connected probe (StellarLINK or Lauterbach)")
+    );
     println!("\nNext:");
     for (command, note) in [
+        ("rvdbg config", "shows the probe it found"),
         ("rvdbg flash", "build the images first"),
         ("rvdbg vscode", "then F5 in VS Code"),
         ("rvdbg debug", "or run the debug server yourself"),

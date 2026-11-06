@@ -2,7 +2,7 @@
 //!
 //! ```toml
 //! [project]
-//! backend = "openocd"                  # or "trace32"
+//! # backend = "openocd"                # fixes the backend; default: the connected probe
 //! program = "boot_diagnostic"          # TRACE32 symbol program; default: the ELF's name
 //! elf = "target/thumbv8r-none-eabihf/release/boot_diagnostic"
 //! extra_elf = ["target/thumbv8r-none-eabihf/release/scenario-guest"]
@@ -81,7 +81,8 @@ pub struct OpenOcd {
 pub struct Config {
     pub file: PathBuf,
     pub root: PathBuf,
-    pub backend: Backend,
+    /// `project.backend`: a fixed choice; `None` means detect the probe.
+    pub backend: Option<Backend>,
     pub program: String,
     pub elf: PathBuf,
     pub extra_elf: Vec<PathBuf>,
@@ -373,14 +374,14 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
         &["backend", "program", "elf", "extra_elf"],
     )?;
     let backend = match string(project, "project", "backend")?.as_deref() {
-        Some("openocd") => Backend::OpenOcd,
-        Some("trace32") => Backend::Trace32,
+        Some("openocd") => Some(Backend::OpenOcd),
+        Some("trace32") => Some(Backend::Trace32),
+        Some("") | None => None,
         Some(other) => {
             return Err(format!(
                 "project.backend {other:?} must be \"openocd\" or \"trace32\""
             ));
         }
-        None => return Err("project.backend is missing".into()),
     };
     let elf_text = match string(project, "project", "elf")? {
         Some(elf) if !elf.is_empty() => elf,
@@ -401,7 +402,7 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
     let openocd = table(&document, "openocd")?
         .map(|section| parse_openocd(section, root))
         .transpose()?;
-    if backend == Backend::OpenOcd && openocd.is_none() {
+    if backend == Some(Backend::OpenOcd) && openocd.is_none() {
         return Err("project.backend is \"openocd\" but there is no [openocd] section".into());
     }
     let trace32 = trace32_document(&document, project, &program)?;
@@ -457,7 +458,7 @@ mod tests {
     #[test]
     fn full_configuration() {
         let config = parse_text(FULL).unwrap();
-        assert_eq!(config.backend, Backend::OpenOcd);
+        assert_eq!(config.backend, Some(Backend::OpenOcd));
         assert_eq!(config.program, "app");
         assert_eq!(
             config.images(),
@@ -519,8 +520,11 @@ mod tests {
         assert!(openocd.otp.is_empty());
         // TRACE32 without a [trace32] section: tracebridge's defaults.
         let config = parse_text("[project]\nbackend = \"trace32\"\nelf = \"a.elf\"\n").unwrap();
-        assert_eq!(config.backend, Backend::Trace32);
+        assert_eq!(config.backend, Some(Backend::Trace32));
         assert!(config.openocd.is_none());
+        // Without project.backend the probe decides.
+        let config = parse_text("[project]\nelf = \"a.elf\"\n").unwrap();
+        assert_eq!(config.backend, None);
     }
 
     #[test]

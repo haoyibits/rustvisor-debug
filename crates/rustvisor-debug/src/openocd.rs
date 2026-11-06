@@ -255,7 +255,7 @@ pub fn vscode_templates(config: &Config, exe: &Path, gdb: &Path) -> (Value, Valu
         "type": "process",
         "isBackground": true,
         "command": exe.display().to_string(),
-        "args": ["--config", config.file.display().to_string(), "debug"],
+        "args": ["--config", config.file.display().to_string(), "--backend", "openocd", "debug"],
         "presentation": {"reveal": "always", "focus": false, "panel": "dedicated", "clear": true},
         "problemMatcher": [{
             "owner": "rvdbg",
@@ -406,7 +406,10 @@ mod tests {
         let task = &tasks["tasks"][0];
         assert_eq!(task["label"], TASK_LABEL);
         assert_eq!(task["command"], "/bin/rvdbg");
-        assert_eq!(task["args"], json!(["--config", "/p/rvdbg.toml", "debug"]));
+        assert_eq!(
+            task["args"],
+            json!(["--config", "/p/rvdbg.toml", "--backend", "openocd", "debug"])
+        );
         let background = &task["problemMatcher"][0]["background"];
         let ends = background["endsPattern"].as_str().unwrap();
         assert_eq!(

@@ -3,8 +3,8 @@
 //! `flash.script` names a script explicitly. Otherwise the script is chosen by
 //! chip name (`flash.chip`, or `target.cpu` when that is empty) from:
 //!
-//! 1. the user's library, `~/.config/tracebridge/flash/*.cmm` (or
-//!    `$XDG_CONFIG_HOME/tracebridge/flash`), for scripts shared by several
+//! 1. the user's library, `~/.config/rvdbg/flash/*.cmm` (or
+//!    `$XDG_CONFIG_HOME/rvdbg/flash`), for scripts shared by several
 //!    projects, such as a modified vendor script;
 //! 2. the TRACE32 installation, `<trace32.sys>/demo/*/flash/*.cmm`.
 //!
@@ -90,7 +90,7 @@ impl Choice {
     }
 }
 
-/// `~/.config/tracebridge`, honouring `XDG_CONFIG_HOME`: the user's files
+/// `~/.config/rvdbg`, honouring `XDG_CONFIG_HOME`: the user's files
 /// that several projects share.
 pub fn config_dir(env: &Env) -> PathBuf {
     let base = env
@@ -98,10 +98,10 @@ pub fn config_dir(env: &Env) -> PathBuf {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(crate::pycompat::expanduser("~/.config", env)));
-    base.join("tracebridge")
+    base.join("rvdbg")
 }
 
-/// `~/.config/tracebridge/flash`.
+/// `~/.config/rvdbg/flash`.
 pub fn library_dir(env: &Env) -> PathBuf {
     config_dir(env).join("flash")
 }

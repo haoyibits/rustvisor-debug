@@ -63,7 +63,7 @@ runs OpenOCD's GDB server for GDB or VS Code.
 - Commands marked TRACE32 above fail with StellarLINK; say so instead of
   working around it.
 - Do not guess chip details. Flash scripts and clock descriptions live in
-  `~/.config/tracebridge/`.
+  `~/.config/rvdbg/`.
 
 ## Gotchas
 

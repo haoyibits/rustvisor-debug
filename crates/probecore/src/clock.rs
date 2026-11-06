@@ -3,7 +3,7 @@
 //!
 //! The engine knows no chip: the description is a TOML file, chosen by chip
 //! name from a directory of descriptions (each tool has its own, e.g.
-//! `~/.config/tracebridge/clock/*.toml`) or given with `--tree`. The board
+//! `~/.config/rvdbg/clock/*.toml`) or given with `--tree`. The board
 //! only adds the frequencies that no register holds, such as the crystal
 //! (`XOSC=40MHz`).
 //!

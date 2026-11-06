@@ -524,7 +524,7 @@ fn verify(target: &mut CoreTarget, paths: &[PathBuf], style: Style) -> Result<Ou
 }
 
 /// The clock tree description: the given file, or the one chosen by chip
-/// from tracebridge's library (`~/.config/tracebridge/clock`), which both
+/// from the library (`~/.config/rvdbg/clock`), which both
 /// backends share.
 fn clock_tree(project: &Project, tree: Option<&Path>) -> Result<(PathBuf, clock::Tree), String> {
     match tree {

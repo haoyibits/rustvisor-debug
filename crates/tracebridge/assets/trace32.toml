@@ -35,7 +35,7 @@ show_tasks = true
 #
 # Either leave `script` empty and name the chip: tracebridge picks the script
 # whose "; @Chip:" header matches, first from your own library
-# (~/.config/tracebridge/flash/*.cmm), then from the TRACE32 installation
+# (~/.config/rvdbg/flash/*.cmm), then from the TRACE32 installation
 # (<sys>/demo/*/flash/*.cmm). An empty `chip` means target.cpu.
 # Try: tracebridge chips <name>
 chip = ""

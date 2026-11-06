@@ -168,7 +168,7 @@ fn flash_script_is_chosen_by_chip_from_the_library() {
     let rcl = FakeRcl::start();
     let project = Project::new(rcl.port, "");
     // The test HOME is the project directory, so the library lives inside it.
-    let library = project.root().join(".config/tracebridge/flash");
+    let library = project.root().join(".config/rvdbg/flash");
     std::fs::create_dir_all(&library).unwrap();
     std::fs::write(
         library.join("board.cmm"),

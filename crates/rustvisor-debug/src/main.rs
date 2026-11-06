@@ -220,7 +220,7 @@ enum Commands {
         /// Frequencies only the board knows, e.g. XOSC=40MHz (default: [clock] in rvdbg.toml)
         #[arg(value_name = "CLOCK=FREQUENCY")]
         inputs: Vec<String>,
-        /// Clock tree description (default: chosen by chip from ~/.config/tracebridge/clock)
+        /// Clock tree description (default: chosen by chip from ~/.config/rvdbg/clock)
         #[arg(long, value_name = "FILE")]
         tree: Option<PathBuf>,
         /// TRACE32: also write the tree as a diagram to .tracebridge/clock.html

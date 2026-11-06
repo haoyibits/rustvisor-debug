@@ -296,7 +296,7 @@ fn clock_tree_from_the_library_and_the_crystal_frequency() {
     assert_eq!(output.status.code(), Some(1));
     assert!(
         stderr(&output).contains("no clock tree description for chip CORTEXM4")
-            && stderr(&output).contains(".config/tracebridge/clock or pass --tree <file>"),
+            && stderr(&output).contains(".config/rvdbg/clock or pass --tree <file>"),
         "{}",
         stderr(&output)
     );
@@ -308,7 +308,7 @@ fn clock_tree_from_the_library_and_the_crystal_frequency() {
     );
 
     // The test HOME is the project directory, so the library lives inside it.
-    let library = project.root().join(".config/tracebridge/clock");
+    let library = project.root().join(".config/rvdbg/clock");
     std::fs::create_dir_all(&library).unwrap();
     let description = std::fs::read_to_string(example)
         .unwrap()

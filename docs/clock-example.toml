@@ -1,7 +1,7 @@
 # Example clock tree description for 'tracebridge debug clock'.
 #
 # The chip, its registers and their addresses are made up. Keep the
-# description of your chip in ~/.config/tracebridge/clock/<name>.toml (it is
+# description of your chip in ~/.config/rvdbg/clock/<name>.toml (it is
 # chosen by `chips`, like the flash scripts), or pass it with --tree:
 #
 #   tracebridge debug clock                  # [clock] XOSC = "8MHz" in trace32.toml

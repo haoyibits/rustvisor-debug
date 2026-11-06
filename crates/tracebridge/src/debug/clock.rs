@@ -9,7 +9,7 @@ use super::probe::{DResult, Probe};
 use super::t32target::T32Target;
 use crate::pycompat::Env;
 
-/// `~/.config/tracebridge/clock`, honouring `XDG_CONFIG_HOME`.
+/// `~/.config/rvdbg/clock`, honouring `XDG_CONFIG_HOME`.
 pub fn library_dir(env: &Env) -> PathBuf {
     crate::flash::config_dir(env).join("clock")
 }

@@ -157,7 +157,7 @@ pub fn render(imported: Option<&Table>) -> String {
     text.push_str(&section(TARGET, sub(imported, "target"), TARGET_KEYS));
     text.push_str(
         "\n# Empty script: chosen by chip (flash.chip, else target.cpu) from\n\
-         # ~/.config/tracebridge/flash and the TRACE32 installation.\n[trace32.flash]\n",
+         # ~/.config/rvdbg/flash and the TRACE32 installation.\n[trace32.flash]\n",
     );
     text.push_str(&section(FLASH, sub(imported, "flash"), FLASH_KEYS));
     if let Some(rtos) = sub(imported, "rtos") {

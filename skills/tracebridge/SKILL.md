@@ -57,7 +57,7 @@ advice not to drive the debugger by other means.
 - `tracebridge debug` exit codes: 0 ok, 1 error, 2 usage error, 3 a check
   failed, `verify` found differences, or `run-until` stopped elsewhere.
 - Do not guess chip details. The flash scripts and clock descriptions live in
-  `~/.config/tracebridge/`; `tracebridge chips` and `debug clock` say which
+  `~/.config/rvdbg/`; `tracebridge chips` and `debug clock` say which
   one they use.
 
 ## Gotchas

@@ -27,7 +27,7 @@ pub const VERSION: &str = concat!(
 pub use crate::rtt::{Terminal as RttTerminal, terminal as rtt_terminal};
 
 /// Where clock tree descriptions are looked up by chip:
-/// `~/.config/tracebridge/clock` (or under `XDG_CONFIG_HOME`).
+/// `~/.config/rvdbg/clock` (or under `XDG_CONFIG_HOME`).
 pub fn clock_library_dir() -> PathBuf {
     debug::clock::library_dir(&pycompat::process_env())
 }

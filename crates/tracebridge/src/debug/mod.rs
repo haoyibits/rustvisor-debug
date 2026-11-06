@@ -123,7 +123,7 @@ pub enum DebugCommand {
         /// Frequencies only the board knows, e.g. XOSC=40MHz (default: [clock] in trace32.toml)
         #[arg(value_name = "CLOCK=FREQUENCY")]
         inputs: Vec<String>,
-        /// Clock tree description (default: chosen by chip from ~/.config/tracebridge/clock)
+        /// Clock tree description (default: chosen by chip from ~/.config/rvdbg/clock)
         #[arg(long, value_name = "FILE")]
         tree: Option<PathBuf>,
         /// Also write the tree as a diagram to <project>/.tracebridge/clock.html

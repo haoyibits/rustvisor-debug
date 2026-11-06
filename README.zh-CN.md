@@ -23,7 +23,7 @@ Rust 调用者使用 `tracebridge::backend::{Project, Session}`：配置加载�
 | `tracebridge adapter` | `t32debugadapter` 前面的 DAP 代理，由 IDE 自动启动 |
 | `tracebridge skill` | 安装 AI agent 用的 skill，说明哪些事交给 tracebridge、哪些交给 Lauterbach 的 t32mcp |
 
-支持的主机：macOS（Apple 芯片、Intel）和 Linux（x86_64、aarch64）。
+支持的主机：Apple 芯片的 macOS 和 Linux（x86_64、aarch64）。不支持 Intel Mac。
 
 ## 安装
 

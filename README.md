@@ -34,7 +34,7 @@ retry of target operations after an error. See [backend usage](docs/backend.md).
 | `tracebridge adapter` | DAP proxy in front of `t32debugadapter`; the IDE starts it |
 | `tracebridge skill` | Install the AI agent skill that splits the work with Lauterbach's t32mcp |
 
-Supported hosts: macOS (Apple silicon, Intel) and Linux (x86_64, aarch64).
+Supported hosts: macOS on Apple silicon and Linux (x86_64, aarch64). Intel Macs are not supported.
 
 ## Install
 

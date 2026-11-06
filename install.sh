@@ -29,6 +29,7 @@ case "$(uname -m)" in
     x86_64 | amd64) arch=x86_64 ;;
     *) fail "unsupported architecture: $(uname -m)" ;;
 esac
+[ "$os-$arch" = apple-darwin-x86_64 ] && fail "Intel Macs are not supported; use an Apple silicon Mac"
 target="$arch-$os"
 asset="tracebridge-$target.tar.gz"
 if [ -n "${TRACEBRIDGE_BASE_URL:-}" ]; then

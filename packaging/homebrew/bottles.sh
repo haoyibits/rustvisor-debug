@@ -9,9 +9,10 @@
 # Homebrew pours a bottle without building anything, so installing from the
 # tap does not need Xcode or the Command Line Tools.
 #
-# Bottle tags: a bottle serves its macOS version and every later one, so the
-# macOS bottles use the version of the release runner (macos-14, Sonoma); the
-# binaries themselves run on macOS 11 and later.
+# Bottle tags: a bottle serves its macOS version and every later one. The
+# binary runs on macOS 11 and later and links nothing from Homebrew, so the
+# Apple silicon bottle is tagged Sonoma whatever runner built it. Intel Macs
+# are not supported.
 set -eu
 
 version="${1:?version, e.g. 0.1.0}"
@@ -20,7 +21,6 @@ dist="${2:?directory with tracebridge-<target>.tar.gz}"
 tag_of() {
     case "$1" in
         aarch64-apple-darwin) echo arm64_sonoma ;;
-        x86_64-apple-darwin) echo sonoma ;;
         aarch64-unknown-linux-musl) echo arm64_linux ;;
         x86_64-unknown-linux-musl) echo x86_64_linux ;;
         *) echo "bottles.sh: no bottle tag for $1" >&2; exit 1 ;;

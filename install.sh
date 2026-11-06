@@ -1,16 +1,16 @@
 #!/bin/sh
 # Install tracebridge from GitHub releases.
 #
-#   curl -fsSL https://github.com/haoyibits/tracebridge/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download/install.sh | sh
 #
 # Environment:
 #   TRACEBRIDGE_VERSION      release tag to install (default: latest), e.g. v0.1.0
 #   TRACEBRIDGE_INSTALL_DIR  target directory (default: ~/.local/bin)
-#   TRACEBRIDGE_REPO         GitHub repository (default: haoyibits/tracebridge)
+#   TRACEBRIDGE_REPO         GitHub repository (default: haoyibits/rustvisor-debug)
 #   TRACEBRIDGE_BASE_URL     download from this URL instead of GitHub (mirrors, testing)
 set -eu
 
-repo="${TRACEBRIDGE_REPO:-haoyibits/tracebridge}"
+repo="${TRACEBRIDGE_REPO:-haoyibits/rustvisor-debug}"
 version="${TRACEBRIDGE_VERSION:-latest}"
 install_dir="${TRACEBRIDGE_INSTALL_DIR:-$HOME/.local/bin}"
 

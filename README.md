@@ -1,44 +1,24 @@
-# tracebridge
+# rustvisor-debug
 
-Drive Lauterbach TRACE32 PowerView from the command line, and debug with it
-from VS Code or RustRover. One static binary, no Python, nothing copied into
-your project except a `trace32.toml`.
+Debug tools for rustvisor boards: flash, inspect
+and debug the target through a Lauterbach TRACE32 probe or ST's StellarLINK.
+Static binaries, no Python, nothing copied into your project except one
+configuration file.
 
 *中文：[README.zh-CN.md](README.zh-CN.md)*
 
-tracebridge is the TRACE32 backend of the rustvisor board runner. Its code stays
-generic; capabilities are added for actual runner needs. Build matrices, Guest
-protocols and acceptance policy remain in rustvisor. The CLI remains available
-for interactive use.
+| Program | For | Configuration |
+|---|---|---|
+| [`rvdbg`](#rvdbg-one-front-end-for-trace32-and-stellarlink) | rustvisor projects: one command set for both probes, picked from what is plugged in | `rvdbg.toml` |
+| [`tracebridge`](#tracebridge-trace32-from-the-command-line) | any project debugged with TRACE32 PowerView; also the TRACE32 library rvdbg and rustvisor-sdk's board runner use | `trace32.toml` |
 
-Rust consumers use `tracebridge::backend::{Project, Session}`. `Project::load`
-resolves configuration offline; `Session::connect` uses an already running
-PowerView without resetting it. The session shares the existing CLI operations
-for reset, flash/load, verify, checks, clocks and trace. Checks return typed
-reports, while RAM buffers have explicit bulk read/write methods. Ordinary
-register/MMIO reads retain their existing access semantics. There is no automatic
-retry of target operations after an error. See [backend usage](docs/backend.md).
-
-| Command | What it does |
-|---|---|
-| `tracebridge init` | Create a commented `trace32.toml` in the current directory |
-| `tracebridge config` | Show the resolved paths and ports, flag anything missing |
-| `tracebridge open` | Start PowerView (or reuse a running one) |
-| `tracebridge flash` | Program the ELF with the project's flash script, load symbols, run |
-| `tracebridge load` | Load symbols without programming, run |
-| `tracebridge rtt` | Bidirectional SEGGER RTT terminal (Ctrl-C to quit) |
-| `tracebridge vscode` | Add the `TRACE32: Attach` debug configuration to `.vscode/` |
-| `tracebridge rustrover` | Add the `TRACE32: Attach` run configuration to `.run/` |
-| `tracebridge debug` | Inspect registers, memory, faults and the flashed image; only `debug reset` resets the target |
-| `tracebridge chips <name>` | Show which flash script `flash` would use for a chip |
-| `tracebridge adapter` | DAP proxy in front of `t32debugadapter`; the IDE starts it |
-| `tracebridge skill` | Install the AI agent skill that splits the work with Lauterbach's t32mcp |
-
-Supported hosts: macOS on Apple silicon and Linux (x86_64, aarch64). Intel Macs are not supported.
+Both come from the same release. The [agent skills](skills/) tell an AI
+agent which command does what. Supported hosts: macOS on Apple silicon and
+Linux (x86_64, aarch64).
 
 ## rvdbg: one front end for TRACE32 and StellarLINK
 
-`rvdbg` is rustvisor's debug front end in the same repository. It reads one
+`rvdbg` is rustvisor's debug front end. It reads one
 `rvdbg.toml` and runs each command on the probe that is plugged in: TRACE32
 through tracebridge's code, or ST's StellarLINK through a patched OpenOCD
 ([`openocd-stellar`](https://github.com/haoyibits/OpenOCD/tree/openocd-automotive-mcu-r3),
@@ -113,27 +93,65 @@ rvdbg [openocd halted]> quit
 - Tab completes command names. The history is kept in `.rvdbg/history`.
 - Read from a pipe, the session runs one command per line without a prompt.
 
+## tracebridge: TRACE32 from the command line
+
+Drive Lauterbach TRACE32 PowerView from the command line, and debug with it
+from VS Code or RustRover. The rest of this README (from Requirements on)
+describes tracebridge; rvdbg passes its TRACE32 commands to the same code,
+so it applies to rvdbg with TRACE32 too.
+
+tracebridge is the TRACE32 backend of the rustvisor board runner. Its code stays
+generic; capabilities are added for actual runner needs. Build matrices, Guest
+protocols and acceptance policy remain in rustvisor. The CLI remains available
+for interactive use.
+
+Rust consumers use `tracebridge::backend::{Project, Session}`. `Project::load`
+resolves configuration offline; `Session::connect` uses an already running
+PowerView without resetting it. The session shares the existing CLI operations
+for reset, flash/load, verify, checks, clocks and trace. Checks return typed
+reports, while RAM buffers have explicit bulk read/write methods. Ordinary
+register/MMIO reads retain their existing access semantics. There is no automatic
+retry of target operations after an error. See [backend usage](docs/backend.md).
+
+| Command | What it does |
+|---|---|
+| `tracebridge init` | Create a commented `trace32.toml` in the current directory |
+| `tracebridge config` | Show the resolved paths and ports, flag anything missing |
+| `tracebridge open` | Start PowerView (or reuse a running one) |
+| `tracebridge flash` | Program the ELF with the project's flash script, load symbols, run |
+| `tracebridge load` | Load symbols without programming, run |
+| `tracebridge rtt` | Bidirectional SEGGER RTT terminal (Ctrl-C to quit) |
+| `tracebridge vscode` | Add the `TRACE32: Attach` debug configuration to `.vscode/` |
+| `tracebridge rustrover` | Add the `TRACE32: Attach` run configuration to `.run/` |
+| `tracebridge debug` | Inspect registers, memory, faults and the flashed image; only `debug reset` resets the target |
+| `tracebridge chips <name>` | Show which flash script `flash` would use for a chip |
+| `tracebridge adapter` | DAP proxy in front of `t32debugadapter`; the IDE starts it |
+| `tracebridge skill` | Install the AI agent skill that splits the work with Lauterbach's t32mcp |
+
+
 ## Install
 
 With Homebrew (macOS or Linux):
 
 ```sh
-brew install haoyibits/tap/tracebridge
+brew install haoyibits/tap/rvdbg          # rvdbg, with openocd-stellar
+brew install haoyibits/tap/tracebridge    # tracebridge
 ```
 
 Or with the install script:
 
 ```sh
-curl -fsSL https://github.com/haoyibits/tracebridge/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download/install.sh | sh
 ```
 
-This installs `tracebridge` into `~/.local/bin` (set `TRACEBRIDGE_INSTALL_DIR`
+This installs `tracebridge` (not rvdbg, which needs openocd-stellar from
+Homebrew) into `~/.local/bin` (set `TRACEBRIDGE_INSTALL_DIR`
 to change it, `TRACEBRIDGE_VERSION=v0.1.0` to pin a release). Make sure the
 directory is on your `PATH`.
 
-Manual install: download `tracebridge-<target>.tar.gz` from the releases page,
-check it against the `.sha256` file, and copy `tracebridge` somewhere on your
-`PATH`.
+Manual install: download `tracebridge-<target>.tar.gz` or
+`rvdbg-<target>.tar.gz` from the releases page, check it against the
+`.sha256` file, and copy the binary somewhere on your `PATH`.
 
 **macOS and browser downloads:** a binary downloaded with a web browser is
 quarantined and Gatekeeper refuses to run it ("cannot be opened because the
@@ -145,7 +163,8 @@ xattr -d com.apple.quarantine /path/to/tracebridge
 
 `install.sh` (curl) does not set the attribute and removes it if present.
 
-From source: `cargo install --path crates/tracebridge`.
+From source: `cargo install --path crates/tracebridge` or
+`cargo install --path crates/rustvisor-debug`.
 
 ## Requirements
 
@@ -849,19 +868,28 @@ and Ctrl-C in `rtt` exits with status 0.
 ## Development
 
 ```sh
-cargo test                 # unit, fake-server and end-to-end tests
+cargo test --all           # unit, fake-server and end-to-end tests
 cargo clippy --all-targets -- -D warnings
 ```
 
-The workspace: `crates/t32rcl`, a pure Rust port of the parts of Lauterbach's
-`lauterbach-trace32-rcl` Python library (TCP only) that tracebridge uses;
-`crates/tracebridge`, the CLI and TRACE32 backend; `crates/oocd`, a client for
-OpenOCD's Tcl port; `crates/stellarbridge`, the OpenOCD backend;
-`crates/probecore`, the analysis both backends share (check files, clock
-trees, ELF compare, RTT, fault report); and `crates/rustvisor-debug`, rvdbg. `t32rcl` is tested
-byte-for-byte against traffic recorded from the Python library; see
-`crates/t32rcl/tools/` and the `capture_proxy` and `smoke` examples for
-recording against a real PowerView.
+A virtual workspace:
+
+| Path | What |
+|---|---|
+| `crates/rustvisor-debug` | `rvdbg`: rustvisor's front end, backend choice, interactive session |
+| `crates/tracebridge` | the TRACE32 backend: CLI and library (`tracebridge::backend`) |
+| `crates/t32rcl` | pure Rust port of the parts of Lauterbach's `lauterbach-trace32-rcl` Python library (TCP only) that tracebridge uses |
+| `crates/stellarbridge` | the OpenOCD (StellarLINK) backend; OpenOCD runs as a separate program |
+| `crates/oocd` | client for OpenOCD's Tcl port |
+| `crates/probecore` | what both backends share: check files, clock trees, ELF compare, RTT, fault report |
+| `skills/` | the agent skills the binaries install |
+
+Dependencies point one way only (`rvdbg → tracebridge, stellarbridge,
+probecore`; `tracebridge → t32rcl, probecore`; `stellarbridge → oocd,
+probecore`); `crates/rustvisor-debug/tests/workspace_deps.rs` checks it.
+`t32rcl` is tested byte-for-byte against traffic recorded from the Python
+library; see `crates/t32rcl/tools/` and the `capture_proxy` and `smoke`
+examples for recording against a real PowerView.
 
 ## License
 

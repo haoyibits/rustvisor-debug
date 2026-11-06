@@ -1,33 +1,19 @@
-# tracebridge
+# rustvisor-debug
 
-从命令行驱动 Lauterbach TRACE32 PowerView，并在 VS Code 或 RustRover 里用它调试。只有一个静态二进制文件，不依赖 Python。项目里只需要放一个 `trace32.toml`。
+rustvisor 板子的调试工具：经 Lauterbach TRACE32 或 ST 的 StellarLINK 烧录、查看和调试目标。都是静态二进制文件，不依赖 Python，项目里只需要放一个配置文件。
 
 *English: [README.md](README.md)*
 
-tracebridge 定位为 rustvisor 板级 runner 的 TRACE32 后端：代码保持通用，功能和优先级由实际 runner 需求决定；构建矩阵、Guest 协议和验收政策留在 rustvisor。现有 CLI 继续用于交互调试。
+| 程序 | 用途 | 配置 |
+|---|---|---|
+| [`rvdbg`](#rvdbgtrace32-和-stellarlink-共用的前端) | rustvisor 项目：两种调试器共用一套命令，按插着的调试器自动选择 | `rvdbg.toml` |
+| [`tracebridge`](#tracebridge从命令行使用-trace32) | 任何用 TRACE32 PowerView 调试的项目；也是 rvdbg 和 rustvisor-sdk 板级 runner 使用的 TRACE32 库 | `trace32.toml` |
 
-Rust 调用者使用 `tracebridge::backend::{Project, Session}`：配置加载完全离线，会话连接已运行的 PowerView，共用 CLI 的复位、烧录、verify、检查和时钟实现。检查返回结构化报告，普通 RAM 提供明确的批量读取接口；寄存器/MMIO 的访问语义不变。操作失败后不自动重试。见 [库接口说明](docs/backend.md)。
-
-| 命令 | 作用 |
-|---|---|
-| `tracebridge init` | 在当前目录生成带注释的 `trace32.toml` |
-| `tracebridge config` | 显示解析后的路径和端口，标出缺失项 |
-| `tracebridge open` | 启动 PowerView（已在运行则复用） |
-| `tracebridge flash` | 用项目的 flash 脚本烧录 ELF，加载符号，运行 |
-| `tracebridge load` | 不烧录，只加载符号并运行 |
-| `tracebridge rtt` | 双向 SEGGER RTT 终端（Ctrl-C 退出） |
-| `tracebridge vscode` | 往 `.vscode/` 写入 `TRACE32: Attach` 调试配置 |
-| `tracebridge rustrover` | 往 `.run/` 写入 `TRACE32: Attach` 运行配置 |
-| `tracebridge debug` | 查看寄存器、内存、异常现场，检查板子上是不是刚编译的 ELF；除了 `debug reset` 都不复位目标 |
-| `tracebridge chips <芯片>` | 查看 `flash` 会给这个芯片用哪个烧录脚本 |
-| `tracebridge adapter` | `t32debugadapter` 前面的 DAP 代理，由 IDE 自动启动 |
-| `tracebridge skill` | 安装 AI agent 用的 skill，说明哪些事交给 tracebridge、哪些交给 Lauterbach 的 t32mcp |
-
-支持的主机：Apple 芯片的 macOS 和 Linux（x86_64、aarch64）。不支持 Intel Mac。
+两个程序在同一个 release 里发布。[agent skill](skills/) 告诉 AI agent 哪个命令做什么。支持的主机：Apple 芯片的 macOS 和 Linux（x86_64、aarch64）。
 
 ## rvdbg：TRACE32 和 StellarLINK 共用的前端
 
-`rvdbg` 是同一个仓库里 rustvisor 的调试前端。它读一个 `rvdbg.toml`，每条命令在当前插着的调试器上执行：TRACE32 走 tracebridge 的代码，ST 的 StellarLINK 走打过补丁的 OpenOCD（[`openocd-stellar`](https://github.com/haoyibits/OpenOCD/tree/openocd-automotive-mcu-r3)，作为独立程序运行）。
+`rvdbg` 是 rustvisor 的调试前端。它读一个 `rvdbg.toml`，每条命令在当前插着的调试器上执行：TRACE32 走 tracebridge 的代码，ST 的 StellarLINK 走打过补丁的 OpenOCD（[`openocd-stellar`](https://github.com/haoyibits/OpenOCD/tree/openocd-automotive-mcu-r3)，作为独立程序运行）。
 
 ```sh
 brew install haoyibits/tap/rvdbg     # 会一起装上 openocd-stellar
@@ -82,21 +68,46 @@ rvdbg [openocd halted]> quit
 - Tab 补全命令名，历史记录在 `.rvdbg/history`。
 - 从管道读入时不显示提示符，每行执行一条命令。
 
+## tracebridge：从命令行使用 TRACE32
+
+从命令行驱动 Lauterbach TRACE32 PowerView，并在 VS Code 或 RustRover 里用它调试。本文从「前提」往后讲的都是 tracebridge；rvdbg 的 TRACE32 命令转给同一套代码，所以这些内容对用 TRACE32 的 rvdbg 也适用。
+
+tracebridge 定位为 rustvisor 板级 runner 的 TRACE32 后端：代码保持通用，功能和优先级由实际 runner 需求决定；构建矩阵、Guest 协议和验收政策留在 rustvisor。现有 CLI 继续用于交互调试。
+
+Rust 调用者使用 `tracebridge::backend::{Project, Session}`：配置加载完全离线，会话连接已运行的 PowerView，共用 CLI 的复位、烧录、verify、检查和时钟实现。检查返回结构化报告，普通 RAM 提供明确的批量读取接口；寄存器/MMIO 的访问语义不变。操作失败后不自动重试。见 [库接口说明](docs/backend.md)。
+
+| 命令 | 作用 |
+|---|---|
+| `tracebridge init` | 在当前目录生成带注释的 `trace32.toml` |
+| `tracebridge config` | 显示解析后的路径和端口，标出缺失项 |
+| `tracebridge open` | 启动 PowerView（已在运行则复用） |
+| `tracebridge flash` | 用项目的 flash 脚本烧录 ELF，加载符号，运行 |
+| `tracebridge load` | 不烧录，只加载符号并运行 |
+| `tracebridge rtt` | 双向 SEGGER RTT 终端（Ctrl-C 退出） |
+| `tracebridge vscode` | 往 `.vscode/` 写入 `TRACE32: Attach` 调试配置 |
+| `tracebridge rustrover` | 往 `.run/` 写入 `TRACE32: Attach` 运行配置 |
+| `tracebridge debug` | 查看寄存器、内存、异常现场，检查板子上是不是刚编译的 ELF；除了 `debug reset` 都不复位目标 |
+| `tracebridge chips <芯片>` | 查看 `flash` 会给这个芯片用哪个烧录脚本 |
+| `tracebridge adapter` | `t32debugadapter` 前面的 DAP 代理，由 IDE 自动启动 |
+| `tracebridge skill` | 安装 AI agent 用的 skill，说明哪些事交给 tracebridge、哪些交给 Lauterbach 的 t32mcp |
+
+
 ## 安装
 
 用 Homebrew（macOS 或 Linux）：
 
 ```sh
-brew install haoyibits/tap/tracebridge
+brew install haoyibits/tap/rvdbg          # rvdbg，连同 openocd-stellar
+brew install haoyibits/tap/tracebridge    # tracebridge
 ```
 
 或者用安装脚本：
 
 ```sh
-curl -fsSL https://github.com/haoyibits/tracebridge/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download/install.sh | sh
 ```
 
-默认装到 `~/.local/bin`：用 `TRACEBRIDGE_INSTALL_DIR` 改目录，用 `TRACEBRIDGE_VERSION=v0.1.0` 固定版本。这个目录需要在 `PATH` 里。
+安装脚本只装 tracebridge（rvdbg 需要 Homebrew 的 openocd-stellar），默认装到 `~/.local/bin`：用 `TRACEBRIDGE_INSTALL_DIR` 改目录，用 `TRACEBRIDGE_VERSION=v0.1.0` 固定版本。这个目录需要在 `PATH` 里。
 
 **macOS 用浏览器下载时**：下载的文件会被加上隔离属性，Gatekeeper 会拒绝运行。执行一次：
 
@@ -106,7 +117,7 @@ xattr -d com.apple.quarantine /path/to/tracebridge
 
 用 `install.sh`（curl）安装不会带这个属性；如果有，脚本会顺手去掉。
 
-从源码安装：`cargo install --path crates/tracebridge`。
+从源码安装：`cargo install --path crates/tracebridge` 或 `cargo install --path crates/rustvisor-debug`。
 
 ## 前提
 
@@ -514,6 +525,15 @@ Lauterbach 官方提供了 [t32mcp](https://gitlab.com/lauterbach/t32mcp)（让 
 - 运行时文件放在 `.tracebridge/`。
 - `rtt --protocol` 参数删掉了（只支持 TCP）。
 - `rtt` 按 Ctrl-C 退出时退出码为 0。
+
+## 开发
+
+```sh
+cargo test --all
+cargo clippy --all-targets -- -D warnings
+```
+
+虚拟工作区：`crates/rustvisor-debug`（rvdbg）、`crates/tracebridge`（TRACE32 后端，CLI 和库）、`crates/t32rcl`（Lauterbach RCL Python 库 TCP 部分的纯 Rust 移植）、`crates/stellarbridge`（OpenOCD 后端，OpenOCD 作为独立程序运行）、`crates/oocd`（OpenOCD Tcl 端口客户端）、`crates/probecore`（两个后端共用的 check、时钟树、ELF 比对、RTT、fault 报告），以及 `skills/`（两个程序安装的 agent skill）。依赖只能单向，由 `crates/rustvisor-debug/tests/workspace_deps.rs` 检查。
 
 ## 许可证
 

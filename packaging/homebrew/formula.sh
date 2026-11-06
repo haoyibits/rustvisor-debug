@@ -16,7 +16,7 @@ set -eu
 
 version="${1:?version, e.g. 0.1.0}"
 dist="${2:?directory with the .sha256 files}"
-repo="${3:-haoyibits/tracebridge}"
+repo="${3:-haoyibits/rustvisor-debug}"
 program="${4:-tracebridge}"
 base="https://github.com/$repo/releases/download/v$version"
 

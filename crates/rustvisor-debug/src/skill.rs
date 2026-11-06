@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-const TEMPLATE: &str = include_str!("../assets/skill.md");
+const TEMPLATE: &str = include_str!("../../../skills/rvdbg/SKILL.md");
 
 /// The skill with this rvdbg's version in its frontmatter.
 pub fn render() -> String {

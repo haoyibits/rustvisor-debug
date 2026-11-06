@@ -17,7 +17,7 @@ use crate::errors::Result;
 use crate::pycompat::{Env, expanduser};
 use crate::style::Style;
 
-const TEMPLATE: &str = include_str!("../assets/skill.md");
+const TEMPLATE: &str = include_str!("../../../skills/tracebridge/SKILL.md");
 
 /// The skill's directory name, equal to `name` in its frontmatter.
 const NAME: &str = "tracebridge";

@@ -14,7 +14,7 @@ version = "0.1.19"
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
-repository = "https://github.com/haoyibits/tracebridge"
+repository = "https://github.com/haoyibits/rustvisor-debug"
 
 [profile.release]
 lto = true

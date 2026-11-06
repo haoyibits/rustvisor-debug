@@ -9,6 +9,7 @@
 
 pub mod decode;
 pub mod elf;
+pub mod rtt;
 pub mod style;
 pub mod target;
 

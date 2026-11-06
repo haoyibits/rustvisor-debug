@@ -15,6 +15,9 @@ use std::time::{Duration, Instant};
 use probecore::elf::{self, Segment, SegmentResult};
 use probecore::target::{self, Target, TargetAddress};
 
+/// A Tcl word that stands for its text literally, for building commands.
+pub use oocd::quote;
+
 /// A failed backend operation, as one message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);
@@ -46,15 +49,25 @@ pub struct ServerConfig {
     pub commands: Vec<String>,
     /// The Tcl RPC port on 127.0.0.1.
     pub tcl_port: u16,
-    /// OpenOCD's stdout and stderr go here (appended).
-    pub log: PathBuf,
+    /// The GDB server port; `None` turns the GDB server off.
+    pub gdb_port: Option<u16>,
+    /// The one target that gets the GDB server on `gdb_port` (e.g. the
+    /// core). `None`: OpenOCD numbers a server for every target from
+    /// `gdb_port` upwards, MEM-APs included.
+    pub gdb_target: Option<String>,
+    /// OpenOCD's stdout and stderr go here (appended); `None` leaves them
+    /// on this process's terminal.
+    pub log: Option<PathBuf>,
     /// How long `init` may take until the Tcl port answers.
     pub startup_timeout: Duration,
 }
 
 impl ServerConfig {
-    /// The OpenOCD arguments. The Tcl port is set first; the GDB and telnet
-    /// servers are off, so a second instance does not collide on them.
+    /// The OpenOCD arguments. The ports are set first; the telnet server is
+    /// off, and so is the GDB server unless `gdb_port` is given. With a
+    /// `gdb_target`, only that target serves GDB: the global port stays
+    /// disabled and the target's `-gdb-port` is set after the configuration
+    /// files (which create it) and before `init` (which starts the servers).
     pub fn arguments(&self) -> Vec<String> {
         let mut arguments = Vec::new();
         for directory in &self.search {
@@ -62,13 +75,24 @@ impl ServerConfig {
             arguments.push(directory.display().to_string());
         }
         arguments.push("-c".into());
+        let gdb = match (self.gdb_port, &self.gdb_target) {
+            (Some(port), None) => port.to_string(),
+            _ => "disabled".to_string(),
+        };
         arguments.push(format!(
-            "tcl_port {}; gdb_port disabled; telnet_port disabled",
+            "tcl_port {}; gdb_port {gdb}; telnet_port disabled",
             self.tcl_port
         ));
         for file in &self.config {
             arguments.push("-f".into());
             arguments.push(file.clone());
+        }
+        if let (Some(port), Some(target)) = (self.gdb_port, &self.gdb_target) {
+            arguments.push("-c".into());
+            arguments.push(format!(
+                "{} configure -gdb-port {port}",
+                oocd::quote(target)
+            ));
         }
         for command in &self.commands {
             arguments.push("-c".into());
@@ -83,7 +107,23 @@ impl ServerConfig {
 pub struct Server {
     child: Child,
     client: oocd::Client,
-    log: PathBuf,
+    log: Option<PathBuf>,
+}
+
+/// Where OpenOCD's output is, and its last lines, for error messages.
+fn log_note(path: Option<&Path>) -> String {
+    match path {
+        Some(path) => format!(
+            "end of the OpenOCD log ({}):\n{}",
+            path.display(),
+            log_tail(path, 12)
+        ),
+        None => "see OpenOCD's output above".to_string(),
+    }
+}
+
+fn port_free(port: u16) -> bool {
+    TcpListener::bind(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))).is_ok()
 }
 
 /// The last lines of OpenOCD's log, for error messages.
@@ -97,29 +137,42 @@ impl Server {
     pub fn start(config: &ServerConfig) -> Result<Server> {
         let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, config.tcl_port));
         // Another OpenOCD on the port would answer in place of ours.
-        if TcpListener::bind(address).is_err() {
-            fail!(
-                "port {} is in use (another OpenOCD?); stop it or choose another tcl_port",
-                config.tcl_port
-            );
+        for (name, port) in [
+            ("tcl_port", Some(config.tcl_port)),
+            ("gdb_port", config.gdb_port),
+        ] {
+            if let Some(port) = port {
+                if !port_free(port) {
+                    fail!(
+                        "port {port} ({name}) is in use (another OpenOCD or debug session?); \
+                         stop it or choose another port"
+                    );
+                }
+            }
         }
-        if let Some(parent) = config.log.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error(format!("cannot create {}: {e}", parent.display())))?;
-        }
-        let log = File::options()
-            .create(true)
-            .append(true)
-            .open(&config.log)
-            .map_err(|e| Error(format!("cannot open {}: {e}", config.log.display())))?;
-        let log_err = log
-            .try_clone()
-            .map_err(|e| Error(format!("cannot open {}: {e}", config.log.display())))?;
+        let (stdout, stderr) = match &config.log {
+            Some(path) => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| Error(format!("cannot create {}: {e}", parent.display())))?;
+                }
+                let log = File::options()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map_err(|e| Error(format!("cannot open {}: {e}", path.display())))?;
+                let log_err = log
+                    .try_clone()
+                    .map_err(|e| Error(format!("cannot open {}: {e}", path.display())))?;
+                (Stdio::from(log), Stdio::from(log_err))
+            }
+            None => (Stdio::inherit(), Stdio::inherit()),
+        };
         let mut child = Command::new(&config.executable)
             .args(config.arguments())
             .stdin(Stdio::null())
-            .stdout(log)
-            .stderr(log_err)
+            .stdout(stdout)
+            .stderr(stderr)
             .spawn()
             .map_err(|e| Error(format!("cannot start {}: {e}", config.executable.display())))?;
 
@@ -127,9 +180,8 @@ impl Server {
         loop {
             if let Ok(Some(status)) = child.try_wait() {
                 fail!(
-                    "OpenOCD exited during start-up ({status}); its log {}:\n{}",
-                    config.log.display(),
-                    log_tail(&config.log, 15)
+                    "OpenOCD exited during start-up ({status}); {}",
+                    log_note(config.log.as_deref())
                 );
             }
             if let Ok(client) = oocd::Client::connect(address, Duration::from_secs(5)) {
@@ -143,19 +195,18 @@ impl Server {
                 let _ = child.kill();
                 let _ = child.wait();
                 fail!(
-                    "OpenOCD did not open its Tcl port {} within {:?}; its log {}:\n{}",
+                    "OpenOCD did not open its Tcl port {} within {:?}; {}",
                     config.tcl_port,
                     config.startup_timeout,
-                    config.log.display(),
-                    log_tail(&config.log, 15)
+                    log_note(config.log.as_deref())
                 );
             }
             std::thread::sleep(Duration::from_millis(100));
         }
     }
 
-    pub fn log(&self) -> &Path {
-        &self.log
+    pub fn log(&self) -> Option<&Path> {
+        self.log.as_deref()
     }
 
     /// Run a Tcl command; errors carry the end of OpenOCD's log, where the
@@ -163,9 +214,8 @@ impl Server {
     pub fn eval(&mut self, command: &str) -> Result<String> {
         self.client.eval(command).map_err(|error| {
             Error(format!(
-                "{command}: {error}\nend of the OpenOCD log ({}):\n{}",
-                self.log.display(),
-                log_tail(&self.log, 10)
+                "{command}: {error}\n{}",
+                log_note(self.log.as_deref())
             ))
         })
     }
@@ -174,6 +224,14 @@ impl Server {
         self.client
             .set_timeout(timeout)
             .map_err(|error| Error(error.to_string()))
+    }
+
+    /// Wait until OpenOCD exits by itself (e.g. `shutdown` from an event
+    /// handler, or Ctrl-C), without asking it to.
+    pub fn wait(mut self) -> Result<std::process::ExitStatus> {
+        self.child
+            .wait()
+            .map_err(|error| Error(format!("waiting for OpenOCD: {error}")))
     }
 
     /// Ask OpenOCD to exit and wait for it.
@@ -626,7 +684,9 @@ mod tests {
             config: vec!["board/a.cfg".into(), "extra.cfg".into()],
             commands: vec!["adapter speed 4000".into()],
             tcl_port: 6666,
-            log: "/tmp/x.log".into(),
+            gdb_port: None,
+            gdb_target: None,
+            log: Some("/tmp/x.log".into()),
             startup_timeout: Duration::from_secs(1),
         };
         assert_eq!(
@@ -644,6 +704,32 @@ mod tests {
                 "adapter speed 4000",
             ]
         );
+        let with_gdb = ServerConfig {
+            gdb_port: Some(3333),
+            ..config
+        };
+        assert_eq!(
+            with_gdb.arguments()[3],
+            "tcl_port 6666; gdb_port 3333; telnet_port disabled"
+        );
+        let one_target = ServerConfig {
+            gdb_target: Some("chip.core".into()),
+            ..with_gdb
+        };
+        let arguments = one_target.arguments();
+        assert_eq!(
+            arguments[3],
+            "tcl_port 6666; gdb_port disabled; telnet_port disabled"
+        );
+        assert_eq!(
+            arguments[8..],
+            [
+                "-c",
+                "chip.core configure -gdb-port 3333",
+                "-c",
+                "adapter speed 4000"
+            ]
+        );
     }
 
     fn config(dir: &Path, executable: &str, port: u16) -> ServerConfig {
@@ -653,7 +739,9 @@ mod tests {
             config: Vec::new(),
             commands: Vec::new(),
             tcl_port: port,
-            log: dir.join("openocd.log"),
+            gdb_port: None,
+            gdb_target: None,
+            log: Some(dir.join("openocd.log")),
             startup_timeout: Duration::from_secs(2),
         }
     }

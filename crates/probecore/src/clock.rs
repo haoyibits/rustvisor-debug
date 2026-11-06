@@ -726,6 +726,9 @@ pub struct Report {
     pub registers: Registers,
     /// Roots without a frequency.
     pub missing: Vec<String>,
+    /// Where the tool's configuration takes those frequencies, for the hint
+    /// in the text output (tracebridge: `[clock] in trace32.toml`).
+    pub inputs_hint: String,
 }
 
 /// A factor or a field value: integers without decimals.
@@ -962,6 +965,7 @@ pub fn evaluate(
         clocks,
         registers,
         missing,
+        inputs_hint: "[clock] in the project configuration".to_string(),
     })
 }
 
@@ -1062,8 +1066,9 @@ impl Report {
             let first = &self.missing[0];
             lines.push(style.warn(format!(
                 "{} not given: pass {first}=<frequency> (e.g. {first}=40MHz) or set it under \
-                 [clock] in trace32.toml",
-                self.missing.join(", ")
+                 {}",
+                self.missing.join(", "),
+                self.inputs_hint
             )));
         }
         lines.join("\n")

@@ -812,7 +812,7 @@ fn per_check<T>(result: TargetResult<T>) -> TargetResult<Result<T, Error>> {
 }
 
 /// The clock tree for `read.clock` checks: its description and the board's
-/// frequencies (`[clock]` in trace32.toml).
+/// frequencies (from the tool's configuration).
 pub struct Clocks<'a> {
     pub tree: &'a clock::Tree,
     pub inputs: &'a [(String, f64)],

@@ -31,11 +31,9 @@ pub fn parse_inputs(arguments: &[String]) -> DResult<Vec<(String, f64)>> {
 
 /// Read the registers with `Data.Long()` and compute every clock.
 pub fn evaluate(probe: &mut dyn Probe, tree: &Tree, inputs: &[(String, f64)]) -> DResult<Report> {
-    Ok(probecore::clock::evaluate(
-        &mut T32Target::new(probe),
-        tree,
-        inputs,
-    )?)
+    let mut report = probecore::clock::evaluate(&mut T32Target::new(probe), tree, inputs)?;
+    report.inputs_hint = "[clock] in trace32.toml".to_string();
+    Ok(report)
 }
 
 #[cfg(test)]

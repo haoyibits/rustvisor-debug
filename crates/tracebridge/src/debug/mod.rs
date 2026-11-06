@@ -14,6 +14,7 @@ pub(crate) mod elf;
 mod perfile;
 pub(crate) mod probe;
 mod repl;
+pub(crate) mod t32target;
 mod trace;
 
 use probecore::decode;

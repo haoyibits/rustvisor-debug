@@ -86,6 +86,26 @@ impl From<t32rcl::Error> for DebugError {
 
 pub type DResult<T> = std::result::Result<T, DebugError>;
 
+pub use probecore::target::hex32;
+
+impl From<probecore::Error> for DebugError {
+    fn from(error: probecore::Error) -> Self {
+        DebugError {
+            message: error.message,
+            lost: error.lost,
+        }
+    }
+}
+
+impl From<DebugError> for probecore::Error {
+    fn from(error: DebugError) -> Self {
+        probecore::Error {
+            message: error.message,
+            lost: error.lost,
+        }
+    }
+}
+
 /// Return early with a `DebugError`.
 macro_rules! fail {
     ($($arg:tt)*) => {
@@ -144,14 +164,6 @@ pub fn value_to_json(value: &Value) -> serde_json::Value {
     }
 }
 
-pub fn hex32(value: u64) -> String {
-    if value <= 0xFFFF_FFFF {
-        format!("0x{value:08X}")
-    } else {
-        format!("0x{value:X}")
-    }
-}
-
 pub fn eval(probe: &mut dyn Probe, expression: &str) -> DResult<Value> {
     Ok(probe.fnc(expression)?)
 }
@@ -185,76 +197,7 @@ pub fn eval_text(probe: &mut dyn Probe, expression: &str) -> DResult<String> {
     })
 }
 
-/// A classified address as TRACE32 prints it: `C15:0x4025`, `AD:0x70F40000`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetAddress {
-    /// Access class; empty when there is none.
-    pub class: String,
-    pub value: u64,
-}
-
-impl TargetAddress {
-    /// `<class>:<number>` with a `0x` hexadecimal or decimal number (TRACE32
-    /// also marks decimals with a trailing dot). The class is letters and
-    /// digits only, so register names and PER paths never parse.
-    pub fn parse(text: &str) -> Option<TargetAddress> {
-        let text = text.trim();
-        let (class, number) = text.rsplit_once(':')?;
-        if !class.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return None;
-        }
-        let value = if let Some(hex) = number
-            .strip_prefix("0x")
-            .or_else(|| number.strip_prefix("0X"))
-        {
-            u64::from_str_radix(hex, 16).ok()?
-        } else {
-            let digits = number.strip_suffix('.').unwrap_or(number);
-            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            digits.parse().ok()?
-        };
-        Some(TargetAddress {
-            class: class.to_string(),
-            value,
-        })
-    }
-
-    /// Coprocessor registers (`C15:`, `C14:` and their variants) are core
-    /// registers: they can only be read while the core is halted.
-    pub fn is_coprocessor(&self) -> bool {
-        let class = self.class.to_ascii_uppercase();
-        class.ends_with("C15") || class.ends_with("C14")
-    }
-
-    /// A Hyp-mode CP15 register: class `C15` and op1 = 4 (bits 12-14 of the
-    /// command-line address), e.g. HCR `C15:0x4011`, HSR `C15:0x4025`.
-    pub fn is_hyp_cp15(&self) -> bool {
-        self.class.eq_ignore_ascii_case("C15") && (self.value >> 12) & 0x7 == 4
-    }
-
-    /// The same class at `value + offset`, for PRACTICE expressions.
-    pub fn offset(&self, offset: u64) -> TargetAddress {
-        TargetAddress {
-            class: self.class.clone(),
-            value: self.value.wrapping_add(offset),
-        }
-    }
-}
-
-impl fmt::Display for TargetAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.class.is_empty() {
-            write!(f, "0x{:X}", self.value)
-        } else if self.is_coprocessor() {
-            // As PER files write them: c15:0x000E.
-            write!(f, "{}:0x{:04X}", self.class, self.value)
-        } else {
-            write!(f, "{}:0x{:X}", self.class, self.value)
-        }
-    }
-}
+pub use probecore::target::TargetAddress;
 
 /// The command-line form of an address that PER.ADDRESS() returned, given its
 /// access class and `ADDRESS.OFFSET()`.

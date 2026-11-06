@@ -8,4 +8,8 @@
 #![forbid(unsafe_code)]
 
 pub mod decode;
+pub mod elf;
 pub mod style;
+pub mod target;
+
+pub use target::{Error, Memory, Result, Target, TargetAddress};

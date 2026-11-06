@@ -214,7 +214,15 @@ pub fn load_config(config_file: &Path, env: &Env) -> Result<Config> {
             error.message().trim_end()
         )
     })?;
+    config_from_document(&document, config_file, env)
+}
 
+/// The configuration from a parsed document with the sections of
+/// trace32.toml. `config_file` is where it came from: relative paths are
+/// relative to its directory, and the IDE files and the PowerView toolbar
+/// pass it back with `--config`.
+pub fn config_from_document(document: &Table, config_file: &Path, env: &Env) -> Result<Config> {
+    let document = document.clone();
     let project = table(&document, "project")?;
     let target = table(&document, "target")?;
     let flash = table(&document, "flash")?;

@@ -59,6 +59,69 @@ impl Project {
         ))
     }
 
+    /// The configuration from a parsed document with the sections of
+    /// trace32.toml (`project`, `target`, `flash`, `rtos`, `trace32`, `rtt`,
+    /// `clock`), e.g. assembled by a front end from its own file.
+    /// `config_file` is that file: relative paths are relative to its
+    /// directory, and the IDE files and the PowerView toolbar run
+    /// `<exe> --config <config_file> adapter|flash|load`.
+    pub fn from_document(document: &toml::Table, config_file: &Path) -> Result<Self> {
+        let env = pycompat::process_env();
+        Ok(Self(config::config_from_document(
+            document,
+            config_file,
+            &env,
+        )?))
+    }
+
+    /// `<project>/.tracebridge`: the PowerView log and the toolbar script.
+    pub fn run_dir(&self) -> &Path {
+        &self.0.run_dir
+    }
+
+    /// Start PowerView unless one answers on the RCL port, then flash the
+    /// images, load the symbols and run (`tracebridge flash`).
+    pub fn flash(&self) -> Result<()> {
+        crate::cli::open(
+            &self.0,
+            Some(target::Action::Flash),
+            &pycompat::process_env(),
+        )
+    }
+
+    /// Start PowerView if needed, then load the symbols without flashing or
+    /// resetting (`tracebridge load`).
+    pub fn load_symbols(&self) -> Result<()> {
+        crate::cli::open(
+            &self.0,
+            Some(target::Action::Load),
+            &pycompat::process_env(),
+        )
+    }
+
+    /// Start PowerView if needed (`tracebridge open`).
+    pub fn open(&self) -> Result<()> {
+        crate::cli::open(&self.0, None, &pycompat::process_env())
+    }
+
+    /// Run the DAP proxy in front of t32debugadapter until the IDE
+    /// disconnects or Ctrl-C (`tracebridge adapter`). PowerView must run.
+    pub fn run_adapter(&self) -> Result<()> {
+        crate::cli::adapter(&self.0)
+    }
+
+    /// Merge the TRACE32 attach configuration into `.vscode/` (`tracebridge
+    /// vscode`); its task runs `<exe> --config <config_file> adapter`.
+    pub fn install_vscode(&self, exe: &Path) -> Result<()> {
+        crate::vscode::installer::install(&self.0, exe)
+    }
+
+    /// Write `.run/TRACE32 Attach.run.xml` (`tracebridge rustrover`); it runs
+    /// `<exe> --config <config_file> adapter`.
+    pub fn install_rustrover(&self, exe: &Path) -> Result<PathBuf> {
+        crate::rustrover::install(&self.0, exe)
+    }
+
     /// Explicit images override project defaults, including an empty extra-image list.
     pub fn images(&mut self, elf: PathBuf, extra: Vec<PathBuf>, program: String) {
         self.0.elf = elf;
@@ -229,6 +292,32 @@ fn success(result: Outcome) -> Result<serde_json::Value> {
         return Err(bridge_error!("{}", result.text));
     }
     Ok(result.json)
+}
+
+/// Which of the two VS Code files [`merge_vscode_file`] writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VscodeFile {
+    /// `tasks.json`: entries are matched by `label`.
+    Tasks,
+    /// `launch.json`: entries are matched by `name`.
+    Launch,
+}
+
+/// Merge `template` (a whole `tasks.json` or `launch.json` document) into
+/// `path`: entries with the same label or name are replaced, all others are
+/// kept, comments and trailing commas in the existing file are accepted,
+/// the old file is backed up and the new one written atomically. Prints
+/// what it did, as `tracebridge vscode` does.
+pub fn merge_vscode_file(
+    path: &Path,
+    file: VscodeFile,
+    template: &serde_json::Value,
+) -> Result<Option<PathBuf>> {
+    let kind = match file {
+        VscodeFile::Tasks => crate::vscode::installer::Kind::Tasks,
+        VscodeFile::Launch => crate::vscode::installer::Kind::Launch,
+    };
+    crate::vscode::installer::merge_into(kind, path, template)
 }
 
 /// The same ELF parser used by verify: load addresses and bytes, excluding debug information.

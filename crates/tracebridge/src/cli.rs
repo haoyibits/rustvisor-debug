@@ -204,7 +204,7 @@ fn run(cli: Cli) -> Result<i32> {
 }
 
 /// `adapter` (`_run` in cli.py): the IDE starts it before attaching.
-fn adapter(config: &Config) -> Result<()> {
+pub(crate) fn adapter(config: &Config) -> Result<()> {
     if powerview::port_open(config.dap_port) {
         info(&format!(
             "debug adapter already listening on {}",
@@ -226,7 +226,7 @@ fn adapter(config: &Config) -> Result<()> {
 }
 
 /// `open`, `flash` and `load` (`_run` in cli.py).
-fn open(config: &Config, action: Option<Action>, env: &pycompat::Env) -> Result<()> {
+pub(crate) fn open(config: &Config, action: Option<Action>, env: &pycompat::Env) -> Result<()> {
     // Check the ELF and the flash script before starting PowerView.
     let choice = match action {
         Some(action) => target::validate_target_action(config, action, env)?,

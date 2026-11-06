@@ -49,6 +49,8 @@ runs OpenOCD's GDB server for GDB or VS Code.
 ## Rules
 
 - Run rvdbg inside the project. Put `--json` after the command's arguments.
+- Always run one command per call (`rvdbg status --json`). Bare `rvdbg`
+  starts an interactive session for the user; do not start it yourself.
 - Ask the user before `flash`, `load`, `reset`, `halt`, `go`, `run-until`,
   `attach`, `down`, `do`, `cmd`, `check --halt`, and anything with
   `--write-otp`. `flash` resets the target and erases flash; it can take

@@ -453,7 +453,9 @@ version = "0.1.19"
 dependencies = [
  "clap",
  "probecore",
+ "rustyline",
  "serde_json",
+ "signal-hook",
  "stellarbridge",
  "tempfile",
  "toml",

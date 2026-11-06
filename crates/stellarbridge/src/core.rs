@@ -32,8 +32,11 @@ pub enum RunState {
 /// How [`CoreTarget::run_until`] ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunUntil {
-    /// Where the core stopped; `None`: it still ran at the timeout.
+    /// Where the core stopped; `None`: it still ran at the timeout or when
+    /// `cancel` said to stop waiting.
     pub pc: Option<u64>,
+    /// Waiting ended because `cancel` returned true.
+    pub cancelled: bool,
     pub waited: std::time::Duration,
     pub breakpoint_removed: bool,
 }
@@ -148,6 +151,7 @@ impl CoreTarget<'_> {
         &mut self,
         address: u64,
         timeout: std::time::Duration,
+        cancel: &dyn Fn() -> bool,
     ) -> target::Result<RunUntil> {
         if self.run_state()? != RunState::Halted {
             return Err(target::Error::new(format!(
@@ -171,12 +175,14 @@ impl CoreTarget<'_> {
                 Ok(_) => {}
                 Err(error) => return Err(error),
             }
-            if start.elapsed() > timeout {
+            let cancelled = cancel();
+            if cancelled || start.elapsed() > timeout {
                 let removed = self.eval(&format!("rbp 0x{address:X}")).is_ok();
                 return Ok(RunUntil {
                     pc: None,
                     waited: start.elapsed(),
                     breakpoint_removed: removed,
+                    cancelled,
                 });
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -188,6 +194,7 @@ impl CoreTarget<'_> {
             pc: Some(pc),
             waited,
             breakpoint_removed: removed,
+            cancelled: false,
         })
     }
 
@@ -515,7 +522,7 @@ mod tests {
             symbols: SymbolTable::default(),
         };
         let result = target
-            .run_until(0x2800_0100, std::time::Duration::from_secs(1))
+            .run_until(0x2800_0100, std::time::Duration::from_secs(1), &|| false)
             .unwrap();
         assert_eq!(result.pc, Some(0x2800_0100));
         assert!(result.breakpoint_removed);

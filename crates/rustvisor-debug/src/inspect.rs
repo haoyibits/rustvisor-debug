@@ -166,11 +166,18 @@ impl Request {
     }
 }
 
-pub fn run(config: &Config, project: &Project, request: Request) -> Result<Outcome, String> {
+/// Run `request` through `server`. `cancel` says when Ctrl-C asked to stop
+/// waiting (`run-until`).
+pub fn run(
+    config: &Config,
+    project: &Project,
+    server: &mut stellarbridge::Server,
+    request: Request,
+    cancel: &dyn Fn() -> bool,
+) -> Result<Outcome, String> {
     let style = Style::stdout();
     let openocd = config.openocd()?;
-    let mut server = connect(config)?;
-    let mut target = core_target(&mut server, openocd, symbols(config))?;
+    let mut target = core_target(server, openocd, symbols(config))?;
     let cwd = std::env::current_dir().map_err(text)?;
     match request {
         Request::Status => status(&mut target, style),
@@ -249,7 +256,7 @@ pub fn run(config: &Config, project: &Project, request: Request) -> Result<Outco
         Request::RunUntil {
             target: location,
             timeout,
-        } => run_until(&mut target, &location, timeout, style),
+        } => run_until(&mut target, &location, timeout, cancel, style),
         Request::Clock { inputs, tree } => {
             let tree = tree.map(|path| cwd.join(path));
             let mut given = project.clock_inputs().to_vec();
@@ -376,6 +383,7 @@ fn run_until(
     target: &mut CoreTarget,
     text: &str,
     timeout: Duration,
+    cancel: &dyn Fn() -> bool,
     style: Style,
 ) -> Result<Outcome, String> {
     let (address, _) = location(target, text)?;
@@ -383,7 +391,9 @@ fn run_until(
         return Err(format!("{text} is not a code address"));
     }
     let address = address.value;
-    let result = target.run_until(address, timeout).map_err(text_of)?;
+    let result = target
+        .run_until(address, timeout, cancel)
+        .map_err(text_of)?;
     let target_text = format!("{} ({})", style.symbol(text), hex32(address));
     let Some(pc) = result.pc else {
         let breakpoint = if result.breakpoint_removed {
@@ -391,9 +401,13 @@ fn run_until(
         } else {
             "the breakpoint stays set until the core stops ('rvdbg halt' stops it)"
         };
+        let why = if result.cancelled {
+            "interrupted before reaching it".to_string()
+        } else {
+            format!("not reached within {}s", timeout.as_secs())
+        };
         return Err(format!(
-            "{text} was not reached within {}s; the core keeps running and {breakpoint}",
-            timeout.as_secs()
+            "{text}: {why}; the core keeps running and {breakpoint}"
         ));
     };
     let pc_symbol = target.symbolize(pc);
@@ -538,7 +552,12 @@ pub struct RttOptions {
 }
 
 /// The RTT terminal through the MEM-AP, so the core keeps running.
-pub fn rtt(config: &Config, project: &Project, options: RttOptions) -> Result<u8, String> {
+pub fn rtt(
+    config: &Config,
+    project: &Project,
+    server: &mut stellarbridge::Server,
+    options: RttOptions,
+) -> Result<u8, String> {
     let openocd = config.openocd()?;
     let Some(memory_ap) = openocd.memory_ap.clone() else {
         return Err("RTT reads and writes memory through openocd.memory_ap; set it".into());
@@ -567,11 +586,7 @@ pub fn rtt(config: &Config, project: &Project, options: RttOptions) -> Result<u8
                 )
             })?,
     };
-    let mut server = connect(config)?;
-    let mut memory = ApMemory {
-        server: &mut server,
-        memory_ap,
-    };
+    let mut memory = ApMemory { server, memory_ap };
     tracebridge::backend::rtt_terminal(
         &mut memory,
         &tracebridge::backend::RttTerminal {

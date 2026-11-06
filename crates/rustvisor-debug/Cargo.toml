@@ -18,6 +18,12 @@ probecore = { path = "../probecore" }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 stellarbridge = { path = "../stellarbridge" }
 tracebridge = { path = "../tracebridge" }
+# The interactive session: line editing and history, like tracebridge's.
+rustyline = { version = "18.0", default-features = false, features = ["with-file-history"] }
+
+[target.'cfg(unix)'.dependencies]
+# Ctrl-C stops a command in the session, not rvdbg (safe API, no unsafe).
+signal-hook = "0.4.4"
 
 [dev-dependencies]
 tempfile = "3.27"

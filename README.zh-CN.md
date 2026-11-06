@@ -51,12 +51,36 @@ rvdbg flash
 | `mem` | `debug mem` | 经 MEM-AP 读字；符号来自 ELF |
 | `reset`、`attach` | `debug reset`、`debug attach` | `reset halt`（停在复位向量）；attach 不复位 |
 | `run-until` | `debug run-until` | 设硬件断点、运行、等停下、删断点 |
-| `open`、`chips`、`reg`、`eval`、`cmd`、`watch`、`trace`、`do`、`down`、`shell`、`fault --trace`、`verify --t32`、`flash --chip/--script` | 对应同名的 `tracebridge` / `tracebridge debug` 命令（`shell` 是交互式的 `tracebridge debug`） | —（只有 TRACE32：PER 文件、PRACTICE、PowerView 窗口、trace） |
+| `open`、`chips`、`reg`、`eval`、`cmd`、`watch`、`trace`、`do`、`down`、`fault --trace`、`verify --t32`、`flash --chip/--script` | 对应同名的 `tracebridge` / `tracebridge debug` 命令 | —（只有 TRACE32：PER 文件、PRACTICE、PowerView 窗口、trace） |
 | `skill` | 安装 rvdbg 的 agent skill（`~/.claude/skills/rvdbg`） | |
 
 tracebridge 的每个命令在 rvdbg 里都有对应，项目里可以只用 rvdbg。
 
 后端依次取 `--backend`、`rvdbg.toml` 的 `project.backend`、当前插着的调试器：StellarLINK → OpenOCD，Lauterbach 调试器或正在运行的 PowerView → TRACE32，两个都有时用 TRACE32。status、halt、go、fault、verify、check、clock 加 `--json` 时输出和 `tracebridge debug --json` 相同的 JSON。用 StellarLINK 时这些命令优先连 `rvdbg debug` 正在运行的 OpenOCD（Tcl 端口），否则自己启动一个，不复位目标；读核心寄存器和协处理器寄存器要先停核（`rvdbg halt`）。
+
+### 交互会话：只输入 `rvdbg`
+
+不带命令运行 `rvdbg` 时，它找到 `rvdbg.toml`、检测调试器，然后分组列出命令，当前调试器用不了的变暗（只有 TRACE32 能用的命令；没插调试器时是所有要用调试器的命令）。之后直接输入命令，不用加 `rvdbg`（加了也可以）：
+
+```text
+$ rvdbg
+rvdbg 0.1.20  /work/rustvisor-sdk/rvdbg.toml
+backend  openocd (StellarLINK on USB 0483:0499)
+  inspect   status  mem  fault  verify  check  clock  reg  trace  eval
+  control   halt  go  reset  attach  run-until  down  do  cmd
+  ...
+rvdbg [openocd running]> halt
+rvdbg [openocd halted]> mem _SEGGER_RTT 4
+rvdbg [openocd halted]> help run-until
+rvdbg [openocd halted]> quit
+```
+
+- 提示符显示后端，用 OpenOCD 时还显示核在运行还是停着。
+- 用 StellarLINK 时，会话期间一直开着一个 OpenOCD，GDB server 在 `gdb_port` 上。GDB 或 VS Code 的 `StellarLINK: Attach` 可以同时连上，会话里的命令也用这个 OpenOCD。会话里的 `debug` 只提示 GDB server 在哪里。
+- 用 TRACE32 时，每条命令和命令行上一样连 PowerView。
+- 会话自己的命令：`help [命令]`、`backend trace32|openocd`、`reconnect`（重新检测调试器，比如刚插上之后）、`quit` / `exit` / Ctrl-D。Ctrl-C 只停止正在等待的命令（`rtt`、`run-until`），不退出会话。
+- Tab 补全命令名，历史记录在 `.rvdbg/history`。
+- 从管道读入时不显示提示符，每行执行一条命令。
 
 ## 安装
 

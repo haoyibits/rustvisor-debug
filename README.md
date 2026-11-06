@@ -66,7 +66,7 @@ rvdbg flash
 | `mem` | `debug mem` | words through the MEM-AP; symbols from the ELF |
 | `reset`, `attach` | `debug reset`, `debug attach` | `reset halt` (stops at the reset vector); attach does not reset |
 | `run-until` | `debug run-until` | a hardware breakpoint, run, wait, remove it |
-| `open`, `chips`, `reg`, `eval`, `cmd`, `watch`, `trace`, `do`, `down`, `shell`, `fault --trace`, `verify --t32`, `flash --chip/--script` | the `tracebridge` / `tracebridge debug` command of the same name (`shell` is the interactive `tracebridge debug`) | — (TRACE32 only: PER files, PRACTICE, PowerView windows, trace) |
+| `open`, `chips`, `reg`, `eval`, `cmd`, `watch`, `trace`, `do`, `down`, `fault --trace`, `verify --t32`, `flash --chip/--script` | the `tracebridge` / `tracebridge debug` command of the same name | — (TRACE32 only: PER files, PRACTICE, PowerView windows, trace) |
 | `skill` | installs the agent skill for rvdbg (`~/.claude/skills/rvdbg`) | |
 
 Every tracebridge command has an rvdbg command, so a project can use rvdbg
@@ -79,6 +79,39 @@ JSON as `tracebridge debug --json` for status, halt, go, fault, verify,
 check and clock. With StellarLINK these commands use the OpenOCD that
 `rvdbg debug` runs (its Tcl port), or start one that does not reset the
 target; core and coprocessor registers need the core halted (`rvdbg halt`).
+
+### Interactive session: `rvdbg` alone
+
+`rvdbg` without a command finds `rvdbg.toml`, looks for the probe, and
+lists the commands, grouped, with the ones this probe cannot run dimmed
+(TRACE32 only, or everything that needs a probe when none is connected).
+Then type the commands without `rvdbg` (a leading `rvdbg` is accepted too):
+
+```text
+$ rvdbg
+rvdbg 0.1.20  /work/rustvisor-sdk/rvdbg.toml
+backend  openocd (StellarLINK on USB 0483:0499)
+  inspect   status  mem  fault  verify  check  clock  reg  trace  eval
+  control   halt  go  reset  attach  run-until  down  do  cmd
+  ...
+rvdbg [openocd running]> halt
+rvdbg [openocd halted]> mem _SEGGER_RTT 4
+rvdbg [openocd halted]> help run-until
+rvdbg [openocd halted]> quit
+```
+
+- The prompt shows the backend and, with OpenOCD, whether the core runs.
+- With StellarLINK the session keeps one OpenOCD running, with its GDB
+  server open on `gdb_port`. GDB, or VS Code's `StellarLINK: Attach`, can
+  connect while the session runs, and the session's commands use the same
+  OpenOCD. `debug` in the session only says where the GDB server is.
+- With TRACE32 each command talks to PowerView as on the command line.
+- Session commands: `help [command]`, `backend trace32|openocd`,
+  `reconnect` (look for the probe again, e.g. after plugging it in), and
+  `quit` / `exit` / Ctrl-D. Ctrl-C stops a waiting command (`rtt`,
+  `run-until`), not the session.
+- Tab completes command names. The history is kept in `.rvdbg/history`.
+- Read from a pipe, the session runs one command per line without a prompt.
 
 ## Install
 

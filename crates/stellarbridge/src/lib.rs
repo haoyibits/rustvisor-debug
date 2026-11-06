@@ -62,6 +62,9 @@ pub struct ServerConfig {
     pub log: Option<PathBuf>,
     /// How long `init` may take until the Tcl port answers.
     pub startup_timeout: Duration,
+    /// Run OpenOCD in its own process group, so that Ctrl-C in the terminal
+    /// does not stop it (an interactive session that keeps it running).
+    pub own_process_group: bool,
 }
 
 impl ServerConfig {
@@ -171,11 +174,18 @@ impl Server {
             }
             None => (Stdio::inherit(), Stdio::inherit()),
         };
-        let mut child = Command::new(&config.executable)
+        let mut command = Command::new(&config.executable);
+        command
             .args(config.arguments())
             .stdin(Stdio::null())
             .stdout(stdout)
-            .stderr(stderr)
+            .stderr(stderr);
+        #[cfg(unix)]
+        if config.own_process_group {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| Error(format!("cannot start {}: {e}", config.executable.display())))?;
 
@@ -729,6 +739,7 @@ mod tests {
             gdb_target: None,
             log: Some("/tmp/x.log".into()),
             startup_timeout: Duration::from_secs(1),
+            own_process_group: false,
         };
         assert_eq!(
             config.arguments(),
@@ -784,6 +795,7 @@ mod tests {
             gdb_target: None,
             log: Some(dir.join("openocd.log")),
             startup_timeout: Duration::from_secs(2),
+            own_process_group: false,
         }
     }
 

@@ -7,8 +7,8 @@ use std::time::Duration;
 use probecore::style::Style;
 use serde_json::{Value, json};
 
+use crate::EXIT_FAILED;
 use crate::config::{Config, OpenOcd};
-use crate::{EXIT_FAILED, run_dir};
 
 /// The VS Code task that runs `rvdbg debug`; the launch configuration
 /// starts it first.
@@ -37,10 +37,19 @@ pub(crate) fn server_config(
         },
         log,
         startup_timeout: Duration::from_secs(30),
+        own_process_group: false,
     }
 }
 
-pub fn flash(config: &Config, verify: bool, run: bool, write_otp: bool) -> Result<u8, String> {
+/// Flash through `server` (the session's OpenOCD, a running one, or one
+/// started for this command).
+pub fn flash(
+    config: &Config,
+    server: &mut stellarbridge::Server,
+    verify: bool,
+    run: bool,
+    write_otp: bool,
+) -> Result<u8, String> {
     let style = Style::stdout();
     let images = config.images();
     let openocd = config.openocd()?;
@@ -60,15 +69,10 @@ pub fn flash(config: &Config, verify: bool, run: bool, write_otp: bool) -> Resul
             );
         }
     }
-    let log = run_dir(config)?.join("openocd.log");
-    let server_config = server_config(openocd, Some(log.clone()), false);
-    println!(
-        "{} {} {}",
-        style.label("openocd"),
-        openocd.executable.display(),
-        server_config.arguments().join(" ")
-    );
-    let mut server = stellarbridge::Server::start(&server_config).map_err(|e| e.0)?;
+    let log = server
+        .log()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "OpenOCD's output".into());
     let options = stellarbridge::FlashOptions {
         memory_ap: openocd.memory_ap.clone(),
         verify,
@@ -82,11 +86,10 @@ pub fn flash(config: &Config, verify: bool, run: bool, write_otp: bool) -> Resul
         timeout: Duration::from_secs(openocd.timeout),
     };
     let started = std::time::Instant::now();
-    let report = stellarbridge::flash(&mut server, &images, &options, &mut |step| {
+    let report = stellarbridge::flash(server, &images, &options, &mut |step| {
         println!("{} {step}", style.label("step"));
     })
     .map_err(|e| e.0)?;
-    server.shutdown();
 
     for check in &report.otp {
         let status = if check.differing == 0 {
@@ -124,10 +127,7 @@ pub fn flash(config: &Config, verify: bool, run: bool, write_otp: bool) -> Resul
     if report.differing() > 0 {
         println!(
             "{}",
-            style.bad(format!(
-                "flash differs from the images; log {}",
-                log.display()
-            ))
+            style.bad(format!("flash differs from the images; log {log}"))
         );
         return Ok(EXIT_FAILED);
     }
@@ -162,7 +162,7 @@ fn gdb_target_word(openocd: &OpenOcd) -> String {
 }
 
 /// The commands `rvdbg debug` sends once OpenOCD is up.
-fn debug_commands(openocd: &OpenOcd, keep: bool) -> Vec<String> {
+pub(crate) fn debug_commands(openocd: &OpenOcd, keep: bool) -> Vec<String> {
     // The code runs from flash, where GDB's software breakpoints cannot be
     // written; OpenOCD turns every breakpoint into a hardware one.
     let mut commands = vec!["gdb_breakpoint_override hard".to_string()];
@@ -182,6 +182,26 @@ fn debug_commands(openocd: &OpenOcd, keep: bool) -> Vec<String> {
 /// the terminal.
 pub fn debug(config: &Config, keep: bool) -> Result<u8, String> {
     let openocd = config.openocd()?;
+    let target = openocd
+        .gdb_target
+        .clone()
+        .unwrap_or_else(|| "the first target".into());
+    // An interactive rvdbg session already runs OpenOCD with its GDB
+    // server: say so in the lines the VS Code task waits for, and leave it.
+    if stellarbridge::Server::running(openocd.tcl_port)
+        && stellarbridge::Server::running(openocd.gdb_port)
+    {
+        println!(
+            "{STARTING}: using the OpenOCD that is already running (Tcl port {})",
+            openocd.tcl_port
+        );
+        println!(
+            "{READY}{} ({target}); it belongs to the rvdbg session that started it",
+            openocd.gdb_port
+        );
+        let _ = std::io::stdout().flush();
+        return Ok(0);
+    }
     let server_config = server_config(openocd, None, true);
     println!(
         "{STARTING}: {} {}",
@@ -193,10 +213,6 @@ pub fn debug(config: &Config, keep: bool) -> Result<u8, String> {
     for command in debug_commands(openocd, keep) {
         server.eval(&command).map_err(|e| e.0)?;
     }
-    let target = openocd
-        .gdb_target
-        .clone()
-        .unwrap_or_else(|| "the first target".into());
     let until = if keep {
         "Ctrl-C stops it"
     } else {

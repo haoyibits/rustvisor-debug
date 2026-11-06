@@ -12,10 +12,12 @@ mod init;
 mod inspect;
 mod openocd;
 mod probe;
+mod session;
 mod skill;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use probecore::style::Style;
@@ -46,8 +48,9 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Without a command, an interactive session starts
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -191,8 +194,6 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         arguments: Vec<String>,
     },
-    /// TRACE32: interactive session with all of the above (tracebridge debug)
-    Shell,
     /// Compare target memory with the images at their load addresses
     Verify {
         /// ELF file (default: the ELF and the extra images)
@@ -270,20 +271,87 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<u8, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-    if let Commands::Init = cli.command {
+    let flag = cli.backend.map(Backend::from);
+    let Some(command) = cli.command else {
+        return session::run(cli.config.as_deref(), &cwd, flag, cli.json);
+    };
+    if let Commands::Init = command {
         return init_command(&cwd);
     }
-    if let Commands::Skill { dir } = &cli.command {
-        let path = skill::install(dir.as_deref())?;
-        println!("{} {}", Style::stdout().good("installed"), path.display());
-        return Ok(0);
+    if let Commands::Skill { dir } = &command {
+        return install_skill(dir.as_deref());
     }
     let path = config::find(cli.config.as_deref(), &cwd)?;
     let config = config::load(&path)?;
-    let flag = cli.backend.map(Backend::from);
-    match cli.command {
-        Commands::Init => unreachable!("handled above"),
-        Commands::Config => show_config(&config, flag),
+    let mut env = Env {
+        config: &config,
+        flag,
+        json: cli.json,
+        session: None,
+    };
+    execute(&mut env, command)
+}
+
+fn install_skill(dir: Option<&Path>) -> Result<u8, String> {
+    let path = skill::install(dir)?;
+    println!("{} {}", Style::stdout().good("installed"), path.display());
+    Ok(0)
+}
+
+/// Where a command runs: the configuration, the backend choice, and in an
+/// interactive session the session's backend and OpenOCD.
+pub struct Env<'a> {
+    pub config: &'a Config,
+    pub flag: Option<Backend>,
+    pub json: bool,
+    pub session: Option<SessionLink<'a>>,
+}
+
+/// What a session lends its commands.
+pub struct SessionLink<'a> {
+    pub backend: Backend,
+    /// The session's OpenOCD (StellarLINK); `None` when it could not start.
+    pub server: Option<&'a mut stellarbridge::Server>,
+    /// Set by Ctrl-C while a command runs.
+    pub interrupted: &'a AtomicBool,
+}
+
+impl Env<'_> {
+    /// The session's backend, else `--backend`, `project.backend` or the
+    /// connected probe (said on stderr).
+    fn backend(&self) -> Result<Backend, String> {
+        match &self.session {
+            Some(link) => Ok(link.backend),
+            None => select(self.config, self.flag),
+        }
+    }
+
+    /// Run `f` with the session's OpenOCD, or with one for this command: the
+    /// running one (e.g. of `rvdbg debug`), else a new one.
+    fn with_server<T>(
+        &mut self,
+        f: impl FnOnce(&mut stellarbridge::Server) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match &mut self.session {
+            Some(link) => match link.server.as_deref_mut() {
+                Some(server) => f(server),
+                None => Err("OpenOCD is not running in this session; 'reconnect' starts it".into()),
+            },
+            None => {
+                let mut server = inspect::connect(self.config)?;
+                f(&mut server)
+            }
+        }
+    }
+}
+
+/// One command, outside or inside a session.
+fn execute(env: &mut Env, command: Commands) -> Result<u8, String> {
+    let config = env.config;
+    let flag = env.flag;
+    match command {
+        Commands::Init | Commands::Skill { .. } => unreachable!("handled before the configuration"),
+        Commands::Config => show_config(config, flag),
         Commands::Flash {
             no_verify,
             no_run,
@@ -291,8 +359,8 @@ fn run(cli: Cli) -> Result<u8, String> {
             chip,
             script,
         } => {
-            check_images(&config)?;
-            match select(&config, flag)? {
+            check_images(config)?;
+            match env.backend()? {
                 Backend::OpenOcd => {
                     if chip.is_some() || script.is_some() {
                         return Err(
@@ -301,7 +369,9 @@ fn run(cli: Cli) -> Result<u8, String> {
                                 .into(),
                         );
                     }
-                    openocd::flash(&config, !no_verify, !no_run, write_otp)
+                    env.with_server(|server| {
+                        openocd::flash(config, server, !no_verify, !no_run, write_otp)
+                    })
                 }
                 Backend::Trace32 => {
                     for (set, option) in [
@@ -313,14 +383,14 @@ fn run(cli: Cli) -> Result<u8, String> {
                             return Err(format!("{option} applies to the openocd backend only"));
                         }
                     }
-                    trace32(&config)?.flash_with(chip, script).map_err(text)?;
+                    trace32(config)?.flash_with(chip, script).map_err(text)?;
                     Ok(0)
                 }
             }
         }
-        Commands::Load => match select(&config, flag)? {
+        Commands::Load => match env.backend()? {
             Backend::Trace32 => {
-                trace32(&config)?.load_symbols().map_err(text)?;
+                trace32(config)?.load_symbols().map_err(text)?;
                 Ok(0)
             }
             Backend::OpenOcd => Err(
@@ -329,38 +399,38 @@ fn run(cli: Cli) -> Result<u8, String> {
                     .into(),
             ),
         },
-        Commands::Debug { keep } => match select(&config, flag)? {
-            Backend::OpenOcd => openocd::debug(&config, keep),
+        Commands::Debug { keep } => match env.backend()? {
+            Backend::OpenOcd => openocd::debug(config, keep),
             Backend::Trace32 => {
                 if keep {
                     return Err("--keep applies to the openocd backend only".into());
                 }
-                trace32_debug(&config)
+                trace32_debug(config)
             }
         },
         Commands::Adapter => {
             if flag == Some(Backend::OpenOcd) {
                 return Err("'adapter' is TRACE32's DAP adapter; use 'rvdbg debug'".into());
             }
-            trace32_debug(&config)
+            trace32_debug(config)
         }
         Commands::Vscode => {
             let exe = current_exe()?;
-            trace32(&config)?.install_vscode(&exe).map_err(text)?;
+            trace32(config)?.install_vscode(&exe).map_err(text)?;
             if config.openocd.is_some() {
-                openocd::vscode(&config, &exe)?;
+                openocd::vscode(config, &exe)?;
             }
             Ok(0)
         }
         Commands::Rustrover => {
-            trace32(&config)?
+            trace32(config)?
                 .install_rustrover(&current_exe()?)
                 .map_err(text)?;
             Ok(0)
         }
-        Commands::Open => match select(&config, flag)? {
+        Commands::Open => match env.backend()? {
             Backend::Trace32 => {
-                trace32(&config)?.open().map_err(text)?;
+                trace32(config)?.open().map_err(text)?;
                 Ok(0)
             }
             Backend::OpenOcd => Err(
@@ -370,16 +440,9 @@ fn run(cli: Cli) -> Result<u8, String> {
             ),
         },
         Commands::Chips { query } => {
-            trace32(&config)?.chips(query.as_deref()).map_err(text)?;
+            trace32(config)?.chips(query.as_deref()).map_err(text)?;
             Ok(0)
         }
-        Commands::Shell => match select(&config, flag)? {
-            Backend::Trace32 => {
-                let code = trace32(&config)?.debug(Vec::new()).map_err(text)?;
-                Ok(u8::try_from(code).unwrap_or(1))
-            }
-            Backend::OpenOcd => Err(trace32_only("shell")),
-        },
         Commands::Rtt {
             symbol,
             control_block,
@@ -389,7 +452,7 @@ fn run(cli: Cli) -> Result<u8, String> {
             program,
             node,
             port,
-        } => match select(&config, flag)? {
+        } => match env.backend()? {
             Backend::OpenOcd => {
                 for (set, option) in [
                     (program.is_some(), "--program"),
@@ -400,17 +463,21 @@ fn run(cli: Cli) -> Result<u8, String> {
                         return Err(format!("{option} applies to the trace32 backend only"));
                     }
                 }
-                inspect::rtt(
-                    &config,
-                    &trace32(&config)?,
-                    inspect::RttOptions {
-                        symbol,
-                        control_block,
-                        poll,
-                        replay,
-                        output_only,
-                    },
-                )
+                let project = trace32(config)?;
+                env.with_server(|server| {
+                    inspect::rtt(
+                        config,
+                        &project,
+                        server,
+                        inspect::RttOptions {
+                            symbol,
+                            control_block,
+                            poll,
+                            replay,
+                            output_only,
+                        },
+                    )
+                })
             }
             Backend::Trace32 => {
                 let mut args = Vec::new();
@@ -438,29 +505,26 @@ fn run(cli: Cli) -> Result<u8, String> {
                 if output_only {
                     args.push("--output-only".into());
                 }
-                trace32(&config)?.rtt(&args).map_err(text)?;
+                trace32(config)?.rtt(&args).map_err(text)?;
                 Ok(0)
             }
         },
-        command => inspect_command(&config, flag, cli.json, command),
+        command => inspect_command(env, command),
     }
 }
 
 /// status, halt, go, fault, verify, check, clock: tracebridge's `debug`
 /// commands on TRACE32, the same commands through OpenOCD on StellarLINK.
-fn inspect_command(
-    config: &Config,
-    flag: Option<Backend>,
-    json: bool,
-    command: Commands,
-) -> Result<u8, String> {
+fn inspect_command(env: &mut Env, command: Commands) -> Result<u8, String> {
+    let config = env.config;
+    let json = env.json;
     let openocd_timeout = config
         .openocd
         .as_ref()
         .map_or(600, |openocd| openocd.timeout);
     let (request, mut args) = plan(command, openocd_timeout);
     let project = trace32(config)?;
-    match select(config, flag)? {
+    match env.backend()? {
         Backend::Trace32 => {
             if json {
                 args.insert(0, "--json".into());
@@ -471,7 +535,15 @@ fn inspect_command(
         Backend::OpenOcd => {
             let request = request?;
             let name = request.name();
-            inspect::emit(name, json, inspect::run(config, &project, request))
+            let interrupted = env.session.as_ref().map(|link| link.interrupted);
+            let cancel = || interrupted.is_some_and(|flag| flag.load(Ordering::SeqCst));
+            env.with_server(|server| {
+                inspect::emit(
+                    name,
+                    json,
+                    inspect::run(config, &project, server, request, &cancel),
+                )
+            })
         }
     }
 }
@@ -630,7 +702,7 @@ fn text(error: impl std::fmt::Display) -> String {
 }
 
 /// `--backend`, else `project.backend`, with where it came from.
-fn fixed(config: &Config, flag: Option<Backend>) -> Option<(Backend, &'static str)> {
+pub(crate) fn fixed(config: &Config, flag: Option<Backend>) -> Option<(Backend, &'static str)> {
     match (flag, config.backend) {
         (Some(backend), _) => Some((backend, "--backend")),
         (None, Some(backend)) => Some((backend, "project.backend in rvdbg.toml")),
@@ -756,7 +828,7 @@ fn current_exe() -> Result<PathBuf, String> {
 }
 
 /// The run directory with a `.gitignore` that ignores everything in it.
-fn run_dir(config: &Config) -> Result<PathBuf, String> {
+pub(crate) fn run_dir(config: &Config) -> Result<PathBuf, String> {
     let dir = config.run_dir();
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
@@ -776,7 +848,7 @@ mod tests {
     fn planned(line: &[&str]) -> (bool, Vec<String>) {
         let cli = Cli::try_parse_from(std::iter::once("rvdbg").chain(line.iter().copied()))
             .unwrap_or_else(|error| panic!("{line:?}: {error}"));
-        let (request, args) = plan(cli.command, 600);
+        let (request, args) = plan(cli.command.expect("a command"), 600);
         (request.is_ok(), args)
     }
 
@@ -840,7 +912,7 @@ mod tests {
     #[test]
     fn run_until_waits_for_the_openocd_timeout_by_default() {
         let cli = Cli::try_parse_from(["rvdbg", "run-until", "main"]).unwrap();
-        match plan(cli.command, 42).0 {
+        match plan(cli.command.expect("a command"), 42).0 {
             Ok(inspect::Request::RunUntil { timeout, .. }) => {
                 assert_eq!(timeout, std::time::Duration::from_secs(42))
             }

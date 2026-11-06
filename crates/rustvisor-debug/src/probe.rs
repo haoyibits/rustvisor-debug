@@ -156,7 +156,7 @@ pub fn rcl_port(config: &Config) -> u16 {
         .unwrap_or(20000)
 }
 
-fn listening(port: u16) -> bool {
+pub fn listening(port: u16) -> bool {
     let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
     TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
 }

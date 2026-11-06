@@ -94,6 +94,12 @@ pub struct Config {
 }
 
 impl Config {
+    /// The tracebridge project of the TRACE32 tables.
+    pub fn trace32_project(&self) -> Result<tracebridge::backend::Project, String> {
+        tracebridge::backend::Project::from_document(&self.trace32, &self.file)
+            .map_err(|error| error.to_string())
+    }
+
     /// `<project>/.rvdbg`, for logs.
     pub fn run_dir(&self) -> PathBuf {
         self.root.join(".rvdbg")

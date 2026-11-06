@@ -320,7 +320,8 @@ pub fn vscode_templates(config: &Config, exe: &Path, gdb: &Path) -> (Value, Valu
 }
 
 /// `rvdbg vscode` for OpenOCD: cortex-debug attaches to `rvdbg debug`.
-pub fn vscode(config: &Config, exe: &Path) -> Result<u8, String> {
+/// `created`: files this command wrote moments ago; they are not backed up.
+pub fn vscode(config: &Config, exe: &Path, created: &[PathBuf]) -> Result<u8, String> {
     let openocd = config.openocd()?;
     let style = Style::stdout();
     let gdb = match absolute_program(&openocd.gdb) {
@@ -348,7 +349,9 @@ pub fn vscode(config: &Config, exe: &Path) -> Result<u8, String> {
             &launch,
         ),
     ] {
-        tracebridge::backend::merge_vscode_file(&directory.join(name), file, document)
+        let path = directory.join(name);
+        let backup = !created.contains(&path);
+        tracebridge::backend::merge_vscode_file(&path, file, document, backup)
             .map_err(|e| e.to_string())?;
     }
     println!(
@@ -464,7 +467,7 @@ mod tests {
             "{\n // mine\n \"version\": \"0.2.0\",\n \"configurations\": [{\"name\": \"Other\", \"type\": \"x\"},],\n}\n",
         )
         .unwrap();
-        vscode(&config, Path::new("/bin/rvdbg")).unwrap();
+        vscode(&config, Path::new("/bin/rvdbg"), &[]).unwrap();
         let launch: Value = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join(".vscode/launch.json")).unwrap(),
         )
@@ -481,6 +484,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tasks["tasks"][0]["label"], TASK_LABEL);
+    }
+
+    #[test]
+    fn files_the_command_created_are_not_backed_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("rvdbg.toml");
+        let text = "[project]\nelf = \"app\"\n[openocd]\nconfig = [\"b.cfg\"]\ngdb = \"/x/gdb\"\n";
+        let config = crate::config::parse(text, &file, dir.path()).unwrap();
+        let vscode_dir = dir.path().join(".vscode");
+        std::fs::create_dir(&vscode_dir).unwrap();
+        for (name, document) in [
+            ("tasks.json", r#"{"version": "2.0.0", "tasks": []}"#),
+            (
+                "launch.json",
+                r#"{"version": "0.2.0", "configurations": []}"#,
+            ),
+        ] {
+            std::fs::write(vscode_dir.join(name), document).unwrap();
+        }
+        let created = [vscode_dir.join("tasks.json")];
+        vscode(&config, Path::new("/bin/rvdbg"), &created).unwrap();
+        let backups = |prefix: &str| {
+            std::fs::read_dir(&vscode_dir)
+                .unwrap()
+                .filter(|entry| {
+                    let name = entry.as_ref().unwrap().file_name();
+                    name.to_string_lossy().starts_with(prefix)
+                })
+                .count()
+        };
+        assert_eq!(backups("tasks.json.bak."), 0);
+        assert_eq!(backups("launch.json.bak."), 1);
     }
 
     #[test]

@@ -224,12 +224,17 @@ fn install_file(
     replacements: &[(&str, Value)],
 ) -> Result<Option<PathBuf>> {
     let template = replace_tokens(&jsonc::loads(template, "template")?, replacements);
-    merge_into(kind, target, &template)
+    merge_into(kind, target, &template, true)
 }
 
 /// Merge a whole template document into `target` (JSONC accepted), backing
-/// up an existing file; returns the backup path.
-pub fn merge_into(kind: Kind, target: &Path, template: &Value) -> Result<Option<PathBuf>> {
+/// up an existing file when `backup`; returns the backup path.
+pub fn merge_into(
+    kind: Kind,
+    target: &Path,
+    template: &Value,
+    backup: bool,
+) -> Result<Option<PathBuf>> {
     let empty = match kind {
         Kind::Tasks => serde_json::json!({"version": "2.0.0", "tasks": []}),
         Kind::Launch => serde_json::json!({"version": "0.2.0", "configurations": []}),
@@ -241,8 +246,8 @@ pub fn merge_into(kind: Kind, target: &Path, template: &Value) -> Result<Option<
     };
     let merged = merge_document(kind, &existing, template)?;
     let style = Style::stdout();
-    let backup_path = if target.exists() {
-        let backup_path = backup(target)?;
+    let backup_path = if backup && target.exists() {
+        let backup_path = self::backup(target)?;
         println!(
             "{} {} -> {}",
             style.dim("backed up"),

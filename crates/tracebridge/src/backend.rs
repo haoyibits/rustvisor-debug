@@ -386,19 +386,24 @@ pub enum VscodeFile {
 /// Merge `template` (a whole `tasks.json` or `launch.json` document) into
 /// `path`: entries with the same label or name are replaced, all others are
 /// kept, comments and trailing commas in the existing file are accepted,
-/// the old file is backed up and the new one written atomically. Prints
-/// what it did, as `tracebridge vscode` does.
+/// the old file is backed up (when `backup`) and the new one written
+/// atomically. Prints what it did, as `tracebridge vscode` does.
 pub fn merge_vscode_file(
     path: &Path,
     file: VscodeFile,
     template: &serde_json::Value,
+    backup: bool,
 ) -> Result<Option<PathBuf>> {
     let kind = match file {
         VscodeFile::Tasks => crate::vscode::installer::Kind::Tasks,
         VscodeFile::Launch => crate::vscode::installer::Kind::Launch,
     };
-    crate::vscode::installer::merge_into(kind, path, template)
+    crate::vscode::installer::merge_into(kind, path, template, backup)
 }
+
+/// `<prefix>/Cellar/<name>/<version>/bin/<exe>` → `<prefix>/opt/<name>/bin/<exe>`:
+/// the Homebrew path that survives `brew upgrade`, for files that name a program.
+pub use crate::ui::homebrew_stable_path;
 
 /// The same ELF parser used by verify: load addresses and bytes, excluding debug information.
 pub fn loadable_content(path: &Path) -> Result<Vec<(u64, Vec<u8>)>> {

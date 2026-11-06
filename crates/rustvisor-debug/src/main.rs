@@ -7,7 +7,7 @@
 //! rvdbg accepts the same command names; `adapter` is always TRACE32.
 #![forbid(unsafe_code)]
 
-mod config;
+use rustvisor_debug::config;
 mod init;
 mod inspect;
 mod openocd;
@@ -44,7 +44,7 @@ struct Cli {
     #[arg(long, global = true, value_enum)]
     backend: Option<BackendArg>,
 
-    /// Machine-readable JSON output (status, halt, go, fault, verify, check, clock)
+    /// Machine-readable JSON output of the target commands (status, reg, mem, fault, check, clock, ...)
     #[arg(long, global = true)]
     json: bool,
 
@@ -416,9 +416,17 @@ fn execute(env: &mut Env, command: Commands) -> Result<u8, String> {
         }
         Commands::Vscode => {
             let exe = current_exe()?;
+            // Files the TRACE32 step creates now are not backed up again
+            // when the OpenOCD entries are merged into them.
+            let directory = config.root.join(".vscode");
+            let created: Vec<PathBuf> = ["tasks.json", "launch.json"]
+                .iter()
+                .map(|name| directory.join(name))
+                .filter(|path| !path.exists())
+                .collect();
             trace32(config)?.install_vscode(&exe).map_err(text)?;
             if config.openocd.is_some() {
-                openocd::vscode(config, &exe)?;
+                openocd::vscode(config, &exe, &created)?;
             }
             Ok(0)
         }
@@ -804,7 +812,7 @@ fn init_command(cwd: &Path) -> Result<u8, String> {
 
 /// The TRACE32 backend with rvdbg.toml's settings.
 fn trace32(config: &Config) -> Result<Project, String> {
-    Project::from_document(&config.trace32, &config.file).map_err(text)
+    config.trace32_project()
 }
 
 fn check_images(config: &Config) -> Result<(), String> {
@@ -820,11 +828,15 @@ fn check_images(config: &Config) -> Result<(), String> {
 }
 
 /// This program, for the IDE files: a GUI-started IDE may not have the
-/// user's PATH.
+/// user's PATH. A Homebrew install is named by its `opt` link, which
+/// `brew upgrade` keeps, not by the versioned Cellar directory.
 fn current_exe() -> Result<PathBuf, String> {
     let exe =
         std::env::current_exe().map_err(|error| format!("cannot find rvdbg itself: {error}"))?;
-    Ok(exe.canonicalize().unwrap_or(exe))
+    let exe = exe.canonicalize().unwrap_or(exe);
+    Ok(tracebridge::backend::homebrew_stable_path(&exe)
+        .filter(|path| path.is_file())
+        .unwrap_or(exe))
 }
 
 /// The run directory with a `.gitignore` that ignores everything in it.

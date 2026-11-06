@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use probecore::elf::{self, SegmentResult};
+use probecore::elf::{self, Segment, SegmentResult};
 use probecore::target::{self, Target, TargetAddress};
 
 /// A failed backend operation, as one message.
@@ -264,12 +264,121 @@ impl Target for MemoryTarget<'_> {
     }
 }
 
+/// A one-time-programmable flash area (e.g. SR6P6's UTEST with the boot
+/// record): its bits can be programmed from 1 to 0 but never erased.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtpRange {
+    pub start: u64,
+    pub size: u64,
+}
+
+impl OtpRange {
+    fn end(&self) -> u64 {
+        self.start.saturating_add(self.size)
+    }
+}
+
+/// The part of an image segment that lies in an OTP area, compared with
+/// what the board holds there before anything is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtpCheck {
+    pub image: PathBuf,
+    pub address: u64,
+    pub size: usize,
+    /// Bytes that differ from the board.
+    pub differing: usize,
+    /// The first difference: address, board byte, image byte.
+    pub first_difference: Option<(u64, u8, u8)>,
+    /// The image needs a bit that is 0 on the board to be 1, which no
+    /// programming can do.
+    pub impossible: bool,
+}
+
+/// Compare the parts of `images` that fall into `ranges` with the board.
+pub fn check_otp(
+    target: &mut dyn Target,
+    images: &[(PathBuf, Vec<Segment>)],
+    ranges: &[OtpRange],
+) -> target::Result<Vec<OtpCheck>> {
+    let mut checks = Vec::new();
+    for (image, segments) in images {
+        for segment in segments {
+            let segment_end = segment.paddr.saturating_add(segment.data.len() as u64);
+            for range in ranges {
+                let start = segment.paddr.max(range.start);
+                let end = segment_end.min(range.end());
+                if start >= end {
+                    continue;
+                }
+                let offset = (start - segment.paddr) as usize;
+                let wanted = &segment.data[offset..offset + (end - start) as usize];
+                let board = target
+                    .read_memory(start, wanted.len())
+                    .map_err(|error| error.context(format!("cannot read OTP at 0x{start:X}")))?;
+                let mut check = OtpCheck {
+                    image: image.clone(),
+                    address: start,
+                    size: wanted.len(),
+                    differing: 0,
+                    first_difference: None,
+                    impossible: false,
+                };
+                for (index, (&have, &want)) in board.iter().zip(wanted).enumerate() {
+                    if have != want {
+                        check.differing += 1;
+                        check
+                            .first_difference
+                            .get_or_insert((start + index as u64, have, want));
+                        check.impossible |= want & !have != 0;
+                    }
+                }
+                checks.push(check);
+            }
+        }
+    }
+    Ok(checks)
+}
+
+/// Why `check` stops the flashing, if it does.
+pub fn otp_refusal(check: &OtpCheck, write_otp: bool) -> Option<String> {
+    let (at, board, image) = check.first_difference?;
+    let place = format!(
+        "{}: {} of {} bytes at 0x{:08X} lie in one-time-programmable flash and differ from \
+         the board (first at 0x{at:08X}: board 0x{board:02X}, image 0x{image:02X})",
+        check.image.display(),
+        check.differing,
+        check.size,
+        check.address
+    );
+    if check.impossible {
+        Some(format!(
+            "{place}; the image needs bits that are 0 on the board to be 1, which cannot be \
+             programmed. Nothing was written."
+        ))
+    } else if !write_otp {
+        Some(format!(
+            "{place}; writing them would change the board permanently. Nothing was written; \
+             allow it only on purpose (rvdbg flash --write-otp)."
+        ))
+    } else {
+        None
+    }
+}
+
 /// What `flash` does besides writing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlashOptions {
-    /// Compare every loadable segment with target memory afterwards,
-    /// through this MEM-AP target. `None` skips the comparison.
-    pub verify_with: Option<String>,
+    /// The OpenOCD MEM-AP target that reads physical memory (e.g.
+    /// `chip.axi`); needed to compare and to check OTP areas.
+    pub memory_ap: Option<String>,
+    /// Compare every loadable segment with target memory afterwards.
+    pub verify: bool,
+    /// One-time-programmable areas: the image's bytes there are compared
+    /// with the board before anything is written.
+    pub otp: Vec<OtpRange>,
+    /// Write OTP bytes that differ from the board (when they can be
+    /// programmed at all).
+    pub write_otp: bool,
     /// `reset run` at the end, so the new program starts.
     pub run: bool,
     /// How long one image may take to erase and write.
@@ -280,6 +389,8 @@ pub struct FlashOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlashReport {
     pub images: Vec<PathBuf>,
+    /// The OTP parts of the images, checked before writing.
+    pub otp: Vec<OtpCheck>,
     /// Per image, when verified.
     pub verified: Vec<(PathBuf, Vec<SegmentResult>)>,
 }
@@ -297,6 +408,11 @@ impl FlashReport {
 /// Write `images` to flash: `reset init` (the target configuration's
 /// preparation, e.g. the watchdog), `flash write_image erase` for each ELF
 /// (load addresses, `p_paddr`), then the comparison, then `reset run`.
+///
+/// Before anything is written, the parts of the images in OTP areas are
+/// compared with the board: a difference stops the flashing unless
+/// `write_otp` allows it, and a difference that would need a 0 bit to
+/// become 1 always does.
 ///
 /// The images are compared only after all of them are written, so an image
 /// that erased a sector of an earlier one shows up as a difference.
@@ -321,6 +437,36 @@ pub fn flash(
         }
         segments.push(loadable);
     }
+    let needs_ap = options.verify || !options.otp.is_empty();
+    let memory_ap = match &options.memory_ap {
+        Some(ap) => ap.clone(),
+        None if needs_ap => fail!(
+            "comparing with flash and checking OTP areas need the MEM-AP target that reads \
+             physical memory (memory_ap)"
+        ),
+        None => String::new(),
+    };
+
+    let mut otp = Vec::new();
+    if !options.otp.is_empty() {
+        progress("check OTP areas");
+        let named: Vec<(PathBuf, Vec<Segment>)> = images
+            .iter()
+            .cloned()
+            .zip(segments.iter().cloned())
+            .collect();
+        let mut target = MemoryTarget {
+            server,
+            memory_ap: memory_ap.clone(),
+        };
+        otp = check_otp(&mut target, &named, &options.otp).map_err(|error| Error(error.message))?;
+        if let Some(refusal) = otp
+            .iter()
+            .find_map(|check| otp_refusal(check, options.write_otp))
+        {
+            return Err(Error(refusal));
+        }
+    }
 
     server.set_timeout(Duration::from_secs(60))?;
     progress("reset init");
@@ -335,7 +481,7 @@ pub fn flash(
     }
 
     let mut verified = Vec::new();
-    if let Some(memory_ap) = &options.verify_with {
+    if options.verify {
         let mut target = MemoryTarget {
             server,
             memory_ap: memory_ap.clone(),
@@ -355,6 +501,7 @@ pub fn flash(
     }
     Ok(FlashReport {
         images: images.to_vec(),
+        otp,
         verified,
     })
 }
@@ -362,6 +509,114 @@ pub fn flash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Board memory for the OTP check; everything else is unused.
+    struct Board(Vec<(u64, Vec<u8>)>, Vec<String>);
+
+    impl Target for Board {
+        fn read_u32(&mut self, _: &TargetAddress) -> target::Result<u32> {
+            unreachable!()
+        }
+        fn read_core_register(&mut self, _: &str) -> target::Result<u64> {
+            unreachable!()
+        }
+        fn read_memory(&mut self, address: u64, length: usize) -> target::Result<Vec<u8>> {
+            self.1.push(format!("read 0x{address:X} {length}"));
+            let (base, bytes) = self
+                .0
+                .iter()
+                .find(|(base, bytes)| *base <= address && address < base + bytes.len() as u64)
+                .ok_or_else(|| target::Error::new("bus error"))?;
+            let offset = (address - base) as usize;
+            Ok(bytes[offset..offset + length].to_vec())
+        }
+        fn is_running(&mut self) -> target::Result<bool> {
+            unreachable!()
+        }
+        fn halt(&mut self) -> target::Result<()> {
+            unreachable!()
+        }
+        fn symbol_range(&mut self, _: &str) -> target::Result<(u64, u64)> {
+            unreachable!()
+        }
+        fn break_command(&self) -> &str {
+            "-"
+        }
+    }
+
+    const UTEST: OtpRange = OtpRange {
+        start: 0x29F8_7000,
+        size: 0x1000,
+    };
+
+    fn image(segments: &[(u64, &[u8])]) -> Vec<(PathBuf, Vec<Segment>)> {
+        vec![(
+            PathBuf::from("app.elf"),
+            segments
+                .iter()
+                .map(|(paddr, data)| Segment {
+                    paddr: *paddr,
+                    vaddr: *paddr,
+                    data: data.to_vec(),
+                })
+                .collect(),
+        )]
+    }
+
+    fn board(record: &[u8]) -> Board {
+        let mut utest = vec![0xFF; 0x1000];
+        utest[0xE00..0xE00 + record.len()].copy_from_slice(record);
+        Board(vec![(0x29F8_7000, utest)], Vec::new())
+    }
+
+    #[test]
+    fn only_the_otp_part_of_a_segment_is_read() {
+        let mut board = board(&[1, 0, 0x5A, 0xA5]);
+        // Straddles the end of the area: only 4 bytes are inside.
+        let images = image(&[(0x2800_0000, b"CODE"), (0x29F8_7FFC, &[0xFF; 8])]);
+        let checks = check_otp(&mut board, &images, &[UTEST]).unwrap();
+        assert_eq!(board.1, ["read 0x29F87FFC 4"]);
+        assert_eq!(checks.len(), 1);
+        assert_eq!((checks[0].size, checks[0].differing), (4, 0));
+    }
+
+    #[test]
+    fn the_same_record_passes() {
+        let mut board = board(&[1, 0, 0x5A, 0xA5]);
+        let images = image(&[(0x29F8_7E00, &[1, 0, 0x5A, 0xA5])]);
+        let checks = check_otp(&mut board, &images, &[UTEST]).unwrap();
+        assert_eq!(checks[0].differing, 0);
+        assert_eq!(otp_refusal(&checks[0], false), None);
+    }
+
+    #[test]
+    fn a_different_record_is_refused_unless_allowed() {
+        // Blank board: programming clears bits only, so it is possible.
+        let mut board = board(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        let images = image(&[(0x29F8_7E00, &[1, 0, 0x5A, 0xA5])]);
+        let checks = check_otp(&mut board, &images, &[UTEST]).unwrap();
+        assert!(!checks[0].impossible);
+        assert_eq!(checks[0].first_difference, Some((0x29F8_7E00, 0xFF, 0x01)));
+        let refusal = otp_refusal(&checks[0], false).unwrap();
+        assert!(
+            refusal.starts_with(
+                "app.elf: 4 of 4 bytes at 0x29F87E00 lie in one-time-programmable flash"
+            ),
+            "{refusal}"
+        );
+        assert!(refusal.contains("--write-otp"), "{refusal}");
+        assert_eq!(otp_refusal(&checks[0], true), None);
+    }
+
+    #[test]
+    fn a_record_that_needs_set_bits_is_always_refused() {
+        let mut board = board(&[1, 0, 0x5A, 0xA5]);
+        let images = image(&[(0x29F8_7E00, &[1, 0, 0x5A, 0xA7])]);
+        let checks = check_otp(&mut board, &images, &[UTEST]).unwrap();
+        assert!(checks[0].impossible);
+        let refusal = otp_refusal(&checks[0], true).unwrap();
+        assert!(refusal.contains("cannot be programmed"), "{refusal}");
+    }
 
     #[test]
     fn arguments_put_the_ports_first_and_keep_the_order() {
@@ -434,25 +689,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_early_exit_shows_the_log() {
+        // /bin/sh takes `-c "tcl_port ..."` as a script and fails on it at
+        // once; no executable is written, so no other test's fork can hold
+        // it open (ETXTBSY).
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-openocd");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\necho 'Error: no device found' >&2\nexit 1\n",
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
-        std::fs::set_permissions(&script, permissions).unwrap();
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
-        let error = Server::start(&config(dir.path(), script.to_str().unwrap(), port))
+        let error = Server::start(&config(dir.path(), "/bin/sh", port))
             .err()
             .unwrap();
         assert!(error.0.contains("exited during start-up"), "{error}");
-        assert!(error.0.contains("Error: no device found"), "{error}");
+        assert!(error.0.contains("tcl_port"), "{error}");
     }
 }

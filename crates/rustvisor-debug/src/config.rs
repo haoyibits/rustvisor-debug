@@ -16,6 +16,9 @@
 //! tcl_port = 6666
 //! memory_ap = "sr6p6.axi"              # MEM-AP that reads physical memory
 //! timeout = 600                        # seconds for one image
+//! # One-time-programmable flash (SR6P6 UTEST with the boot record): the
+//! # image's bytes there are compared with the board before writing.
+//! otp = [{ start = 0x29F87000, size = 0x1000 }]
 //! ```
 //!
 //! Relative paths are relative to the directory of the file.
@@ -41,6 +44,8 @@ pub struct OpenOcd {
     pub tcl_port: u16,
     pub memory_ap: Option<String>,
     pub timeout: u64,
+    /// `(start, size)` of one-time-programmable areas.
+    pub otp: Vec<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +139,36 @@ fn integer(table: &Table, section: &str, key: &str) -> Result<Option<i64>, Strin
     }
 }
 
+/// `otp = [{ start = 0x..., size = 0x... }, ...]`.
+fn otp_ranges(section: &Table) -> Result<Vec<(u64, u64)>, String> {
+    let shape =
+        || "openocd.otp must be an array of { start = <address>, size = <bytes> }".to_string();
+    let items = match section.get("otp") {
+        None => return Ok(Vec::new()),
+        Some(Value::Array(items)) => items,
+        Some(_) => return Err(shape()),
+    };
+    items
+        .iter()
+        .map(|item| {
+            let Value::Table(range) = item else {
+                return Err(shape());
+            };
+            if range.len() != 2 {
+                return Err(shape());
+            }
+            let number = |key: &str| match range.get(key) {
+                Some(Value::Integer(value)) => u64::try_from(*value).ok(),
+                _ => None,
+            };
+            match (number("start"), number("size")) {
+                (Some(start), Some(size)) if size > 0 => Ok((start, size)),
+                _ => Err(shape()),
+            }
+        })
+        .collect()
+}
+
 fn check_keys(table: &Table, section: &str, known: &[&str]) -> Result<(), String> {
     for key in table.keys() {
         if !known.contains(&key.as_str()) {
@@ -185,6 +220,7 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
                     "tcl_port",
                     "memory_ap",
                     "timeout",
+                    "otp",
                 ],
             )?;
             let tcl_port = integer(section, "openocd", "tcl_port")?.unwrap_or(6666);
@@ -215,6 +251,7 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
                 tcl_port,
                 memory_ap: string(section, "openocd", "memory_ap")?.filter(|ap| !ap.is_empty()),
                 timeout,
+                otp: otp_ranges(section)?,
             })
         }
     };
@@ -255,6 +292,7 @@ mod tests {
             tcl_port = 7777
             memory_ap = "sr6p6.axi"
             timeout = 120
+            otp = [{ start = 0x29F87000, size = 0x1000 }]
             "#,
         )
         .unwrap();
@@ -272,6 +310,7 @@ mod tests {
         assert_eq!(openocd.tcl_port, 7777);
         assert_eq!(openocd.memory_ap.as_deref(), Some("sr6p6.axi"));
         assert_eq!(openocd.timeout, 120);
+        assert_eq!(openocd.otp, [(0x29F8_7000, 0x1000)]);
     }
 
     #[test]
@@ -284,6 +323,7 @@ mod tests {
         assert_eq!(openocd.executable, PathBuf::from("openocd-stellar"));
         assert_eq!((openocd.tcl_port, openocd.timeout), (6666, 600));
         assert_eq!(openocd.memory_ap, None);
+        assert!(openocd.otp.is_empty());
     }
 
     #[test]
@@ -312,6 +352,16 @@ mod tests {
             ),
             "openocd.tcl_port must be a port number"
         );
+        let otp = |value: &str| {
+            error(&format!(
+                "[project]\nbackend = \"openocd\"\nelf = \"a\"\n[openocd]\nconfig = [\"c\"]\notp = {value}"
+            ))
+        };
+        let shape = "openocd.otp must be an array of { start = <address>, size = <bytes> }";
+        assert_eq!(otp("1"), shape);
+        assert_eq!(otp("[{ start = 1 }]"), shape);
+        assert_eq!(otp("[{ start = 1, size = 0 }]"), shape);
+        assert_eq!(otp("[{ start = 1, length = 2 }]"), shape);
         assert_eq!(
             error("[project]\nbackend = \"openocd\"\nelf = \"a\"\ntypo = 1"),
             "unknown key project.typo"

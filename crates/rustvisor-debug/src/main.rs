@@ -42,6 +42,10 @@ enum Commands {
         /// Leave the core halted after flashing instead of `reset run`
         #[arg(long)]
         no_run: bool,
+        /// Write bytes of one-time-programmable areas (openocd.otp) that differ
+        /// from the board; this changes the board permanently
+        #[arg(long)]
+        write_otp: bool,
     },
 }
 
@@ -61,7 +65,11 @@ fn run(cli: Cli) -> Result<u8, String> {
     let path = config::find(cli.config.as_deref(), &cwd)?;
     let config = config::load(&path)?;
     match cli.command {
-        Commands::Flash { no_verify, no_run } => flash(&config, !no_verify, !no_run),
+        Commands::Flash {
+            no_verify,
+            no_run,
+            write_otp,
+        } => flash(&config, !no_verify, !no_run, write_otp),
     }
 }
 
@@ -78,7 +86,7 @@ fn run_dir(config: &Config) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn flash(config: &Config, verify: bool, run: bool) -> Result<u8, String> {
+fn flash(config: &Config, verify: bool, run: bool, write_otp: bool) -> Result<u8, String> {
     let style = Style::stdout();
     let images = config.images();
     for image in &images {
@@ -97,17 +105,22 @@ fn flash(config: &Config, verify: bool, run: bool) -> Result<u8, String> {
         }
         Backend::OpenOcd => config.openocd.as_ref().expect("checked when loading"),
     };
-    let verify_with = match (&openocd.memory_ap, verify) {
-        (Some(ap), true) => Some(ap.clone()),
-        (None, true) => {
+    if openocd.memory_ap.is_none() {
+        if !openocd.otp.is_empty() {
+            return Err(
+                "openocd.otp needs openocd.memory_ap (the MEM-AP target that reads physical \
+                 memory) to check the OTP areas before writing"
+                    .into(),
+            );
+        }
+        if verify {
             return Err(
                 "comparing needs openocd.memory_ap (the MEM-AP target that reads physical \
                  memory); set it or pass --no-verify"
                     .into(),
             );
         }
-        (_, false) => None,
-    };
+    }
     let log = run_dir(config)?.join("openocd.log");
     let server_config = stellarbridge::ServerConfig {
         executable: openocd.executable.clone(),
@@ -126,7 +139,14 @@ fn flash(config: &Config, verify: bool, run: bool) -> Result<u8, String> {
     );
     let mut server = stellarbridge::Server::start(&server_config).map_err(|e| e.0)?;
     let options = stellarbridge::FlashOptions {
-        verify_with,
+        memory_ap: openocd.memory_ap.clone(),
+        verify,
+        otp: openocd
+            .otp
+            .iter()
+            .map(|&(start, size)| stellarbridge::OtpRange { start, size })
+            .collect(),
+        write_otp,
         run,
         timeout: Duration::from_secs(openocd.timeout),
     };
@@ -137,6 +157,19 @@ fn flash(config: &Config, verify: bool, run: bool) -> Result<u8, String> {
     .map_err(|e| e.0)?;
     server.shutdown();
 
+    for check in &report.otp {
+        let status = if check.differing == 0 {
+            style.good("same as on the board")
+        } else {
+            style.warn(format!("{} bytes changed (--write-otp)", check.differing))
+        };
+        println!(
+            "  {}  {}  {:>7} bytes  OTP {status}",
+            short(&check.image),
+            style.address(format!("0x{:08X}", check.address)),
+            check.size
+        );
+    }
     for (image, segments) in &report.verified {
         for segment in segments {
             let status = if segment.differing == 0 {

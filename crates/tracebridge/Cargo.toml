@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 t32rcl = { path = "../t32rcl" }
+probecore = { path = "../probecore" }
 clap = { version = "4.6", features = ["derive"] }
 toml = "1.1"
 serde = "1"

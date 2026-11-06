@@ -10,12 +10,14 @@ pub(crate) mod check;
 pub(crate) mod clock;
 mod clockhtml;
 pub(crate) mod commands;
-mod decode;
 pub(crate) mod elf;
 mod perfile;
 pub(crate) mod probe;
 mod repl;
+pub(crate) mod t32target;
 mod trace;
+
+use probecore::decode;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,7 +36,7 @@ use probe::{DResult, DebugError, PerSnapshot, Probe};
 
 /// Exit code when a check fails or `verify` finds a mismatch (1 means the
 /// command itself could not run, 2 is a usage error).
-pub const EXIT_FAILED: i32 = 3;
+pub const EXIT_FAILED: i32 = probecore::check::EXIT_FAILED;
 
 const AFTER_HELP: &str = "\
 Kinds: [R] reads only, changes nothing; [S] changes target or debugger state;

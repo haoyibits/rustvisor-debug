@@ -154,45 +154,7 @@ pub fn parse_decimal(text: &str) -> Option<i64> {
     t32rcl::parse_int(text, 10).and_then(|value| i64::try_from(value).ok())
 }
 
-/// `int(text, 0)`: `0x`, `0o`, `0b` prefixes or a decimal without leading zeros.
-pub fn parse_int_auto(text: &str) -> Option<i128> {
-    let trimmed = text.trim();
-    let (sign, body) = match trimmed.as_bytes().first()? {
-        b'-' => ("-", &trimmed[1..]),
-        b'+' => ("", &trimmed[1..]),
-        _ => ("", trimmed),
-    };
-    let lower = body.get(..2).map(str::to_ascii_lowercase);
-    let (radix, digits) = match lower.as_deref() {
-        Some("0x") => (16, &body[2..]),
-        Some("0o") => (8, &body[2..]),
-        Some("0b") => (2, &body[2..]),
-        _ => (10, body),
-    };
-    let digits = if radix != 10 {
-        digits.strip_prefix('_').unwrap_or(digits)
-    } else {
-        digits
-    };
-    if digits.is_empty()
-        || digits.starts_with('_')
-        || digits.ends_with('_')
-        || digits.contains("__")
-        || digits.starts_with(['+', '-'])
-    {
-        return None;
-    }
-    let cleaned: String = digits.chars().filter(|&c| c != '_').collect();
-    if radix == 10
-        && cleaned.len() > 1
-        && cleaned.starts_with('0')
-        && cleaned.bytes().any(|b| b != b'0')
-    {
-        return None;
-    }
-    let value = i128::from_str_radix(&cleaned, radix).ok()?;
-    Some(if sign == "-" { -value } else { value })
-}
+pub use probecore::text::parse_int_auto;
 
 /// `shlex.split(text)` (POSIX mode, no comments). The error texts are those of
 /// Python's `ValueError`.

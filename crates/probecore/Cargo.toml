@@ -1,0 +1,16 @@
+[package]
+name = "probecore"
+description = "Probe-independent analysis for embedded targets: check files, clock trees, ELF compare, RTT ring buffers, fault decode"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+toml = "1.1"
+# Same features as tracebridge: key order and numbers of the JSON output.
+serde_json = { version = "1.0", features = ["preserve_order", "arbitrary_precision"] }
+
+[dev-dependencies]
+tempfile = "3.27"

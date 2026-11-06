@@ -12,6 +12,7 @@ mod init;
 mod inspect;
 mod openocd;
 mod probe;
+mod skill;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -84,6 +85,25 @@ enum Commands {
         /// that differ from the board; this changes the board permanently
         #[arg(long)]
         write_otp: bool,
+        /// TRACE32: choose the flash script for this chip (overrides flash.chip and target.cpu)
+        #[arg(long, conflicts_with = "script")]
+        chip: Option<String>,
+        /// TRACE32: use this flash script ("~~/..." is a TRACE32 path)
+        #[arg(long, value_name = "PATH")]
+        script: Option<String>,
+    },
+    /// TRACE32: start PowerView for the project, or reuse a running one
+    Open,
+    /// TRACE32: the flash scripts for a chip (your library and the TRACE32 installation)
+    Chips {
+        /// Chip name or part of it (default: flash.chip or target.cpu)
+        query: Option<String>,
+    },
+    /// Install the AI agent skill for rvdbg (Claude Code)
+    Skill {
+        /// Skills directory (default: $CLAUDE_CONFIG_DIR/skills or ~/.claude/skills)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
     },
     /// TRACE32: load the symbols without flashing or resetting
     Load,
@@ -106,11 +126,80 @@ enum Commands {
     /// Let the core run
     Go,
     /// AArch32 Hyp fault report: vector, HSR decoded, HDFAR/HIFAR, ELR_hyp, SPSR_hyp
-    Fault,
+    Fault {
+        /// TRACE32: also list the newest trace records (default 32)
+        #[arg(long, value_name = "RECORDS", num_args = 0..=1, default_missing_value = "32")]
+        trace: Option<u32>,
+    },
+    /// TRACE32: registers by PER name (HSR, HSCTLR.C), full PER path, or raw address
+    Reg {
+        #[arg(required = true, value_name = "NAME|ADDRESS")]
+        names: Vec<String>,
+    },
+    /// 32-bit words at an address (AD:0x60000000, 0x60000000) or a symbol
+    Mem {
+        #[arg(value_name = "ADDRESS|SYMBOL")]
+        location: String,
+        /// Number of 32-bit words
+        #[arg(default_value_t = 1)]
+        count: u32,
+    },
+    /// TRACE32: the newest trace records, with cycle counts and symbols
+    Trace {
+        /// Number of records, newest last
+        #[arg(long, default_value_t = 100, value_name = "RECORDS")]
+        last: u32,
+    },
+    /// TRACE32: print the value of a PRACTICE expression
+    Eval {
+        #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
+        expression: Vec<String>,
+    },
+    /// TRACE32: execute a PRACTICE command (can do anything, including reset and flash)
+    Cmd {
+        #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// TRACE32: open a PER.Watch window with these registers (names, or a file with one per line)
+    Watch {
+        #[arg(required = true, value_name = "FILE|NAME")]
+        items: Vec<String>,
+    },
+    /// Connect to the target without resetting it
+    Attach,
+    /// Reset the chip and halt at the reset vector
+    Reset,
+    /// TRACE32: SYStem.Down
+    Down,
+    /// Run a halted core until it reaches a symbol or address (hardware breakpoint)
+    RunUntil {
+        /// Seconds to wait (default: trace32.operation_timeout, openocd.timeout)
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
+        /// A symbol, symbol+offset, or an address
+        #[arg(value_name = "SYMBOL|ADDRESS")]
+        target: String,
+    },
+    /// TRACE32: run a PRACTICE script (DO) and wait until it ends
+    Do {
+        /// Seconds to wait (default: trace32.operation_timeout)
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<u64>,
+        /// The script: a path relative to the current directory, or "~~/..." in TRACE32
+        script: String,
+        /// Arguments for the script
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
+        arguments: Vec<String>,
+    },
+    /// TRACE32: interactive session with all of the above (tracebridge debug)
+    Shell,
     /// Compare target memory with the images at their load addresses
     Verify {
         /// ELF file (default: the ELF and the extra images)
         elf: Option<PathBuf>,
+        /// TRACE32: also run TRACE32's own comparison (Data.LOAD.Elf /DIFF)
+        #[arg(long)]
+        t32: bool,
     },
     /// Run a check file (registers, memory, clocks against expectations)
     Check {
@@ -154,6 +243,15 @@ enum Commands {
         /// Do not forward terminal input to the target
         #[arg(long)]
         output_only: bool,
+        /// TRACE32: symbol program name (default: project.program)
+        #[arg(long)]
+        program: Option<String>,
+        /// TRACE32: Remote API host
+        #[arg(long)]
+        node: Option<String>,
+        /// TRACE32: Remote API port (default: trace32.rcl_port)
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Write the RustRover run configuration for TRACE32 (.run/, LSP4IJ)
     Rustrover,
@@ -175,6 +273,11 @@ fn run(cli: Cli) -> Result<u8, String> {
     if let Commands::Init = cli.command {
         return init_command(&cwd);
     }
+    if let Commands::Skill { dir } = &cli.command {
+        let path = skill::install(dir.as_deref())?;
+        println!("{} {}", Style::stdout().good("installed"), path.display());
+        return Ok(0);
+    }
     let path = config::find(cli.config.as_deref(), &cwd)?;
     let config = config::load(&path)?;
     let flag = cli.backend.map(Backend::from);
@@ -185,10 +288,21 @@ fn run(cli: Cli) -> Result<u8, String> {
             no_verify,
             no_run,
             write_otp,
+            chip,
+            script,
         } => {
             check_images(&config)?;
             match select(&config, flag)? {
-                Backend::OpenOcd => openocd::flash(&config, !no_verify, !no_run, write_otp),
+                Backend::OpenOcd => {
+                    if chip.is_some() || script.is_some() {
+                        return Err(
+                            "--chip and --script choose a TRACE32 flash script; OpenOCD's flash \
+                             driver comes from openocd.config"
+                                .into(),
+                        );
+                    }
+                    openocd::flash(&config, !no_verify, !no_run, write_otp)
+                }
                 Backend::Trace32 => {
                     for (set, option) in [
                         (no_verify, "--no-verify"),
@@ -199,7 +313,7 @@ fn run(cli: Cli) -> Result<u8, String> {
                             return Err(format!("{option} applies to the openocd backend only"));
                         }
                     }
-                    trace32(&config)?.flash().map_err(text)?;
+                    trace32(&config)?.flash_with(chip, script).map_err(text)?;
                     Ok(0)
                 }
             }
@@ -244,26 +358,71 @@ fn run(cli: Cli) -> Result<u8, String> {
                 .map_err(text)?;
             Ok(0)
         }
+        Commands::Open => match select(&config, flag)? {
+            Backend::Trace32 => {
+                trace32(&config)?.open().map_err(text)?;
+                Ok(0)
+            }
+            Backend::OpenOcd => Err(
+                "with StellarLINK there is nothing to open: each command starts OpenOCD, or uses \
+                 the one 'rvdbg debug' runs"
+                    .into(),
+            ),
+        },
+        Commands::Chips { query } => {
+            trace32(&config)?.chips(query.as_deref()).map_err(text)?;
+            Ok(0)
+        }
+        Commands::Shell => match select(&config, flag)? {
+            Backend::Trace32 => {
+                let code = trace32(&config)?.debug(Vec::new()).map_err(text)?;
+                Ok(u8::try_from(code).unwrap_or(1))
+            }
+            Backend::OpenOcd => Err(trace32_only("shell")),
+        },
         Commands::Rtt {
             symbol,
             control_block,
             poll,
             replay,
             output_only,
+            program,
+            node,
+            port,
         } => match select(&config, flag)? {
-            Backend::OpenOcd => inspect::rtt(
-                &config,
-                &trace32(&config)?,
-                inspect::RttOptions {
-                    symbol,
-                    control_block,
-                    poll,
-                    replay,
-                    output_only,
-                },
-            ),
+            Backend::OpenOcd => {
+                for (set, option) in [
+                    (program.is_some(), "--program"),
+                    (node.is_some(), "--node"),
+                    (port.is_some(), "--port"),
+                ] {
+                    if set {
+                        return Err(format!("{option} applies to the trace32 backend only"));
+                    }
+                }
+                inspect::rtt(
+                    &config,
+                    &trace32(&config)?,
+                    inspect::RttOptions {
+                        symbol,
+                        control_block,
+                        poll,
+                        replay,
+                        output_only,
+                    },
+                )
+            }
             Backend::Trace32 => {
                 let mut args = Vec::new();
+                for (option, value) in [
+                    ("--program", program),
+                    ("--node", node),
+                    ("--port", port.map(|port| port.to_string())),
+                ] {
+                    if let Some(value) = value {
+                        args.extend([option.to_string(), value]);
+                    }
+                }
                 if let Some(symbol) = symbol {
                     args.extend(["--symbol".to_string(), symbol]);
                 }
@@ -295,15 +454,127 @@ fn inspect_command(
     json: bool,
     command: Commands,
 ) -> Result<u8, String> {
-    let (request, mut args) = match command {
-        Commands::Status => (inspect::Request::Status, vec!["status".to_string()]),
-        Commands::Halt => (inspect::Request::Halt, vec!["break".into()]),
-        Commands::Go => (inspect::Request::Go, vec!["go".into()]),
-        Commands::Fault => (inspect::Request::Fault, vec!["fault".into()]),
-        Commands::Verify { elf } => {
+    let openocd_timeout = config
+        .openocd
+        .as_ref()
+        .map_or(600, |openocd| openocd.timeout);
+    let (request, mut args) = plan(command, openocd_timeout);
+    let project = trace32(config)?;
+    match select(config, flag)? {
+        Backend::Trace32 => {
+            if json {
+                args.insert(0, "--json".into());
+            }
+            let code = project.debug(args).map_err(text)?;
+            Ok(u8::try_from(code).unwrap_or(1))
+        }
+        Backend::OpenOcd => {
+            let request = request?;
+            let name = request.name();
+            inspect::emit(name, json, inspect::run(config, &project, request))
+        }
+    }
+}
+
+/// A command as the OpenOCD request (an error when it is TRACE32 only) and
+/// as the arguments of tracebridge's `debug`. `openocd_timeout`: the default
+/// seconds of `run-until` with OpenOCD.
+fn plan(
+    command: Commands,
+    openocd_timeout: u64,
+) -> (Result<inspect::Request, String>, Vec<String>) {
+    match command {
+        Commands::Status => (Ok(inspect::Request::Status), vec!["status".to_string()]),
+        Commands::Halt => (Ok(inspect::Request::Halt), vec!["break".into()]),
+        Commands::Go => (Ok(inspect::Request::Go), vec!["go".into()]),
+        Commands::Attach => (Ok(inspect::Request::Attach), vec!["attach".into()]),
+        Commands::Reset => (Ok(inspect::Request::Reset), vec!["reset".into()]),
+        Commands::Down => (Err(trace32_only("down")), vec!["down".into()]),
+        Commands::Fault { trace } => {
+            let mut args = vec!["fault".to_string()];
+            let request = match trace {
+                Some(records) => {
+                    args.extend(["--trace".to_string(), records.to_string()]);
+                    Err(trace32_only("fault --trace"))
+                }
+                None => Ok(inspect::Request::Fault),
+            };
+            (request, args)
+        }
+        Commands::Reg { names } => {
+            let mut args = vec!["reg".to_string()];
+            args.extend(names);
+            (
+                Err(trace32_only(
+                    "reg (it reads registers by their PER names; use 'mem C15:0x...' or a \
+                     check file with read.addr)",
+                )),
+                args,
+            )
+        }
+        Commands::Mem { location, count } => {
+            let args = vec!["mem".to_string(), location.clone(), count.to_string()];
+            (Ok(inspect::Request::Mem { location, count }), args)
+        }
+        Commands::Trace { last } => (
+            Err(trace32_only("trace")),
+            vec!["trace".into(), "--last".into(), last.to_string()],
+        ),
+        Commands::Eval { expression } => {
+            let mut args = vec!["eval".to_string()];
+            args.extend(expression);
+            (Err(trace32_only("eval (PRACTICE)")), args)
+        }
+        Commands::Cmd { command } => {
+            let mut args = vec!["cmd".to_string()];
+            args.extend(command);
+            (Err(trace32_only("cmd (PRACTICE)")), args)
+        }
+        Commands::Watch { items } => {
+            let mut args = vec!["watch".to_string()];
+            args.extend(items);
+            (Err(trace32_only("watch (a PowerView window)")), args)
+        }
+        Commands::Do {
+            timeout,
+            script,
+            arguments,
+        } => {
+            let mut args = vec!["do".to_string()];
+            if let Some(timeout) = timeout {
+                args.extend(["--timeout".to_string(), timeout.to_string()]);
+            }
+            args.push(script);
+            args.extend(arguments);
+            (Err(trace32_only("do (PRACTICE scripts)")), args)
+        }
+        Commands::RunUntil { timeout, target } => {
+            let mut args = vec!["run-until".to_string()];
+            if let Some(timeout) = timeout {
+                args.extend(["--timeout".to_string(), timeout.to_string()]);
+            }
+            args.push(target.clone());
+            let seconds = timeout.unwrap_or(openocd_timeout);
+            (
+                Ok(inspect::Request::RunUntil {
+                    target,
+                    timeout: std::time::Duration::from_secs(seconds),
+                }),
+                args,
+            )
+        }
+        Commands::Verify { elf, t32 } => {
             let mut args = vec!["verify".to_string()];
             args.extend(elf.iter().map(|path| path.display().to_string()));
-            (inspect::Request::Verify(elf), args)
+            if t32 {
+                args.push("--t32".into());
+            }
+            let request = if t32 {
+                Err(trace32_only("verify --t32"))
+            } else {
+                Ok(inspect::Request::Verify(elf))
+            };
+            (request, args)
         }
         Commands::Check {
             file,
@@ -326,7 +597,7 @@ fn inspect_command(
                 halt,
                 dry_run,
             };
-            (inspect::Request::Check { file, options }, args)
+            (Ok(inspect::Request::Check { file, options }), args)
         }
         Commands::Clock { inputs, tree, html } => {
             let mut args = vec!["clock".to_string()];
@@ -336,40 +607,16 @@ fn inspect_command(
             }
             if html {
                 args.push("--html".into());
-                if select_quietly(config, flag) == Some(Backend::OpenOcd) {
-                    return Err("--html is available with TRACE32 only".into());
-                }
+                return (Err(trace32_only("clock --html")), args);
             }
-            (inspect::Request::Clock { inputs, tree }, args)
+            (Ok(inspect::Request::Clock { inputs, tree }), args)
         }
         _ => unreachable!("handled in run"),
-    };
-    let project = trace32(config)?;
-    match select(config, flag)? {
-        Backend::Trace32 => {
-            if json {
-                args.insert(0, "--json".into());
-            }
-            let code = project.debug(args).map_err(text)?;
-            Ok(u8::try_from(code).unwrap_or(1))
-        }
-        Backend::OpenOcd => {
-            let name = request.name();
-            inspect::emit(name, json, inspect::run(config, &project, request))
-        }
     }
 }
 
-/// The backend without the stderr line, for argument checks.
-fn select_quietly(config: &Config, flag: Option<Backend>) -> Option<Backend> {
-    let fixed = fixed(config, flag);
-    let found = match fixed {
-        Some(_) => Vec::new(),
-        None => probe::detect(config).ok()?,
-    };
-    probe::choose(fixed, &found)
-        .ok()
-        .map(|choice| choice.backend)
+fn trace32_only(what: &str) -> String {
+    format!("{what} is available with TRACE32 only (--backend trace32)")
 }
 
 fn parse_address(text: &str) -> Result<u64, String> {
@@ -519,4 +766,85 @@ fn run_dir(config: &Config) -> Result<PathBuf, String> {
             .map_err(|error| format!("cannot write {}: {error}", ignore.display()))?;
     }
     Ok(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether OpenOCD runs the command, and tracebridge's `debug` arguments.
+    fn planned(line: &[&str]) -> (bool, Vec<String>) {
+        let cli = Cli::try_parse_from(std::iter::once("rvdbg").chain(line.iter().copied()))
+            .unwrap_or_else(|error| panic!("{line:?}: {error}"));
+        let (request, args) = plan(cli.command, 600);
+        (request.is_ok(), args)
+    }
+
+    #[test]
+    fn commands_forward_to_tracebridge_debug() {
+        let cases: &[(&[&str], bool, &[&str])] = &[
+            (&["halt"], true, &["break"]),
+            (&["status"], true, &["status"]),
+            (&["reset"], true, &["reset"]),
+            (&["attach"], true, &["attach"]),
+            (&["down"], false, &["down"]),
+            (
+                &["mem", "_SEGGER_RTT", "4"],
+                true,
+                &["mem", "_SEGGER_RTT", "4"],
+            ),
+            (
+                &["reg", "HSR", "HSCTLR.C"],
+                false,
+                &["reg", "HSR", "HSCTLR.C"],
+            ),
+            (
+                &["eval", "Register(PC)", "+", "4"],
+                false,
+                &["eval", "Register(PC)", "+", "4"],
+            ),
+            (&["cmd", "Break.List"], false, &["cmd", "Break.List"]),
+            (&["trace", "--last", "8"], false, &["trace", "--last", "8"]),
+            (&["fault"], true, &["fault"]),
+            (&["fault", "--trace"], false, &["fault", "--trace", "32"]),
+            (
+                &["verify", "a.elf", "--t32"],
+                false,
+                &["verify", "a.elf", "--t32"],
+            ),
+            (&["verify"], true, &["verify"]),
+            (
+                &["check", "c.toml", "--variant", "s5", "--halt"],
+                true,
+                &["check", "c.toml", "--variant", "s5", "--halt"],
+            ),
+            (&["clock", "XOSC=40MHz"], true, &["clock", "XOSC=40MHz"]),
+            (&["clock", "--html"], false, &["clock", "--html"]),
+            (
+                &["run-until", "--timeout", "5", "guest_main"],
+                true,
+                &["run-until", "--timeout", "5", "guest_main"],
+            ),
+            (
+                &["do", "--timeout", "9", "setup.cmm", "-x", "1"],
+                false,
+                &["do", "--timeout", "9", "setup.cmm", "-x", "1"],
+            ),
+        ];
+        for (line, openocd, args) in cases {
+            let expected: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            assert_eq!(planned(line), (*openocd, expected), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn run_until_waits_for_the_openocd_timeout_by_default() {
+        let cli = Cli::try_parse_from(["rvdbg", "run-until", "main"]).unwrap();
+        match plan(cli.command, 42).0 {
+            Ok(inspect::Request::RunUntil { timeout, .. }) => {
+                assert_eq!(timeout, std::time::Duration::from_secs(42))
+            }
+            _ => panic!("expected run-until"),
+        }
+    }
 }

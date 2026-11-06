@@ -285,7 +285,7 @@ fn describe(choice: &flash::Choice) -> String {
 }
 
 /// `tracebridge chips`: which script `flash` would use, and related scripts.
-fn chips(config: &Config, query: Option<&str>, env: &pycompat::Env) -> Result<()> {
+pub(crate) fn chips(config: &Config, query: Option<&str>, env: &pycompat::Env) -> Result<()> {
     let Some(query) = query.or_else(|| flash::chip_name(config)) else {
         bail!("give a chip name, e.g. 'tracebridge chips STM32H743ZI'");
     };

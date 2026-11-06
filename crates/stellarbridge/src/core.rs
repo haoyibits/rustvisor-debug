@@ -29,6 +29,15 @@ pub enum RunState {
     Other,
 }
 
+/// How [`CoreTarget::run_until`] ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunUntil {
+    /// Where the core stopped; `None`: it still ran at the timeout.
+    pub pc: Option<u64>,
+    pub waited: std::time::Duration,
+    pub breakpoint_removed: bool,
+}
+
 /// One core of the target, by its OpenOCD target name (`chip.k0c0.core`).
 pub struct CoreTarget<'a> {
     pub server: &'a mut Server,
@@ -113,6 +122,73 @@ impl CoreTarget<'_> {
     pub fn resume(&mut self) -> target::Result<()> {
         self.eval(&format!("{} resume", oocd::quote(&self.core)))
             .map(|_| ())
+    }
+
+    /// Reset through the target configuration's reset events and stop at
+    /// the reset vector (`reset halt`).
+    pub fn reset_halt(&mut self) -> target::Result<()> {
+        self.server
+            .client
+            .set_timeout(std::time::Duration::from_secs(60))
+            .map_err(lift)?;
+        let result = self.eval("reset halt").map(|_| ());
+        self.server
+            .client
+            .set_timeout(std::time::Duration::from_secs(5))
+            .map_err(lift)?;
+        result
+    }
+
+    /// Run a halted core until it stops, with a hardware breakpoint at
+    /// `address` (the code runs from flash, where a software breakpoint
+    /// cannot be written). The breakpoint is removed when the core stops;
+    /// on a timeout the core keeps running and the breakpoint is removed if
+    /// OpenOCD allows it while the core runs.
+    pub fn run_until(
+        &mut self,
+        address: u64,
+        timeout: std::time::Duration,
+    ) -> target::Result<RunUntil> {
+        if self.run_state()? != RunState::Halted {
+            return Err(target::Error::new(format!(
+                "the core is not halted; run-until starts a halted core (stop it with \
+                 '{HALT_COMMAND}')"
+            )));
+        }
+        let core = oocd::quote(&self.core);
+        // bp and rbp act on the current target.
+        self.eval(&format!("targets {core}"))?;
+        self.eval(&format!("bp 0x{address:X} 4 hw"))
+            .map_err(|error| error.context(format!("cannot set a breakpoint at 0x{address:X}")))?;
+        if let Err(error) = self.resume() {
+            let _ = self.eval(&format!("rbp 0x{address:X}"));
+            return Err(error);
+        }
+        let start = std::time::Instant::now();
+        loop {
+            match self.run_state() {
+                Ok(RunState::Halted) => break,
+                Ok(_) => {}
+                Err(error) => return Err(error),
+            }
+            if start.elapsed() > timeout {
+                let removed = self.eval(&format!("rbp 0x{address:X}")).is_ok();
+                return Ok(RunUntil {
+                    pc: None,
+                    waited: start.elapsed(),
+                    breakpoint_removed: removed,
+                });
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let waited = start.elapsed();
+        let removed = self.eval(&format!("rbp 0x{address:X}")).is_ok();
+        let pc = self.read_core_register("PC")?;
+        Ok(RunUntil {
+            pc: Some(pc),
+            waited,
+            breakpoint_removed: removed,
+        })
     }
 
     fn require_halted(&mut self, what: &str) -> target::Result<()> {
@@ -418,6 +494,46 @@ mod tests {
             received
                 .iter()
                 .any(|c| c.contains("{chip.core aarch64 mrc 15 4 5 2 0}"))
+        );
+    }
+
+    #[test]
+    fn run_until_sets_a_hardware_breakpoint_and_removes_it() {
+        let (port, handle) = tcl_server(vec![
+            ("curstate", "0 halted"),
+            ("targets", "0 "),
+            ("bp 0x28000100 4 hw", "0 "),
+            ("resume", "0 "),
+            ("rbp 0x28000100", "0 "),
+            ("get_reg -force pc", "0 pc 0x28000100"),
+        ]);
+        let mut server = Server::attach(port).unwrap();
+        let mut target = CoreTarget {
+            server: &mut server,
+            core: "chip.core".into(),
+            memory_ap: None,
+            symbols: SymbolTable::default(),
+        };
+        let result = target
+            .run_until(0x2800_0100, std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(result.pc, Some(0x2800_0100));
+        assert!(result.breakpoint_removed);
+        drop(target);
+        drop(server);
+        let received = handle.join().unwrap();
+        let order: Vec<usize> = [
+            "{targets chip.core}",
+            "{bp 0x28000100 4 hw}",
+            "{chip.core resume}",
+            "{rbp 0x28000100}",
+        ]
+        .iter()
+        .map(|needle| received.iter().position(|c| c.contains(needle)).unwrap())
+        .collect();
+        assert!(
+            order.windows(2).all(|pair| pair[0] < pair[1]),
+            "{received:?}"
         );
     }
 

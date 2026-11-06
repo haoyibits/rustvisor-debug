@@ -13,7 +13,7 @@ use probecore::decode;
 use probecore::elf::{self, SymbolTable};
 use probecore::fault::{self, with_symbol};
 use probecore::style::Style;
-use probecore::target::{Target, hex32};
+use probecore::target::{Target, TargetAddress, hex32};
 use serde_json::{Value, json};
 use stellarbridge::core::{ApMemory, CoreTarget, RunState};
 use tracebridge::backend::Project;
@@ -136,6 +136,16 @@ pub enum Request {
         inputs: Vec<String>,
         tree: Option<PathBuf>,
     },
+    Mem {
+        location: String,
+        count: u32,
+    },
+    Attach,
+    Reset,
+    RunUntil {
+        target: String,
+        timeout: Duration,
+    },
 }
 
 impl Request {
@@ -148,6 +158,10 @@ impl Request {
             Request::Verify(_) => "verify",
             Request::Check { .. } => "check",
             Request::Clock { .. } => "clock",
+            Request::Mem { .. } => "mem",
+            Request::Attach => "attach",
+            Request::Reset => "reset",
+            Request::RunUntil { .. } => "run-until",
         }
     }
 }
@@ -215,6 +229,27 @@ pub fn run(config: &Config, project: &Project, request: Request) -> Result<Outco
                 code: report.exit_code() as u8,
             })
         }
+        Request::Mem { location, count } => mem(&mut target, &location, count, style),
+        Request::Attach => {
+            // OpenOCD's init examines the target without resetting it.
+            let mut outcome = status(&mut target, style)?;
+            outcome.text = format!("{}\n{}", style.good("attached without reset"), outcome.text);
+            Ok(outcome)
+        }
+        Request::Reset => {
+            target.reset_halt().map_err(text)?;
+            let mut outcome = status(&mut target, style)?;
+            outcome.text = format!(
+                "{}\n{}",
+                style.good("reset, halted at the reset vector"),
+                outcome.text
+            );
+            Ok(outcome)
+        }
+        Request::RunUntil {
+            target: location,
+            timeout,
+        } => run_until(&mut target, &location, timeout, style),
         Request::Clock { inputs, tree } => {
             let tree = tree.map(|path| cwd.join(path));
             let mut given = project.clock_inputs().to_vec();
@@ -235,6 +270,160 @@ pub fn run(config: &Config, project: &Project, request: Request) -> Result<Outco
             })
         }
     }
+}
+
+/// Most words `mem` reads at once, as in tracebridge.
+const MEM_MAX_WORDS: u32 = 4096;
+
+/// An address in the data-file notation (`AD:0x60000000`, `C15:0x4025`), a
+/// bare hexadecimal address, or a symbol of the ELF files; and the symbol.
+fn location(target: &CoreTarget, text: &str) -> Result<(TargetAddress, Option<String>), String> {
+    if let Some(address) = TargetAddress::parse(text) {
+        return Ok((address, None));
+    }
+    if let Some(value) = probecore::text::parse_int_auto(text).and_then(|v| u64::try_from(v).ok()) {
+        return Ok((
+            TargetAddress {
+                class: "AD".into(),
+                value,
+            },
+            None,
+        ));
+    }
+    let (name, offset) = match text.split_once('+') {
+        Some((name, offset)) => (
+            name.trim(),
+            probecore::text::parse_int_auto(offset.trim())
+                .and_then(|v| u64::try_from(v).ok())
+                .ok_or_else(|| format!("invalid offset in {text}"))?,
+        ),
+        None => (text, 0),
+    };
+    let (start, _) = target
+        .symbols
+        .range(name)
+        .ok_or_else(|| format!("{name} is neither an address nor a symbol of the ELF files"))?;
+    Ok((
+        TargetAddress {
+            class: "AD".into(),
+            value: start + offset,
+        },
+        Some(text.to_string()),
+    ))
+}
+
+/// `count` 32-bit words at an address or a symbol, as tracebridge's `mem`.
+fn mem(target: &mut CoreTarget, text: &str, count: u32, style: Style) -> Result<Outcome, String> {
+    if count == 0 || count > MEM_MAX_WORDS {
+        return Err(format!("count must be between 1 and {MEM_MAX_WORDS}"));
+    }
+    let (base, symbol) = location(target, text)?;
+    let words: Vec<u64> = if base.is_coprocessor() {
+        if count > 1 {
+            return Err(format!("{base} is a coprocessor register; read one word"));
+        }
+        vec![u64::from(target.read_u32(&base).map_err(text_of)?)]
+    } else {
+        let bytes = target
+            .read_memory(base.value, count as usize * 4)
+            .map_err(|error| format!("cannot read {base}: {error}"))?;
+        bytes
+            .chunks(4)
+            .map(|word| u64::from(u32::from_le_bytes(word.try_into().expect("4 bytes"))))
+            .collect()
+    };
+    let mut lines = Vec::new();
+    if let Some(symbol) = &symbol {
+        lines.push(format!(
+            "{} = {}",
+            style.symbol(symbol),
+            style.address(&base)
+        ));
+    }
+    for (row, chunk) in words.chunks(4).enumerate() {
+        let offset = row as u64 * 16;
+        let values: Vec<String> = chunk
+            .iter()
+            .map(|w| match w {
+                0 => style.dim(format!("{w:08X}")),
+                _ => format!("{w:08X}"),
+            })
+            .collect();
+        lines.push(format!(
+            "{}  {}  {}",
+            style.address(base.offset(offset)),
+            style.dim(format!("+0x{offset:03X}")),
+            values.join(" ")
+        ));
+    }
+    Ok(Outcome::ok(
+        lines.join("\n"),
+        json!({
+            "symbol": symbol,
+            "address": base.to_string(),
+            "words": words,
+            "hex": words.iter().map(|w| format!("0x{w:08X}")).collect::<Vec<_>>(),
+        }),
+    ))
+}
+
+fn text_of(error: probecore::target::Error) -> String {
+    error.message
+}
+
+/// Run a halted core to a symbol or address with a hardware breakpoint.
+fn run_until(
+    target: &mut CoreTarget,
+    text: &str,
+    timeout: Duration,
+    style: Style,
+) -> Result<Outcome, String> {
+    let (address, _) = location(target, text)?;
+    if address.is_coprocessor() {
+        return Err(format!("{text} is not a code address"));
+    }
+    let address = address.value;
+    let result = target.run_until(address, timeout).map_err(text_of)?;
+    let target_text = format!("{} ({})", style.symbol(text), hex32(address));
+    let Some(pc) = result.pc else {
+        let breakpoint = if result.breakpoint_removed {
+            "the breakpoint was removed"
+        } else {
+            "the breakpoint stays set until the core stops ('rvdbg halt' stops it)"
+        };
+        return Err(format!(
+            "{text} was not reached within {}s; the core keeps running and {breakpoint}",
+            timeout.as_secs()
+        ));
+    };
+    let pc_symbol = target.symbolize(pc);
+    let reached = pc == address;
+    let message = if reached {
+        format!(
+            "{} {target_text} after {} ms",
+            style.good("reached"),
+            result.waited.as_millis()
+        )
+    } else {
+        format!(
+            "{} at {}, not at {target_text}; the breakpoint is gone",
+            style.bad("stopped"),
+            with_symbol(style, pc, &pc_symbol)
+        )
+    };
+    Ok(Outcome {
+        text: message,
+        json: json!({
+            "target": text,
+            "address": address,
+            "hex": hex32(address),
+            "reached": reached,
+            "waited_ms": result.waited.as_millis() as u64,
+            "command": format!("bp 0x{address:X} 4 hw; resume"),
+            "pc": {"value": pc, "hex": hex32(pc), "symbol": fault::symbol_json(&pc_symbol)},
+        }),
+        code: if reached { 0 } else { EXIT_FAILED },
+    })
 }
 
 /// The run state; PC and CPSR when halted.

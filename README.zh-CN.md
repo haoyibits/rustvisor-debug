@@ -48,6 +48,13 @@ rvdbg flash
 | `check FILE` | `debug check` | 支持 `addr`、`core`、`clock` 读取（`reg`/`expr` 只有 TRACE32） |
 | `clock` | `debug clock`（也有 `--html`） | 同样的描述文件、同样的树 |
 | `rtt` | 同 `tracebridge rtt` | 经 MEM-AP，核心照常运行 |
+| `mem` | `debug mem` | 经 MEM-AP 读字；符号来自 ELF |
+| `reset`、`attach` | `debug reset`、`debug attach` | `reset halt`（停在复位向量）；attach 不复位 |
+| `run-until` | `debug run-until` | 设硬件断点、运行、等停下、删断点 |
+| `open`、`chips`、`reg`、`eval`、`cmd`、`watch`、`trace`、`do`、`down`、`shell`、`fault --trace`、`verify --t32`、`flash --chip/--script` | 对应同名的 `tracebridge` / `tracebridge debug` 命令（`shell` 是交互式的 `tracebridge debug`） | —（只有 TRACE32：PER 文件、PRACTICE、PowerView 窗口、trace） |
+| `skill` | 安装 rvdbg 的 agent skill（`~/.claude/skills/rvdbg`） | |
+
+tracebridge 的每个命令在 rvdbg 里都有对应，项目里可以只用 rvdbg。
 
 后端依次取 `--backend`、`rvdbg.toml` 的 `project.backend`、当前插着的调试器：StellarLINK → OpenOCD，Lauterbach 调试器或正在运行的 PowerView → TRACE32，两个都有时用 TRACE32。status、halt、go、fault、verify、check、clock 加 `--json` 时输出和 `tracebridge debug --json` 相同的 JSON。用 StellarLINK 时这些命令优先连 `rvdbg debug` 正在运行的 OpenOCD（Tcl 端口），否则自己启动一个，不复位目标；读核心寄存器和协处理器寄存器要先停核（`rvdbg halt`）。
 

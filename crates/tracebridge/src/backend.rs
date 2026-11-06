@@ -99,6 +99,30 @@ impl Project {
         )
     }
 
+    /// `flash` with the flash script chosen for `chip`, or with `script`
+    /// (`tracebridge flash --chip/--script`).
+    pub fn flash_with(&self, chip: Option<String>, script: Option<String>) -> Result<()> {
+        let mut config = self.0.clone();
+        if let Some(chip) = chip {
+            config.flash_script.clear();
+            config.flash_chip = chip;
+        }
+        if let Some(script) = script {
+            config.flash_script = script;
+        }
+        crate::cli::open(
+            &config,
+            Some(target::Action::Flash),
+            &pycompat::process_env(),
+        )
+    }
+
+    /// The flash scripts for a chip (`tracebridge chips`); without a query,
+    /// for the configured chip.
+    pub fn chips(&self, query: Option<&str>) -> Result<()> {
+        crate::cli::chips(&self.0, query, &pycompat::process_env())
+    }
+
     /// Start PowerView if needed, then load the symbols without flashing or
     /// resetting (`tracebridge load`).
     pub fn load_symbols(&self) -> Result<()> {

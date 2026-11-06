@@ -63,6 +63,14 @@ rvdbg flash
 | `check FILE` | `debug check` | `addr`, `core` and `clock` reads (`reg`/`expr` are TRACE32 only) |
 | `clock` | `debug clock` (`--html` too) | the same tree from the same descriptions |
 | `rtt` | `tracebridge rtt` | through the MEM-AP while the core runs |
+| `mem` | `debug mem` | words through the MEM-AP; symbols from the ELF |
+| `reset`, `attach` | `debug reset`, `debug attach` | `reset halt` (stops at the reset vector); attach does not reset |
+| `run-until` | `debug run-until` | a hardware breakpoint, run, wait, remove it |
+| `open`, `chips`, `reg`, `eval`, `cmd`, `watch`, `trace`, `do`, `down`, `shell`, `fault --trace`, `verify --t32`, `flash --chip/--script` | the `tracebridge` / `tracebridge debug` command of the same name (`shell` is the interactive `tracebridge debug`) | — (TRACE32 only: PER files, PRACTICE, PowerView windows, trace) |
+| `skill` | installs the agent skill for rvdbg (`~/.claude/skills/rvdbg`) | |
+
+Every tracebridge command has an rvdbg command, so a project can use rvdbg
+alone.
 
 The backend is `--backend`, else `project.backend` in `rvdbg.toml`, else
 the connected probe: a StellarLINK means OpenOCD, a Lauterbach probe or a

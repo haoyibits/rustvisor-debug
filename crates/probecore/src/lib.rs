@@ -7,6 +7,7 @@
 //! hypervisor.
 #![forbid(unsafe_code)]
 
+pub mod check;
 pub mod clock;
 pub mod decode;
 pub mod elf;

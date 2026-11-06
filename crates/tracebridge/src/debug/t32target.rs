@@ -29,6 +29,15 @@ impl<'a> T32Target<'a> {
             prepared: Vec::new(),
         }
     }
+
+    /// With the PER snapshot, for `read.reg`.
+    pub fn with_per(probe: &'a mut dyn Probe, per: &'a mut PerSnapshot) -> Self {
+        T32Target {
+            probe,
+            per: Some(per),
+            prepared: Vec::new(),
+        }
+    }
 }
 
 fn no_per() -> target::Error {

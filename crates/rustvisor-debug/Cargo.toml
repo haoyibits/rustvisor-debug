@@ -12,9 +12,12 @@ name = "rvdbg"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4.6", features = ["derive"] }
+toml = "1.1"
 probecore = { path = "../probecore" }
 stellarbridge = { path = "../stellarbridge" }
 tracebridge = { path = "../tracebridge" }
 
 [dev-dependencies]
 serde_json = "1.0"
+tempfile = "3.27"

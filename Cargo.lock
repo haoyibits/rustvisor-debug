@@ -451,9 +451,12 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 name = "rustvisor-debug"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "probecore",
  "serde_json",
  "stellarbridge",
+ "tempfile",
+ "toml",
  "tracebridge",
 ]
 
@@ -576,6 +579,7 @@ version = "0.1.0"
 dependencies = [
  "oocd",
  "probecore",
+ "tempfile",
 ]
 
 [[package]]

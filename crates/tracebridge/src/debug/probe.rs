@@ -444,29 +444,7 @@ pub fn running_error(what: &str) -> DebugError {
 }
 
 /// `sym+0x12` for an address in code, or `None` when TRACE32 knows no symbol.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SymbolRef {
-    /// TRACE32's symbol path, e.g. `\\app\Global\main`.
-    pub path: String,
-    pub offset: Option<u64>,
-}
-
-impl SymbolRef {
-    /// The last element of the symbol path.
-    pub fn short_name(&self) -> &str {
-        self.path
-            .rsplit('\\')
-            .find(|part| !part.is_empty())
-            .unwrap_or(&self.path)
-    }
-
-    pub fn describe(&self) -> String {
-        match self.offset {
-            Some(0) | None => self.short_name().to_string(),
-            Some(offset) => format!("{}+0x{offset:X}", self.short_name()),
-        }
-    }
-}
+pub use probecore::fault::SymbolRef;
 
 /// How far past a symbol without a known size an address may lie and still be
 /// shown as `symbol+offset`.

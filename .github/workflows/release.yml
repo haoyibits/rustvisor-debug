@@ -48,28 +48,36 @@ jobs:
         shell: bash
         run: |
           export TRACEBRIDGE_GIT_HASH="${GITHUB_SHA::10}"
-          cargo build --release --locked --target ${{ matrix.target }} -p tracebridge
+          cargo build --release --locked --target ${{ matrix.target }} -p tracebridge -p rustvisor-debug
       - name: Check that Linux binaries are static
         if: contains(matrix.target, 'musl')
         run: |
-          file target/${{ matrix.target }}/release/tracebridge
-          ! ldd target/${{ matrix.target }}/release/tracebridge 2>/dev/null | grep -q '=>'
+          for program in tracebridge rvdbg; do
+            file target/${{ matrix.target }}/release/$program
+            ! ldd target/${{ matrix.target }}/release/$program 2>/dev/null | grep -q '=>'
+          done
       - name: Package
         shell: bash
         run: |
-          name=tracebridge-${{ matrix.target }}
-          mkdir -p dist/$name
-          cp target/${{ matrix.target }}/release/tracebridge README.md LICENSE NOTICE dist/$name/
-          tar -C dist -czf dist/$name.tar.gz $name
-          cd dist
-          if command -v sha256sum >/dev/null; then
-            sha256sum $name.tar.gz > $name.tar.gz.sha256
-          else
-            shasum -a 256 $name.tar.gz > $name.tar.gz.sha256
-          fi
+          # One archive per program: tracebridge (TRACE32 only) and rvdbg
+          # (rustvisor's front end for TRACE32 and StellarLINK).
+          for program in tracebridge rvdbg; do
+            name=$program-${{ matrix.target }}
+            mkdir -p dist/$name
+            cp target/${{ matrix.target }}/release/$program README.md LICENSE NOTICE dist/$name/
+            tar -C dist -czf dist/$name.tar.gz $name
+            (
+              cd dist
+              if command -v sha256sum >/dev/null; then
+                sha256sum $name.tar.gz > $name.tar.gz.sha256
+              else
+                shasum -a 256 $name.tar.gz > $name.tar.gz.sha256
+              fi
+            )
+          done
       - uses: actions/upload-artifact@v4
         with:
-          name: tracebridge-${{ matrix.target }}
+          name: release-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
@@ -84,11 +92,13 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Homebrew bottles
-        run: packaging/homebrew/bottles.sh "${GITHUB_REF_NAME#v}" dist
+        run: |
+          packaging/homebrew/bottles.sh "${GITHUB_REF_NAME#v}" dist tracebridge
+          packaging/homebrew/bottles.sh "${GITHUB_REF_NAME#v}" dist rvdbg
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/* install.sh \
-            --title "tracebridge ${GITHUB_REF_NAME}" --generate-notes
+            --title "tracebridge and rvdbg ${GITHUB_REF_NAME}" --generate-notes
 

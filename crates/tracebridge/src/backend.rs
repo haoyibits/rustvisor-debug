@@ -22,6 +22,16 @@ pub const VERSION: &str = concat!(
     ")"
 );
 
+/// The RTT terminal loop, for any memory access that works while the core
+/// runs (another backend's).
+pub use crate::rtt::{Terminal as RttTerminal, terminal as rtt_terminal};
+
+/// Where clock tree descriptions are looked up by chip:
+/// `~/.config/tracebridge/clock` (or under `XDG_CONFIG_HOME`).
+pub fn clock_library_dir() -> PathBuf {
+    debug::clock::library_dir(&pycompat::process_env())
+}
+
 /// Resolved project configuration. Loading it never connects to PowerView.
 #[derive(Clone)]
 pub struct Project(Config);
@@ -120,6 +130,52 @@ impl Project {
     /// `<exe> --config <config_file> adapter`.
     pub fn install_rustrover(&self, exe: &Path) -> Result<PathBuf> {
         crate::rustrover::install(&self.0, exe)
+    }
+
+    /// `tracebridge debug <args>` with this configuration: one command (or
+    /// the interactive session without one) on the running PowerView. The
+    /// result is the exit code (0 ok, 2 usage, 3 a check failed or verify
+    /// found a difference); errors that stop the command are `Err`.
+    pub fn debug(&self, args: Vec<String>) -> Result<i32> {
+        if let Some(code) = debug::main_without_config(&args) {
+            return Ok(code);
+        }
+        let cwd = std::env::current_dir()
+            .map_err(|error| bridge_error!("cannot read the current directory: {error}"))?;
+        debug::main(&self.0, &cwd, args)
+    }
+
+    /// `tracebridge rtt <args>`: the RTT terminal through the running
+    /// PowerView until Ctrl-C. Usage errors exit like any clap parser.
+    pub fn rtt(&self, args: &[String]) -> Result<()> {
+        let args = crate::rtt::parse_args(args);
+        if !crate::powerview::port_open(self.0.rcl_port) {
+            return Err(bridge_error!(
+                "no PowerView on RCL port {}; flash or load first, or start PowerView",
+                self.0.rcl_port
+            ));
+        }
+        crate::rtt::run(&self.0, args)
+    }
+
+    /// The chip name: `flash.chip`, else `target.cpu`.
+    pub fn chip_name(&self) -> Option<String> {
+        flash::chip_name(&self.0).map(str::to_string)
+    }
+
+    /// The board's clock frequencies (`[clock]`).
+    pub fn clock_inputs(&self) -> &[(String, f64)] {
+        &self.0.clock
+    }
+
+    /// The RTT settings: control-block symbol, fixed control-block address,
+    /// poll interval in seconds.
+    pub fn rtt_settings(&self) -> (&str, Option<u64>, f64) {
+        (
+            &self.0.rtt_symbol,
+            self.0.rtt_control_block_address,
+            self.0.rtt_poll_interval,
+        )
     }
 
     /// Explicit images override project defaults, including an empty extra-image list.

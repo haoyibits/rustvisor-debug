@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+pub mod core;
+
 use probecore::elf::{self, Segment, SegmentResult};
 use probecore::target::{self, Target, TargetAddress};
 
@@ -105,7 +107,8 @@ impl ServerConfig {
 /// A running OpenOCD and the connection to its Tcl server. Dropping it
 /// shuts OpenOCD down.
 pub struct Server {
-    child: Child,
+    /// `None` when attached to an OpenOCD that someone else started.
+    child: Option<Child>,
     client: oocd::Client,
     log: Option<PathBuf>,
 }
@@ -186,7 +189,7 @@ impl Server {
             }
             if let Ok(client) = oocd::Client::connect(address, Duration::from_secs(5)) {
                 return Ok(Server {
-                    child,
+                    child: Some(child),
                     client,
                     log: config.log.clone(),
                 });
@@ -203,6 +206,38 @@ impl Server {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// Use the OpenOCD that already serves Tcl on `tcl_port` (e.g. the one
+    /// of a debug session); it is left running afterwards.
+    pub fn attach(tcl_port: u16) -> Result<Server> {
+        let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, tcl_port));
+        let client = oocd::Client::connect(address, Duration::from_secs(5))
+            .map_err(|error| Error(format!("cannot reach OpenOCD on port {tcl_port}: {error}")))?;
+        Ok(Server {
+            child: None,
+            client,
+            log: None,
+        })
+    }
+
+    /// Whether something listens on the Tcl port (an OpenOCD to attach to).
+    pub fn running(tcl_port: u16) -> bool {
+        !port_free(tcl_port)
+    }
+
+    /// Attach to the OpenOCD on the Tcl port, or start one.
+    pub fn attach_or_start(config: &ServerConfig) -> Result<Server> {
+        if Server::running(config.tcl_port) {
+            Server::attach(config.tcl_port)
+        } else {
+            Server::start(config)
+        }
+    }
+
+    /// Whether this process started the OpenOCD (and stops it on drop).
+    pub fn owned(&self) -> bool {
+        self.child.is_some()
     }
 
     pub fn log(&self) -> Option<&Path> {
@@ -229,7 +264,10 @@ impl Server {
     /// Wait until OpenOCD exits by itself (e.g. `shutdown` from an event
     /// handler, or Ctrl-C), without asking it to.
     pub fn wait(mut self) -> Result<std::process::ExitStatus> {
-        self.child
+        let Some(child) = self.child.as_mut() else {
+            fail!("this OpenOCD was not started here");
+        };
+        child
             .wait()
             .map_err(|error| Error(format!("waiting for OpenOCD: {error}")))
     }
@@ -240,22 +278,25 @@ impl Server {
     }
 
     fn stop(&mut self) {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
         let _ = self.client.raw("shutdown");
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            if let Ok(Some(_)) = self.child.try_wait() {
+            if let Ok(Some(_)) = child.try_wait() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        if let Ok(None) = self.child.try_wait() {
+        if let Some(Ok(None)) = self.child.as_mut().map(|child| child.try_wait()) {
             self.stop();
         }
     }

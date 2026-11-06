@@ -25,6 +25,32 @@ Rust 调用者使用 `tracebridge::backend::{Project, Session}`：配置加载�
 
 支持的主机：Apple 芯片的 macOS 和 Linux（x86_64、aarch64）。不支持 Intel Mac。
 
+## rvdbg：TRACE32 和 StellarLINK 共用的前端
+
+`rvdbg` 是同一个仓库里 rustvisor 的调试前端。它读一个 `rvdbg.toml`，每条命令在当前插着的调试器上执行：TRACE32 走 tracebridge 的代码，ST 的 StellarLINK 走打过补丁的 OpenOCD（[`openocd-stellar`](https://github.com/haoyibits/OpenOCD/tree/openocd-automotive-mcu-r3)，作为独立程序运行）。
+
+```sh
+brew install haoyibits/tap/rvdbg     # 会一起装上 openocd-stellar
+rvdbg init                           # 生成 rvdbg.toml；目录里有 trace32.toml 时沿用其中的设置
+rvdbg config                         # 显示找到的调试器和会用的后端
+rvdbg flash
+```
+
+| 命令 | TRACE32 | StellarLINK（OpenOCD） |
+|---|---|---|
+| `flash` | 同 `tracebridge flash` | 擦除、写入、逐段回读比对；一次性写入区内容不同时拒绝写入（`--write-otp` 才允许） |
+| `load` | 同 `tracebridge load` | —（GDB 自己读 ELF） |
+| `debug`、`vscode` | DAP 代理，`TRACE32: Attach` | 核心的 GDB server，`StellarLINK: Attach`（Cortex-Debug） |
+| `rustrover` | `TRACE32: Attach` | — |
+| `status`、`halt`、`go` | `debug status`、`break`、`go` | 运行状态、PC、CPSR |
+| `fault` | `debug fault` | 同样的报告；HSR、HDFAR、HIFAR、HVBAR 用 `mrc` 读，另读 ELR_hyp、SPSR_hyp |
+| `verify [ELF]` | `debug verify` | 同样的比对，经 MEM-AP 读 |
+| `check FILE` | `debug check` | 支持 `addr`、`core`、`clock` 读取（`reg`/`expr` 只有 TRACE32） |
+| `clock` | `debug clock`（也有 `--html`） | 同样的描述文件、同样的树 |
+| `rtt` | 同 `tracebridge rtt` | 经 MEM-AP，核心照常运行 |
+
+后端依次取 `--backend`、`rvdbg.toml` 的 `project.backend`、当前插着的调试器：StellarLINK → OpenOCD，Lauterbach 调试器或正在运行的 PowerView → TRACE32，两个都有时用 TRACE32。status、halt、go、fault、verify、check、clock 加 `--json` 时输出和 `tracebridge debug --json` 相同的 JSON。用 StellarLINK 时这些命令优先连 `rvdbg debug` 正在运行的 OpenOCD（Tcl 端口），否则自己启动一个，不复位目标；读核心寄存器和协处理器寄存器要先停核（`rvdbg halt`）。
+
 ## 安装
 
 用 Homebrew（macOS 或 Linux）：

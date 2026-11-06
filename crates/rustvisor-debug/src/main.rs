@@ -9,6 +9,7 @@
 
 mod config;
 mod init;
+mod inspect;
 mod openocd;
 mod probe;
 
@@ -39,6 +40,10 @@ struct Cli {
     /// Use this backend instead of the one of the connected probe
     #[arg(long, global = true, value_enum)]
     backend: Option<BackendArg>,
+
+    /// Machine-readable JSON output (status, halt, go, fault, verify, check, clock)
+    #[arg(long, global = true)]
+    json: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -94,6 +99,62 @@ enum Commands {
     Adapter,
     /// Write the debug configurations of both backends into .vscode/
     Vscode,
+    /// Run state of the core; PC and CPSR when it is halted
+    Status,
+    /// Stop the core
+    Halt,
+    /// Let the core run
+    Go,
+    /// AArch32 Hyp fault report: vector, HSR decoded, HDFAR/HIFAR, ELR_hyp, SPSR_hyp
+    Fault,
+    /// Compare target memory with the images at their load addresses
+    Verify {
+        /// ELF file (default: the ELF and the extra images)
+        elf: Option<PathBuf>,
+    },
+    /// Run a check file (registers, memory, clocks against expectations)
+    Check {
+        file: PathBuf,
+        /// Run the checks listed for this variant
+        #[arg(long)]
+        variant: Option<String>,
+        /// Stop the core when checks read core or coprocessor registers
+        #[arg(long)]
+        halt: bool,
+        /// Only resolve names and symbols; read nothing
+        #[arg(long, conflicts_with = "halt")]
+        dry_run: bool,
+    },
+    /// Clock tree with frequencies, computed from the clock registers
+    Clock {
+        /// Frequencies only the board knows, e.g. XOSC=40MHz (default: [clock] in rvdbg.toml)
+        #[arg(value_name = "CLOCK=FREQUENCY")]
+        inputs: Vec<String>,
+        /// Clock tree description (default: chosen by chip from ~/.config/tracebridge/clock)
+        #[arg(long, value_name = "FILE")]
+        tree: Option<PathBuf>,
+        /// TRACE32: also write the tree as a diagram to .tracebridge/clock.html
+        #[arg(long)]
+        html: bool,
+    },
+    /// SEGGER RTT terminal on channel 0 while the core runs (Ctrl-C to stop)
+    Rtt {
+        /// Control-block symbol (default: rtt.symbol, _SEGGER_RTT)
+        #[arg(long)]
+        symbol: Option<String>,
+        /// Control-block address; skips the symbol lookup, e.g. 0x60000000
+        #[arg(long = "cb", value_parser = parse_address)]
+        control_block: Option<u64>,
+        /// Poll period in seconds (default: rtt.poll_interval, 0.02)
+        #[arg(long)]
+        poll: Option<f64>,
+        /// Set the up-channel read offset to zero first (show what is buffered)
+        #[arg(long)]
+        replay: bool,
+        /// Do not forward terminal input to the target
+        #[arg(long)]
+        output_only: bool,
+    },
     /// Write the RustRover run configuration for TRACE32 (.run/, LSP4IJ)
     Rustrover,
 }
@@ -183,7 +244,138 @@ fn run(cli: Cli) -> Result<u8, String> {
                 .map_err(text)?;
             Ok(0)
         }
+        Commands::Rtt {
+            symbol,
+            control_block,
+            poll,
+            replay,
+            output_only,
+        } => match select(&config, flag)? {
+            Backend::OpenOcd => inspect::rtt(
+                &config,
+                &trace32(&config)?,
+                inspect::RttOptions {
+                    symbol,
+                    control_block,
+                    poll,
+                    replay,
+                    output_only,
+                },
+            ),
+            Backend::Trace32 => {
+                let mut args = Vec::new();
+                if let Some(symbol) = symbol {
+                    args.extend(["--symbol".to_string(), symbol]);
+                }
+                if let Some(address) = control_block {
+                    args.extend(["--cb".to_string(), format!("0x{address:X}")]);
+                }
+                if let Some(poll) = poll {
+                    args.extend(["--poll".to_string(), poll.to_string()]);
+                }
+                if replay {
+                    args.push("--replay".into());
+                }
+                if output_only {
+                    args.push("--output-only".into());
+                }
+                trace32(&config)?.rtt(&args).map_err(text)?;
+                Ok(0)
+            }
+        },
+        command => inspect_command(&config, flag, cli.json, command),
     }
+}
+
+/// status, halt, go, fault, verify, check, clock: tracebridge's `debug`
+/// commands on TRACE32, the same commands through OpenOCD on StellarLINK.
+fn inspect_command(
+    config: &Config,
+    flag: Option<Backend>,
+    json: bool,
+    command: Commands,
+) -> Result<u8, String> {
+    let (request, mut args) = match command {
+        Commands::Status => (inspect::Request::Status, vec!["status".to_string()]),
+        Commands::Halt => (inspect::Request::Halt, vec!["break".into()]),
+        Commands::Go => (inspect::Request::Go, vec!["go".into()]),
+        Commands::Fault => (inspect::Request::Fault, vec!["fault".into()]),
+        Commands::Verify { elf } => {
+            let mut args = vec!["verify".to_string()];
+            args.extend(elf.iter().map(|path| path.display().to_string()));
+            (inspect::Request::Verify(elf), args)
+        }
+        Commands::Check {
+            file,
+            variant,
+            halt,
+            dry_run,
+        } => {
+            let mut args = vec!["check".to_string(), file.display().to_string()];
+            if let Some(variant) = &variant {
+                args.extend(["--variant".to_string(), variant.clone()]);
+            }
+            if halt {
+                args.push("--halt".into());
+            }
+            if dry_run {
+                args.push("--dry-run".into());
+            }
+            let options = probecore::check::Options {
+                variant,
+                halt,
+                dry_run,
+            };
+            (inspect::Request::Check { file, options }, args)
+        }
+        Commands::Clock { inputs, tree, html } => {
+            let mut args = vec!["clock".to_string()];
+            args.extend(inputs.iter().cloned());
+            if let Some(tree) = &tree {
+                args.extend(["--tree".to_string(), tree.display().to_string()]);
+            }
+            if html {
+                args.push("--html".into());
+                if select_quietly(config, flag) == Some(Backend::OpenOcd) {
+                    return Err("--html is available with TRACE32 only".into());
+                }
+            }
+            (inspect::Request::Clock { inputs, tree }, args)
+        }
+        _ => unreachable!("handled in run"),
+    };
+    let project = trace32(config)?;
+    match select(config, flag)? {
+        Backend::Trace32 => {
+            if json {
+                args.insert(0, "--json".into());
+            }
+            let code = project.debug(args).map_err(text)?;
+            Ok(u8::try_from(code).unwrap_or(1))
+        }
+        Backend::OpenOcd => {
+            let name = request.name();
+            inspect::emit(name, json, inspect::run(config, &project, request))
+        }
+    }
+}
+
+/// The backend without the stderr line, for argument checks.
+fn select_quietly(config: &Config, flag: Option<Backend>) -> Option<Backend> {
+    let fixed = fixed(config, flag);
+    let found = match fixed {
+        Some(_) => Vec::new(),
+        None => probe::detect(config).ok()?,
+    };
+    probe::choose(fixed, &found)
+        .ok()
+        .map(|choice| choice.backend)
+}
+
+fn parse_address(text: &str) -> Result<u64, String> {
+    probecore::text::parse_int_auto(text)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| format!("invalid address: {text}"))
 }
 
 fn text(error: impl std::fmt::Display) -> String {

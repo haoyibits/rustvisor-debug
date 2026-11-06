@@ -70,6 +70,8 @@ pub struct OpenOcd {
     /// The OpenOCD target that serves GDB on `gdb_port`; `None`: every
     /// target gets a port, numbered from `gdb_port` in creation order.
     pub gdb_target: Option<String>,
+    /// The core that halt, go, fault and check use; default `gdb_target`.
+    pub core: Option<String>,
     pub gdb: String,
     pub memory_ap: Option<String>,
     pub timeout: u64,
@@ -108,6 +110,20 @@ impl Config {
         self.openocd
             .as_ref()
             .ok_or_else(|| format!("{} has no [openocd] section", self.file.display()))
+    }
+}
+
+impl OpenOcd {
+    /// The core's OpenOCD target name: `core`, else `gdb_target`.
+    pub fn core(&self) -> Result<&str, String> {
+        self.core
+            .as_deref()
+            .or(self.gdb_target.as_deref())
+            .ok_or_else(|| {
+                "set openocd.core (or openocd.gdb_target) to the core's OpenOCD target name, \
+                 e.g. sr6p6.k0c0.core"
+                    .to_string()
+            })
     }
 }
 
@@ -224,6 +240,7 @@ pub const OPENOCD_KEYS: &[&str] = &[
     "tcl_port",
     "gdb_port",
     "gdb_target",
+    "core",
     "gdb",
     "memory_ap",
     "timeout",
@@ -289,6 +306,7 @@ fn parse_openocd(section: &Table, root: &Path) -> Result<OpenOcd, String> {
         tcl_port,
         gdb_port,
         gdb_target: string(section, "openocd", "gdb_target")?.filter(|name| !name.is_empty()),
+        core: string(section, "openocd", "core")?.filter(|name| !name.is_empty()),
         gdb: string(section, "openocd", "gdb")?
             .filter(|gdb| !gdb.is_empty())
             .unwrap_or_else(|| "arm-none-eabi-gdb".into()),

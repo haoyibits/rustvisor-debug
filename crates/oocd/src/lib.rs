@@ -190,6 +190,32 @@ impl Client {
         }
         Ok(bytes)
     }
+
+    /// Write `data` at `address` through the memory access of `target`, in
+    /// bytes.
+    pub fn write_memory(&mut self, target: &str, address: u64, data: &[u8]) -> Result<()> {
+        const CHUNK: usize = 1024;
+        for (index, chunk) in data.chunks(CHUNK).enumerate() {
+            let at = address + (index * CHUNK) as u64;
+            let list: Vec<String> = chunk.iter().map(|byte| format!("0x{byte:02X}")).collect();
+            self.eval(&format!(
+                "{} write_memory 0x{at:X} 8 {{{}}}",
+                quote(target),
+                list.join(" ")
+            ))?;
+        }
+        Ok(())
+    }
+
+    /// One aligned 32-bit write, so the target sees a single access (RTT's
+    /// read and write offsets).
+    pub fn write_u32(&mut self, target: &str, address: u64, value: u32) -> Result<()> {
+        self.eval(&format!(
+            "{} write_memory 0x{address:X} 32 {{0x{value:08X}}}",
+            quote(target)
+        ))
+        .map(|_| ())
+    }
 }
 
 /// The numbers of a Tcl list such as `0x1 0x0 0x5a`.
@@ -280,6 +306,26 @@ mod tests {
         drop(client);
         let received = handle.join().unwrap();
         assert!(received[0].contains("{chip.axi read_memory 0x29F87E00 8 4}"));
+    }
+
+    #[test]
+    fn write_memory_sends_bytes_and_words() {
+        let (address, handle) = server(vec!["0 ", "0 "]);
+        let mut client = client(address);
+        client
+            .write_memory("chip.axi", 0x6000_0010, &[1, 0xAB])
+            .unwrap();
+        client.write_u32("chip.axi", 0x6000_0020, 0x1234).unwrap();
+        drop(client);
+        let received = handle.join().unwrap();
+        assert!(
+            received[0].contains("{chip.axi write_memory 0x60000010 8 {0x01 0xAB}}"),
+            "{received:?}"
+        );
+        assert!(
+            received[1].contains("{chip.axi write_memory 0x60000020 32 {0x00001234}}"),
+            "{received:?}"
+        );
     }
 
     #[test]

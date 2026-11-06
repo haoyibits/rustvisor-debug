@@ -18,7 +18,7 @@ pub const LAUNCH_NAME: &str = "StellarLINK: Attach";
 const STARTING: &str = "[rvdbg] starting OpenOCD";
 const READY: &str = "[rvdbg] GDB server ready on 127.0.0.1:";
 
-fn server_config(
+pub(crate) fn server_config(
     openocd: &OpenOcd,
     log: Option<PathBuf>,
     gdb: bool,

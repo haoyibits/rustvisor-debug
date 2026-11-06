@@ -1,11 +1,12 @@
 #!/bin/sh
 # Repackage the release archives as Homebrew bottles.
 #
-#   packaging/homebrew/bottles.sh <version> <dist dir>
+#   packaging/homebrew/bottles.sh <version> <dist dir> [program]
 #
-# For every tracebridge-<target>.tar.gz in <dist dir>, writes
-# tracebridge-<version>.<tag>.bottle.tar.gz and its .sha256 next to it. A
-# bottle is the installed keg as a tarball: tracebridge/<version>/bin/...
+# For every <program>-<target>.tar.gz in <dist dir> (program: tracebridge,
+# the default, or rvdbg), writes <program>-<version>.<tag>.bottle.tar.gz and
+# its .sha256 next to it. A bottle is the installed keg as a tarball:
+# <program>/<version>/bin/...
 # Homebrew pours a bottle without building anything, so installing from the
 # tap does not need Xcode or the Command Line Tools.
 #
@@ -16,7 +17,8 @@
 set -eu
 
 version="${1:?version, e.g. 0.1.0}"
-dist="${2:?directory with tracebridge-<target>.tar.gz}"
+dist="${2:?directory with <program>-<target>.tar.gz}"
+program="${3:-tracebridge}"
 
 tag_of() {
     case "$1" in
@@ -33,20 +35,20 @@ checksum() {
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-for archive in "$dist"/tracebridge-*.tar.gz; do
+for archive in "$dist"/"$program"-*.tar.gz; do
     base="$(basename "$archive" .tar.gz)"
     case "$base" in *.bottle) continue ;; esac
-    target="${base#tracebridge-}"
+    target="${base#"$program"-}"
     tag="$(tag_of "$target")"
-    rm -rf "$work/unpack" "$work/tracebridge"
-    mkdir -p "$work/unpack" "$work/tracebridge/$version/bin"
+    rm -rf "$work/unpack" "$work/$program"
+    mkdir -p "$work/unpack" "$work/$program/$version/bin"
     tar -xzf "$archive" -C "$work/unpack"
-    cp "$work/unpack/$base/tracebridge" "$work/tracebridge/$version/bin/"
+    cp "$work/unpack/$base/$program" "$work/$program/$version/bin/"
     cp "$work/unpack/$base/LICENSE" "$work/unpack/$base/NOTICE" "$work/unpack/$base/README.md" \
-        "$work/tracebridge/$version/"
-    chmod 755 "$work/tracebridge/$version/bin/tracebridge"
-    bottle="tracebridge-$version.$tag.bottle.tar.gz"
-    tar -C "$work" -czf "$dist/$bottle" "tracebridge"
+        "$work/$program/$version/"
+    chmod 755 "$work/$program/$version/bin/$program"
+    bottle="$program-$version.$tag.bottle.tar.gz"
+    tar -C "$work" -czf "$dist/$bottle" "$program"
     (cd "$dist" && checksum "$bottle" > "$bottle.sha256")
     echo "$bottle"
 done

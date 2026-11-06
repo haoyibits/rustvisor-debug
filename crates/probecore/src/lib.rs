@@ -11,6 +11,7 @@ pub mod check;
 pub mod clock;
 pub mod decode;
 pub mod elf;
+pub mod fault;
 pub mod rtt;
 pub mod style;
 pub mod target;

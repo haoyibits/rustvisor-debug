@@ -211,23 +211,60 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
     };
 
     let mut memory = RunTime(&mut debugger);
+    terminal(
+        &mut memory,
+        &Terminal {
+            probe: "TRACE32",
+            symbol: &symbol,
+            control_block,
+            poll,
+            replay: args.replay,
+            output_only: args.output_only,
+        },
+    )
+}
+
+/// How [`terminal`] runs.
+pub struct Terminal<'a> {
+    /// The probe's name in the status lines (`TRACE32`, `StellarLINK`).
+    pub probe: &'a str,
+    /// The control block's symbol, for the status line.
+    pub symbol: &'a str,
+    pub control_block: u64,
+    pub poll: Duration,
+    /// Set the up-channel RdOff to zero before polling.
+    pub replay: bool,
+    /// Do not forward terminal input to the down-channel.
+    pub output_only: bool,
+}
+
+/// The interactive RTT terminal on channel 0 until Ctrl-C, through any
+/// memory access that works while the core runs.
+pub fn terminal(memory: &mut impl Memory, options: &Terminal) -> Result<()> {
+    let Terminal {
+        probe,
+        symbol,
+        control_block,
+        poll,
+        ..
+    } = *options;
     let mut channel = RttChannel::new(control_block);
     // The status lines on stderr; what the target prints is never touched.
     let style = Style::stderr();
     eprintln!(
         "{} {} @ {}; Ctrl-C to stop",
-        style.label("TRACE32 RTT:"),
-        style.symbol(&symbol),
+        style.label(format!("{probe} RTT:")),
+        style.symbol(symbol),
         style.address(format!("0x{control_block:08X}"))
     );
-    if !channel.refresh_state(&mut memory).unwrap_or(false) {
+    if !channel.refresh_state(memory).unwrap_or(false) {
         eprintln!(
             "{} waiting for the target to initialize SEGGER RTT; \
              if debugging is paused before RTT initialization, press Continue",
             style.warn("[rtt]")
         );
     }
-    if args.replay {
+    if options.replay {
         memory
             .write_u32(channel.cb(UP_DESCRIPTOR + DESC_RD_OFF), 0)
             .map_err(|error| bridge_error!("cannot reset the RTT read offset: {error}"))?;
@@ -235,22 +272,22 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
 
     let interrupted = std::sync::Arc::new(AtomicBool::new(false));
     crate::signals::flag_on_interrupt(&interrupted);
-    let guard = TerminalGuard::enable(!args.output_only);
+    let guard = TerminalGuard::enable(!options.output_only);
     let mut pending_input: Vec<u8> = Vec::new();
     let mut consecutive_errors = 0u64;
     let mut stdout = std::io::stdout();
     while !interrupted.load(Ordering::SeqCst) {
         let step = (|| -> probecore::Result<()> {
-            let output = channel.read_up(&mut memory)?;
+            let output = channel.read_up(memory)?;
             if !output.is_empty() {
                 // Passed through byte for byte: escape sequences are the target's business.
                 let _ = stdout.write_all(&output);
                 let _ = stdout.flush();
             }
-            if !args.output_only {
+            if !options.output_only {
                 pending_input.extend(read_terminal_input());
                 if !pending_input.is_empty() {
-                    let sent = channel.write_down(&mut memory, &pending_input)?;
+                    let sent = channel.write_down(memory, &pending_input)?;
                     pending_input.drain(..sent);
                 }
             }
@@ -260,6 +297,10 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
             Ok(()) => {
                 consecutive_errors = 0;
                 std::thread::sleep(poll);
+            }
+            Err(error) if error.lost => {
+                drop(guard);
+                bail!("RTT: the connection to the probe is gone: {error}");
             }
             Err(error) => {
                 consecutive_errors += 1;
@@ -275,7 +316,7 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
         }
     }
     drop(guard);
-    eprintln!("\n{}", style.label("TRACE32 RTT terminal stopped"));
+    eprintln!("\n{}", style.label(format!("{probe} RTT terminal stopped")));
     Ok(())
 }
 

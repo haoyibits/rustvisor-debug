@@ -36,6 +36,42 @@ retry of target operations after an error. See [backend usage](docs/backend.md).
 
 Supported hosts: macOS on Apple silicon and Linux (x86_64, aarch64). Intel Macs are not supported.
 
+## rvdbg: one front end for TRACE32 and StellarLINK
+
+`rvdbg` is rustvisor's debug front end in the same repository. It reads one
+`rvdbg.toml` and runs each command on the probe that is plugged in: TRACE32
+through tracebridge's code, or ST's StellarLINK through a patched OpenOCD
+([`openocd-stellar`](https://github.com/haoyibits/OpenOCD/tree/openocd-automotive-mcu-r3),
+run as a separate program).
+
+```sh
+brew install haoyibits/tap/rvdbg     # also installs openocd-stellar
+rvdbg init                           # rvdbg.toml; takes over trace32.toml if there is one
+rvdbg config                         # the probe it found and the backend it picks
+rvdbg flash
+```
+
+| Command | TRACE32 | StellarLINK (OpenOCD) |
+|---|---|---|
+| `flash` | `tracebridge flash` | erase, write, compare every segment; refuses to change OTP areas unless `--write-otp` |
+| `load` | `tracebridge load` | — (GDB reads the ELF) |
+| `debug`, `vscode` | DAP adapter, `TRACE32: Attach` | GDB server on the core, `StellarLINK: Attach` (Cortex-Debug) |
+| `rustrover` | `TRACE32: Attach` | — |
+| `status`, `halt`, `go` | `debug status`, `break`, `go` | run state, PC and CPSR |
+| `fault` | `debug fault` | the same report; HSR, HDFAR, HIFAR, HVBAR with `mrc`, ELR_hyp and SPSR_hyp |
+| `verify [ELF]` | `debug verify` | the same comparison through the MEM-AP |
+| `check FILE` | `debug check` | `addr`, `core` and `clock` reads (`reg`/`expr` are TRACE32 only) |
+| `clock` | `debug clock` (`--html` too) | the same tree from the same descriptions |
+| `rtt` | `tracebridge rtt` | through the MEM-AP while the core runs |
+
+The backend is `--backend`, else `project.backend` in `rvdbg.toml`, else
+the connected probe: a StellarLINK means OpenOCD, a Lauterbach probe or a
+running PowerView means TRACE32, both mean TRACE32. `--json` gives the same
+JSON as `tracebridge debug --json` for status, halt, go, fault, verify,
+check and clock. With StellarLINK these commands use the OpenOCD that
+`rvdbg debug` runs (its Tcl port), or start one that does not reset the
+target; core and coprocessor registers need the core halted (`rvdbg halt`).
+
 ## Install
 
 With Homebrew (macOS or Linux):
@@ -776,9 +812,12 @@ cargo test                 # unit, fake-server and end-to-end tests
 cargo clippy --all-targets -- -D warnings
 ```
 
-The workspace has two crates: `crates/t32rcl`, a pure Rust port of the parts
-of Lauterbach's `lauterbach-trace32-rcl` Python library (TCP only) that
-tracebridge uses, and `crates/tracebridge`, the CLI. `t32rcl` is tested
+The workspace: `crates/t32rcl`, a pure Rust port of the parts of Lauterbach's
+`lauterbach-trace32-rcl` Python library (TCP only) that tracebridge uses;
+`crates/tracebridge`, the CLI and TRACE32 backend; `crates/oocd`, a client for
+OpenOCD's Tcl port; `crates/stellarbridge`, the OpenOCD backend;
+`crates/probecore`, the analysis both backends share (check files, clock
+trees, ELF compare, RTT, fault report); and `crates/rustvisor-debug`, rvdbg. `t32rcl` is tested
 byte-for-byte against traffic recorded from the Python library; see
 `crates/t32rcl/tools/` and the `capture_proxy` and `smoke` examples for
 recording against a real PowerView.

@@ -121,6 +121,154 @@ pub fn section_names(bytes: &[u8]) -> Result<Vec<String>, String> {
         .collect()
 }
 
+/// One symbol of the ELF symbol table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    /// The address; bit 0 of an Arm Thumb function is cleared.
+    pub value: u64,
+    /// 0 when the size is unknown.
+    pub size: u64,
+}
+
+/// How far past a symbol without a size an address may lie and still be
+/// shown as `symbol+offset` (the same rule as tracebridge's symbol lookup).
+pub const SYMBOL_SLACK: u64 = 0x100;
+
+/// The functions and objects of one or more ELF files, for backends that
+/// have no symbol table of their own (OpenOCD).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SymbolTable {
+    pub symbols: Vec<Symbol>,
+}
+
+impl SymbolTable {
+    /// Read the symbols of `bytes` and add them.
+    pub fn add_elf(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.symbols.extend(symbols(bytes)?);
+        Ok(())
+    }
+
+    /// First and last address of the symbol `name` (the last is the first
+    /// when the size is unknown).
+    pub fn range(&self, name: &str) -> Option<(u64, u64)> {
+        let symbol = self.symbols.iter().find(|symbol| symbol.name == name)?;
+        Some((symbol.value, symbol.value + symbol.size.saturating_sub(1)))
+    }
+
+    /// The symbol an address belongs to and the offset into it: the
+    /// smallest symbol that contains it, else the nearest symbol below
+    /// without a size, within [`SYMBOL_SLACK`] bytes.
+    pub fn lookup(&self, address: u64) -> Option<(&Symbol, u64)> {
+        let containing = self
+            .symbols
+            .iter()
+            .filter(|s| s.size > 0 && s.value <= address && address - s.value < s.size)
+            .min_by_key(|s| s.size);
+        if let Some(symbol) = containing {
+            return Some((symbol, address - symbol.value));
+        }
+        self.symbols
+            .iter()
+            .filter(|s| s.size == 0 && s.value <= address && address - s.value < SYMBOL_SLACK)
+            .max_by_key(|s| s.value)
+            .map(|symbol| (symbol, address - symbol.value))
+    }
+}
+
+/// `e_machine` of 32-bit Arm, whose Thumb function addresses have bit 0 set.
+const EM_ARM: u64 = 40;
+
+/// The named functions, objects and untyped symbols that are defined in a
+/// section (`.symtab`). Arm mapping symbols (`$a`, `$t`, `$d`) are skipped.
+pub fn symbols(bytes: &[u8]) -> Result<Vec<Symbol>, String> {
+    const SHT_SYMTAB: u64 = 2;
+    let (r, wide) = header(bytes)?;
+    let machine = r.u16(0x12)?;
+    let (shoff, shentsize, shnum) = if wide {
+        (r.u64(0x28)?, r.u16(0x3A)?, r.u16(0x3C)?)
+    } else {
+        (r.u32(0x20)?, r.u16(0x2E)?, r.u16(0x30)?)
+    };
+    // (sh_type, sh_link, sh_offset, sh_size, sh_entsize)
+    let section = |number: u64| -> Result<(u64, u64, u64, u64, u64), String> {
+        let base = index(shoff + number * shentsize)?;
+        Ok(if wide {
+            (
+                r.u32(base + 4)?,
+                r.u32(base + 0x28)?,
+                r.u64(base + 0x18)?,
+                r.u64(base + 0x20)?,
+                r.u64(base + 0x38)?,
+            )
+        } else {
+            (
+                r.u32(base + 4)?,
+                r.u32(base + 0x18)?,
+                r.u32(base + 0x10)?,
+                r.u32(base + 0x14)?,
+                r.u32(base + 0x24)?,
+            )
+        })
+    };
+    let mut found = Vec::new();
+    if shoff == 0 {
+        return Ok(found);
+    }
+    for number in 0..shnum {
+        let (kind, link, offset, size, entsize) = section(number)?;
+        if kind != SHT_SYMTAB || entsize == 0 {
+            continue;
+        }
+        let (_, _, strings_offset, strings_size, _) = section(link)?;
+        let strings = r.get(index(strings_offset)?, index(strings_size)?)?;
+        for entry in 0..size / entsize {
+            let base = index(offset + entry * entsize)?;
+            let (name, info, shndx, value, symbol_size) = if wide {
+                (
+                    r.u32(base)?,
+                    r.get(base + 4, 1)?[0],
+                    r.u16(base + 6)?,
+                    r.u64(base + 8)?,
+                    r.u64(base + 16)?,
+                )
+            } else {
+                (
+                    r.u32(base)?,
+                    r.get(base + 12, 1)?[0],
+                    r.u16(base + 14)?,
+                    r.u32(base + 4)?,
+                    r.u32(base + 8)?,
+                )
+            };
+            // NOTYPE, OBJECT, FUNC; defined (not SHN_UNDEF, not SHN_ABS).
+            let kind = info & 0xF;
+            if kind > 2 || shndx == 0 || shndx == 0xFFF1 {
+                continue;
+            }
+            let Some(tail) = strings.get(index(name)?..) else {
+                continue;
+            };
+            let end = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
+            let name = String::from_utf8_lossy(&tail[..end]).into_owned();
+            if name.is_empty() || name.starts_with('$') {
+                continue;
+            }
+            let value = if machine == EM_ARM && kind == 2 {
+                value & !1
+            } else {
+                value
+            };
+            found.push(Symbol {
+                name,
+                value,
+                size: symbol_size,
+            });
+        }
+    }
+    Ok(found)
+}
+
 /// The `PT_LOAD` segments with `p_filesz > 0` (NOLOAD and `.bss`-only
 /// segments have nothing to compare).
 pub fn load_segments(bytes: &[u8]) -> Result<Vec<Segment>, String> {
@@ -202,6 +350,72 @@ pub fn compare(target: &mut dyn Target, segments: &[Segment]) -> TargetResult<Ve
     Ok(results)
 }
 
+/// The text and JSON of one image's comparison, as `verify` shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerifyReport {
+    /// The file name line, one line per segment, then the verdict.
+    pub lines: Vec<String>,
+    pub matched: bool,
+    pub differing: usize,
+    pub first_difference: Option<u64>,
+    pub segments: serde_json::Value,
+}
+
+pub fn verify_report(
+    path: &std::path::Path,
+    results: &[SegmentResult],
+    style: crate::style::Style,
+) -> VerifyReport {
+    let mut lines = vec![path.display().to_string()];
+    for result in results {
+        let runs = if result.vaddr != result.paddr {
+            style.dim(format!("  (runs at 0x{:08X})", result.vaddr))
+        } else {
+            String::new()
+        };
+        let verdict = match result.first_difference {
+            None => style.good("match"),
+            Some(first) => style.bad(format!(
+                "{} bytes differ, first at AD:0x{first:08X}",
+                result.differing
+            )),
+        };
+        lines.push(format!(
+            "  {}  {:>8} bytes{runs}  {verdict}",
+            style.address(format!("AD:0x{:08X}", result.paddr)),
+            result.size
+        ));
+    }
+    let differing: usize = results.iter().map(|r| r.differing).sum();
+    let first = results.iter().find_map(|r| r.first_difference);
+    lines.push(match first {
+        None => style.good("match"),
+        Some(first) => format!(
+            "{} {differing} bytes differ, first at AD:0x{first:08X}",
+            style.bad("MISMATCH:")
+        ),
+    });
+    let segments = results
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "paddr": r.paddr,
+                "vaddr": r.vaddr,
+                "size": r.size,
+                "differing": r.differing,
+                "first_difference": r.first_difference,
+            })
+        })
+        .collect();
+    VerifyReport {
+        lines,
+        matched: differing == 0,
+        differing,
+        first_difference: first,
+        segments,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +450,84 @@ mod tests {
         fn break_command(&self) -> &str {
             "test break"
         }
+    }
+
+    /// A minimal ELF32 Arm file with a `.symtab` (the symbols given) and
+    /// its string table.
+    fn elf32_with_symbols(entries: &[(&str, u32, u32, u8, u16)]) -> Vec<u8> {
+        let mut strtab = vec![0u8];
+        let mut symtab = vec![0u8; 16]; // the null symbol
+        for (name, value, size, info, shndx) in entries {
+            let name_offset = strtab.len() as u32;
+            strtab.extend_from_slice(name.as_bytes());
+            strtab.push(0);
+            symtab.extend_from_slice(&name_offset.to_le_bytes());
+            symtab.extend_from_slice(&value.to_le_bytes());
+            symtab.extend_from_slice(&size.to_le_bytes());
+            symtab.push(*info);
+            symtab.push(0);
+            symtab.extend_from_slice(&shndx.to_le_bytes());
+        }
+        let mut file = vec![0u8; 52];
+        file[..4].copy_from_slice(b"\x7fELF");
+        file[4] = 1; // ELF32
+        file[5] = 1; // little endian
+        file[0x12..0x14].copy_from_slice(&40u16.to_le_bytes()); // EM_ARM
+        let symtab_offset = file.len() as u32;
+        file.extend_from_slice(&symtab);
+        let strtab_offset = file.len() as u32;
+        file.extend_from_slice(&strtab);
+        let shoff = file.len() as u32;
+        file[0x20..0x24].copy_from_slice(&shoff.to_le_bytes());
+        file[0x2E..0x30].copy_from_slice(&40u16.to_le_bytes());
+        file[0x30..0x32].copy_from_slice(&3u16.to_le_bytes());
+        // Section headers: null, .symtab (link 2), .strtab.
+        let header = |kind: u32, link: u32, offset: u32, size: u32, entsize: u32| {
+            let mut h = vec![0u8; 40];
+            h[4..8].copy_from_slice(&kind.to_le_bytes());
+            h[0x10..0x14].copy_from_slice(&offset.to_le_bytes());
+            h[0x14..0x18].copy_from_slice(&size.to_le_bytes());
+            h[0x18..0x1C].copy_from_slice(&link.to_le_bytes());
+            h[0x24..0x28].copy_from_slice(&entsize.to_le_bytes());
+            h
+        };
+        file.extend(header(0, 0, 0, 0, 0));
+        file.extend(header(2, 2, symtab_offset, symtab.len() as u32, 16));
+        file.extend(header(3, 0, strtab_offset, strtab.len() as u32, 0));
+        file
+    }
+
+    #[test]
+    fn symbols_come_from_the_symbol_table() {
+        const FUNC: u8 = 0x12; // GLOBAL FUNC
+        const OBJECT: u8 = 0x11;
+        const NOTYPE: u8 = 0x10;
+        let bytes = elf32_with_symbols(&[
+            ("main", 0x2800_0101, 0x40, FUNC, 1),
+            ("_SEGGER_RTT", 0x6000_0000, 0xA8, OBJECT, 2),
+            ("__hyp_vectors", 0x2800_1000, 0, NOTYPE, 1),
+            ("$t", 0x2800_0100, 0, 0x00, 1),
+            ("undefined", 0, 0, FUNC, 0),
+            ("absolute", 0x10, 0, NOTYPE, 0xFFF1),
+        ]);
+        let mut table = SymbolTable::default();
+        table.add_elf(&bytes).unwrap();
+        let names: Vec<&str> = table.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["main", "_SEGGER_RTT", "__hyp_vectors"]);
+        // Thumb bit cleared.
+        assert_eq!(table.range("main"), Some((0x2800_0100, 0x2800_013F)));
+        assert_eq!(
+            table.range("__hyp_vectors"),
+            Some((0x2800_1000, 0x2800_1000))
+        );
+        assert_eq!(table.range("missing"), None);
+        let (symbol, offset) = table.lookup(0x2800_0110).unwrap();
+        assert_eq!((symbol.name.as_str(), offset), ("main", 0x10));
+        let (symbol, offset) = table.lookup(0x2800_1018).unwrap();
+        assert_eq!((symbol.name.as_str(), offset), ("__hyp_vectors", 0x18));
+        // Past the slack of a symbol without size, and past main's end.
+        assert!(table.lookup(0x2800_1100).is_none());
+        assert!(table.lookup(0x2800_0140).is_none());
     }
 
     #[test]

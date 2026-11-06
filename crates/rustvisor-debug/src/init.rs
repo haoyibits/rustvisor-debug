@@ -174,7 +174,8 @@ pub fn render(imported: Option<&Table>) -> String {
          commands = []\n\
          tcl_port = 6666\n\
          gdb_port = 3333\n\
-         # The core GDB debugs; only it gets a GDB server.\n\
+         # The core GDB debugs; only it gets a GDB server. halt, go, fault and\n\
+         # check use it too (set core = \"...\" for another one).\n\
          gdb_target = \"sr6p6.k0c0.core\"\n\
          gdb = \"arm-none-eabi-gdb\"\n\
          # Reads physical memory: the comparison after flashing and the OTP check.\n\

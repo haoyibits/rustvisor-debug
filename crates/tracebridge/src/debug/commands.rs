@@ -10,17 +10,18 @@ use t32rcl::Value;
 use super::check;
 use super::clock;
 use super::clockhtml;
-use super::decode::{self, FaultAddress};
+use super::decode;
 use super::elf;
 use super::probe::{
     self, AddressCheck, AddressSource, DResult, DebugError, DebuggerState, PerSnapshot, Probe,
-    SymbolRef, TargetAddress, eval_u64, fail, format_value, hex32, read_long, running_error,
-    symbolize, value_as_u64,
+    TargetAddress, eval_u64, fail, format_value, hex32, read_long, running_error, symbolize,
+    value_as_u64,
 };
 use super::trace;
 use super::{EXIT_FAILED, Outcome};
 use crate::config::Config;
 use crate::style::Style;
+use probecore::fault;
 
 /// PowerView build that introduced PER.Watch, PER.AddWatch and PER.ClearWatch.
 pub const PER_WATCH_BUILD: u64 = 176763;
@@ -50,25 +51,7 @@ fn optional(result: t32rcl::Result<Value>) -> DResult<Option<Value>> {
     }
 }
 
-fn symbol_json(symbol: &Option<SymbolRef>) -> serde_json::Value {
-    match symbol {
-        Some(symbol) => json!({
-            "path": symbol.path,
-            "name": symbol.short_name(),
-            "offset": symbol.offset,
-            "text": symbol.describe(),
-        }),
-        None => serde_json::Value::Null,
-    }
-}
-
-fn with_symbol(style: Style, value: u64, symbol: &Option<SymbolRef>) -> String {
-    let value = style.value(hex32(value));
-    match symbol {
-        Some(symbol) => format!("{value}  {}", style.symbol(symbol.describe())),
-        None => format!("{value}  {}", style.dim("(no symbol)")),
-    }
-}
+use probecore::fault::{symbol_json, with_symbol};
 
 // ------------------------------------------------------------- R: status
 
@@ -407,17 +390,7 @@ pub fn mem(ctx: &mut Context, location: &str, count: u32) -> DResult<Outcome> {
 
 /// Hyp fault registers. These CP15 encodings are architectural (Armv7-A/R
 /// with virtualization, Armv8-R AArch32), not board facts.
-const HSR: &str = "C15:0x4025";
-const HDFAR: &str = "C15:0x4006";
-const HIFAR: &str = "C15:0x4206";
-const HVBAR: &str = "C15:0x400C";
-
-/// The entry of a vector table other than the active one that holds PC.
-struct OtherTable {
-    base: u64,
-    slot: &'static str,
-    symbol: String,
-}
+use probecore::fault::{HDFAR, HIFAR, HSR, HVBAR};
 
 /// R: Armv7/Armv8-R AArch32 Hyp fault report, followed by the newest
 /// `trace_records` trace records when given: the way into the exception.
@@ -469,133 +442,19 @@ pub fn fault(ctx: &mut Context, trace_records: Option<u32>) -> DResult<Outcome> 
     let hvbar = read_long(probe, &cp15(HVBAR)).map_err(no_hyp("HVBAR (C15:0x400C)"))?;
     let pc = eval_u64(probe, "Register(PP)")?;
 
-    let hsr = decode::decode_hsr(hsr_raw);
-    let spsr_decoded = decode::decode_psr(spsr as u32);
-    let pc_symbol = symbolize(probe, pc)?;
-    let hvbar_symbol = symbolize(probe, hvbar)?;
-    let elr_symbol = symbolize(probe, elr)?;
-    let slot = decode::vector_slot(hvbar, pc);
-    // PC in another table: a fault taken before the final table is installed
-    // stops in the first one. Vector tables are 32-byte aligned.
-    let other_table = match (&slot, &pc_symbol) {
-        (None, Some(symbol)) => symbol.offset.and_then(|offset| {
-            let base = pc - offset;
-            let (_, slot) = decode::vector_slot(base, pc)?;
-            (base != hvbar && base % 32 == 0).then(|| OtherTable {
-                base,
-                slot,
-                symbol: symbol.short_name().to_string(),
-            })
-        }),
-        _ => None,
+    let facts = fault::Facts {
+        pc,
+        pc_symbol: symbolize(probe, pc)?,
+        hvbar,
+        hvbar_symbol: symbolize(probe, hvbar)?,
+        hsr: hsr_raw,
+        hdfar,
+        hifar,
+        elr,
+        elr_symbol: symbolize(probe, elr)?,
+        spsr,
     };
-
-    let mut lines = Vec::new();
-    let table_name = hvbar_symbol
-        .as_ref()
-        .map(|s| format!(" ({})", style.symbol(s.describe())))
-        .unwrap_or_default();
-    lines.push(format!(
-        "{}        {}",
-        style.label("PC"),
-        with_symbol(style, pc, &pc_symbol)
-    ));
-    match (&slot, &other_table) {
-        (Some((offset, name)), _) => lines.push(format!(
-            "          hyp vector {}: HVBAR {}{table_name} + 0x{offset:02X}",
-            style.bad(format!("\"{name}\"")),
-            hex32(hvbar)
-        )),
-        (None, Some(other)) => lines.push(format!(
-            "          {} entry of {} at {}, which is {} \
-             (HVBAR {}{table_name})",
-            style.bad(format!("\"{}\"", other.slot)),
-            style.symbol(&other.symbol),
-            hex32(other.base),
-            style.warn("NOT the active table"),
-            hex32(hvbar)
-        )),
-        (None, None) => lines.push(format!(
-            "          not at a hyp vector (HVBAR {}{table_name})",
-            hex32(hvbar)
-        )),
-    }
-    // HSR = 0 would decode as "EC 0x00 unknown reason"; it means that no
-    // exception has been taken to Hyp mode.
-    let recorded = hsr_raw != 0;
-    if recorded {
-        lines.push(format!(
-            "{}       {}",
-            style.label("HSR"),
-            style.value(hex32(hsr_raw.into()))
-        ));
-        lines.extend(
-            hsr.describe(style)
-                .into_iter()
-                .map(|line| format!("  {line}")),
-        );
-    } else {
-        lines.push(format!(
-            "{}       {}  {}",
-            style.label("HSR"),
-            style.value("0x00000000"),
-            style.good("HSR = 0: no exception recorded")
-        ));
-    }
-    let fault_address = if recorded {
-        hsr.fault_address()
-    } else {
-        FaultAddress::None
-    };
-    match fault_address {
-        FaultAddress::Hdfar => lines.push(format!(
-            "{}     {}  {}",
-            style.label("HDFAR"),
-            style.value(hex32(hdfar)),
-            style.dim("(faulting data address)")
-        )),
-        FaultAddress::Hifar => lines.push(format!(
-            "{}     {}  {}",
-            style.label("HIFAR"),
-            style.value(hex32(hifar)),
-            style.dim("(faulting instruction address)")
-        )),
-        FaultAddress::None => {}
-    }
-    lines.push(format!(
-        "{}   {}",
-        style.label("ELR_hyp"),
-        with_symbol(style, elr, &elr_symbol)
-    ));
-    lines.push(format!(
-        "{}  {}  {}",
-        style.label("SPSR_hyp"),
-        style.value(hex32(spsr)),
-        spsr_decoded.describe()
-    ));
-
-    let mut report = json!({
-            "pc": {"value": pc, "hex": hex32(pc), "symbol": symbol_json(&pc_symbol)},
-            "hvbar": {"value": hvbar, "hex": hex32(hvbar), "symbol": symbol_json(&hvbar_symbol)},
-            "vector": slot.map(|(offset, name)| json!({"offset": offset, "name": name})),
-            "other_table": other_table.as_ref().map(|other| json!({
-                "base": other.base,
-                "hex": hex32(other.base),
-                "symbol": other.symbol,
-                "slot": other.slot,
-            })),
-            "exception_recorded": recorded,
-            "hsr": if recorded { hsr.to_json() } else { json!({"raw": 0, "hex": "0x00000000"}) },
-            "fault_address_register": match fault_address {
-                FaultAddress::Hdfar => Some("HDFAR"),
-                FaultAddress::Hifar => Some("HIFAR"),
-                FaultAddress::None => None,
-            },
-            "hdfar": {"value": hdfar, "hex": hex32(hdfar)},
-            "hifar": {"value": hifar, "hex": hex32(hifar)},
-            "elr_hyp": {"value": elr, "hex": hex32(elr), "symbol": symbol_json(&elr_symbol)},
-            "spsr_hyp": spsr_decoded.to_json(),
-    });
+    let (mut lines, mut report) = fault::render(&facts, style);
 
     // The way into the fault, when asked for. A trace that cannot be read
     // does not hide the report: the reason is shown in its place.
@@ -684,36 +543,9 @@ fn verify_one(ctx: &mut Context, path: std::path::PathBuf, t32: bool) -> DResult
     let results = elf::compare(ctx.probe, &segments)?;
 
     let style = ctx.style;
-    let mut lines = vec![path.display().to_string()];
-    for result in &results {
-        let runs = if result.vaddr != result.paddr {
-            style.dim(format!("  (runs at 0x{:08X})", result.vaddr))
-        } else {
-            String::new()
-        };
-        let verdict = match result.first_difference {
-            None => style.good("match"),
-            Some(first) => style.bad(format!(
-                "{} bytes differ, first at AD:0x{first:08X}",
-                result.differing
-            )),
-        };
-        lines.push(format!(
-            "  {}  {:>8} bytes{runs}  {verdict}",
-            style.address(format!("AD:0x{:08X}", result.paddr)),
-            result.size
-        ));
-    }
-    let differing: usize = results.iter().map(|r| r.differing).sum();
-    let first = results.iter().find_map(|r| r.first_difference);
-    let matched = differing == 0;
-    lines.push(match first {
-        None => style.good("match"),
-        Some(first) => format!(
-            "{} {differing} bytes differ, first at AD:0x{first:08X}",
-            style.bad("MISMATCH:")
-        ),
-    });
+    let report = elf::verify_report(&path, &results, style);
+    let mut lines = report.lines;
+    let (matched, differing, first) = (report.matched, report.differing, report.first_difference);
 
     let mut t32_json = serde_json::Value::Null;
     let mut t32_matched = true;
@@ -747,18 +579,7 @@ fn verify_one(ctx: &mut Context, path: std::path::PathBuf, t32: bool) -> DResult
         }
         t32_json = json!({"match": t32_matched, "first_difference": address});
     }
-    let segments_json: Vec<_> = results
-        .iter()
-        .map(|r| {
-            json!({
-                "paddr": r.paddr,
-                "vaddr": r.vaddr,
-                "size": r.size,
-                "differing": r.differing,
-                "first_difference": r.first_difference,
-            })
-        })
-        .collect();
+    let segments_json = report.segments;
     Ok(Outcome {
         text: lines.join("\n"),
         json: json!({

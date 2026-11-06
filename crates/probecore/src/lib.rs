@@ -7,10 +7,12 @@
 //! hypervisor.
 #![forbid(unsafe_code)]
 
+pub mod clock;
 pub mod decode;
 pub mod elf;
 pub mod rtt;
 pub mod style;
 pub mod target;
+pub mod text;
 
 pub use target::{Error, Memory, Result, Target, TargetAddress};

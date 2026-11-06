@@ -8,5 +8,9 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+toml = "1.1"
 # Same features as tracebridge: key order and numbers of the JSON output.
 serde_json = { version = "1.0", features = ["preserve_order", "arbitrary_precision"] }
+
+[dev-dependencies]
+tempfile = "3.27"

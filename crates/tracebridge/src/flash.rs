@@ -106,37 +106,7 @@ pub fn library_dir(env: &Env) -> PathBuf {
     config_dir(env).join("flash")
 }
 
-/// Case-insensitive glob match supporting `*` and `?`.
-pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern: Vec<char> = pattern.to_ascii_uppercase().chars().collect();
-    let text: Vec<char> = text.to_ascii_uppercase().chars().collect();
-    let (mut p, mut t) = (0, 0);
-    let (mut star, mut mark) = (None, 0);
-    while t < text.len() {
-        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
-            p += 1;
-            t += 1;
-        } else if p < pattern.len() && pattern[p] == '*' {
-            star = Some(p);
-            mark = t;
-            p += 1;
-        } else if let Some(position) = star {
-            p = position + 1;
-            mark += 1;
-            t = mark;
-        } else {
-            return false;
-        }
-    }
-    pattern[p..].iter().all(|&c| c == '*')
-}
-
-/// How specific a matching pattern is: exact names first, then the number of
-/// literal characters.
-pub fn specificity(pattern: &str) -> (bool, usize) {
-    let literal = pattern.chars().filter(|c| !matches!(c, '*' | '?')).count();
-    (literal == pattern.chars().count(), literal)
-}
+pub use probecore::text::{glob_match, specificity};
 
 /// Read the `@Chip:` patterns and `PREPAREONLY` support of one script.
 pub fn read_script(path: &Path, source: Source) -> Option<Script> {

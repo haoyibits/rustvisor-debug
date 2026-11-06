@@ -58,19 +58,7 @@ pub struct Config {
     pub clock: Vec<(String, f64)>,
 }
 
-/// A frequency: `40MHz`, `32.768 kHz`, `8e6` or a plain number of Hz.
-pub fn parse_frequency(text: &str) -> std::result::Result<f64, String> {
-    let trimmed = text.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    let (number, scale) = [("ghz", 1e9), ("mhz", 1e6), ("khz", 1e3), ("hz", 1.0)]
-        .into_iter()
-        .find_map(|(unit, scale)| Some((lower.strip_suffix(unit)?, scale)))
-        .unwrap_or((lower.as_str(), 1.0));
-    match number.trim_end().parse::<f64>() {
-        Ok(value) if value.is_finite() && value > 0.0 => Ok(value * scale),
-        _ => Err(format!("{text:?} is not a frequency such as \"40MHz\"")),
-    }
-}
+pub use probecore::text::parse_frequency;
 
 /// Find the configuration: `--config` if given, otherwise the nearest
 /// trace32.toml in `cwd` or one of its parents.

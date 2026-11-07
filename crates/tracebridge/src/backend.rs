@@ -22,6 +22,8 @@ pub const VERSION: &str = concat!(
     ")"
 );
 
+/// The process environment, as [`Project::from_document_with_env`] takes it.
+pub use crate::pycompat::process_env;
 /// The RTT terminal loop, for any memory access that works while the core
 /// runs (another backend's).
 pub use crate::rtt::{Terminal as RttTerminal, terminal as rtt_terminal};
@@ -76,12 +78,29 @@ impl Project {
     /// directory, and the IDE files and the PowerView toolbar run
     /// `<exe> --config <config_file> adapter|flash|load`.
     pub fn from_document(document: &toml::Table, config_file: &Path) -> Result<Self> {
-        let env = pycompat::process_env();
+        Self::from_document_with_env(document, config_file, &pycompat::process_env())
+    }
+
+    /// [`from_document`](Self::from_document) with the given environment
+    /// instead of the process's (`ELF`, `EXTRA_ELF`, `T32_*`, ...).
+    pub fn from_document_with_env(
+        document: &toml::Table,
+        config_file: &Path,
+        env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Self> {
         Ok(Self(config::config_from_document(
             document,
             config_file,
-            &env,
+            env,
         )?))
+    }
+
+    /// The images flash, load and verify use, in that order: the ELF, then
+    /// the extra images, after `ELF`, `EXTRA_ELF` and `PROJECT_ROOT`.
+    pub fn image_paths(&self) -> Vec<PathBuf> {
+        std::iter::once(self.0.elf.clone())
+            .chain(self.0.extra_elf.iter().cloned())
+            .collect()
     }
 
     /// `<project>/.tracebridge`: the PowerView log and the toolbar script.

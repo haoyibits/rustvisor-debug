@@ -38,6 +38,7 @@
 //! `[rtt]` and `[trace32...]` tables in trace32.toml's shape, so the keys,
 //! defaults and environment overrides are tracebridge's.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use toml::{Table, Value};
@@ -94,6 +95,24 @@ pub struct Config {
 }
 
 impl Config {
+    /// `ELF`, `EXTRA_ELF` and `PROJECT_ROOT` from `env` replace the images,
+    /// for both backends and with tracebridge's rules (`EXTRA_ELF` split like
+    /// a shell line, set and empty meaning none). Unset, nothing changes.
+    pub fn with_environment(mut self, env: &BTreeMap<String, String>) -> Result<Config, String> {
+        if !IMAGE_VARIABLES.iter().any(|name| env.contains_key(*name)) {
+            return Ok(self);
+        }
+        let project =
+            tracebridge::backend::Project::from_document_with_env(&self.trace32, &self.file, env)
+                .map_err(|error| error.to_string())?;
+        let mut images = project.image_paths().into_iter();
+        if let Some(elf) = images.next() {
+            self.elf = elf;
+        }
+        self.extra_elf = images.collect();
+        Ok(self)
+    }
+
     /// The tracebridge project of the TRACE32 tables.
     pub fn trace32_project(&self) -> Result<tracebridge::backend::Project, String> {
         tracebridge::backend::Project::from_document(&self.trace32, &self.file)
@@ -159,8 +178,13 @@ pub fn load(path: &Path) -> Result<Config, String> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    parse(&text, path, &root).map_err(|error| format!("{}: {error}", path.display()))
+    parse(&text, path, &root)
+        .and_then(|config| config.with_environment(&tracebridge::backend::process_env()))
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
+
+/// The variables that choose other images: `rustvisor images --env` sets them.
+const IMAGE_VARIABLES: [&str; 3] = ["ELF", "EXTRA_ELF", "PROJECT_ROOT"];
 
 fn table<'a>(document: &'a Table, key: &str) -> Result<Option<&'a Table>, String> {
     match document.get(key) {
@@ -499,6 +523,53 @@ mod tests {
         assert_eq!(openocd.gdb_target.as_deref(), Some("sr6p6.k0c0.core"));
         assert_eq!(openocd.memory_ap.as_deref(), Some("sr6p6.axi"));
         assert_eq!(openocd.otp, [(0x29F8_7000, 0x1000)]);
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn image_variables_replace_the_images() {
+        let config = parse_text(FULL)
+            .unwrap()
+            .with_environment(&env(&[
+                ("ELF", "out/hypervisor"),
+                ("EXTRA_ELF", "out/guest0.elf '/abs/guest 1.elf'"),
+            ]))
+            .unwrap();
+        assert_eq!(config.elf, PathBuf::from("/p/out/hypervisor"));
+        assert_eq!(
+            config.extra_elf,
+            [
+                PathBuf::from("/p/out/guest0.elf"),
+                PathBuf::from("/abs/guest 1.elf")
+            ]
+        );
+        assert_eq!(config.images().len(), 3);
+    }
+
+    #[test]
+    fn empty_extra_elf_means_no_extra_image_and_elf_stays() {
+        let config = parse_text(FULL)
+            .unwrap()
+            .with_environment(&env(&[("EXTRA_ELF", "")]))
+            .unwrap();
+        assert_eq!(config.elf, PathBuf::from("/p/build/app.elf"));
+        assert!(config.extra_elf.is_empty());
+    }
+
+    #[test]
+    fn without_image_variables_the_file_decides() {
+        let file = parse_text(FULL).unwrap();
+        let config = file
+            .clone()
+            .with_environment(&env(&[("T32_RCL_PORT", "x")]))
+            .unwrap();
+        assert_eq!(config, file);
     }
 
     #[test]

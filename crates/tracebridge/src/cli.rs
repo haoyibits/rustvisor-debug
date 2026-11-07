@@ -173,10 +173,7 @@ fn run(cli: Cli) -> Result<i32> {
         Command::Rtt { args } => {
             let args = rtt::parse_args(&args);
             if !powerview::port_open(config.rcl_port) {
-                bail!(
-                    "no PowerView on RCL port {}; run 'tracebridge open', 'flash' or 'load' first",
-                    config.rcl_port
-                );
+                bail!("{}", ui::no_powerview(config.rcl_port));
             }
             rtt::run(&config, args)?
         }
@@ -198,10 +195,7 @@ pub(crate) fn adapter(config: &Config) -> Result<()> {
         return Ok(());
     }
     if !powerview::port_open(config.rcl_port) {
-        bail!(
-            "no PowerView on RCL port {}; run 'tracebridge open', 'flash' or 'load' first",
-            config.rcl_port
-        );
+        bail!("{}", ui::no_powerview(config.rcl_port));
     }
     info(&format!(
         "starting debug adapter proxy on port {}",

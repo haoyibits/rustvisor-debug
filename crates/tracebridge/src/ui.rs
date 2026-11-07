@@ -49,6 +49,20 @@ pub fn current_exe() -> crate::errors::Result<PathBuf> {
         .unwrap_or(exe))
 }
 
+/// The error when no PowerView answers on `port`, in the words of the
+/// program that runs (`tracebridge`, `rvdbg`): `flash` and `load` start
+/// PowerView themselves and go on, so they come first; `open` only starts it.
+pub fn no_powerview(port: u16) -> String {
+    let program = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "tracebridge".to_string());
+    format!(
+        "no PowerView on RCL port {port}; '{program} flash' or '{program} load' starts it \
+         (or '{program} open', which leaves the target alone); this command never starts it"
+    )
+}
+
 /// `<prefix>/Cellar/<name>/<version>/bin/<exe>` → `<prefix>/opt/<name>/bin/<exe>`.
 pub fn homebrew_stable_path(exe: &Path) -> Option<PathBuf> {
     let file = exe.file_name()?;

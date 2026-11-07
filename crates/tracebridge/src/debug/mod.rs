@@ -375,11 +375,7 @@ pub fn emit(command: &str, json: bool, result: DResult<Outcome>) -> i32 {
 /// PowerView or touches the target: the RCL attach and version check only.
 pub fn connect(config: &Config) -> DResult<Debugger> {
     if !powerview::port_open(config.rcl_port) {
-        return Err(DebugError::new(format!(
-            "no PowerView on RCL port {}; start it with 'tracebridge open' \
-             ('debug' never starts PowerView)",
-            config.rcl_port
-        )));
+        return Err(DebugError::new(crate::ui::no_powerview(config.rcl_port)));
     }
     let mut debugger =
         connect_debugger(config, CONNECT_TIMEOUT).map_err(|error| DebugError::new(error.0))?;

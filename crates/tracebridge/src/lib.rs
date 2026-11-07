@@ -14,7 +14,6 @@ mod remote;
 mod rtt;
 mod rustrover;
 mod signals;
-mod skill;
 mod style;
 mod t32config;
 mod target;

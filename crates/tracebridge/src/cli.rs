@@ -11,7 +11,7 @@
 
 use crate::{bail, bridge_error};
 use crate::{
-    dap, debug, flash, init, powerview, pycompat, rtt, rustrover, signals, skill, style, t32config,
+    dap, debug, flash, init, powerview, pycompat, rtt, rustrover, signals, style, t32config,
     target, ui, vscode,
 };
 
@@ -80,12 +80,6 @@ enum Command {
     Vscode,
     /// Write a RustRover run configuration (needs the LSP4IJ plugin)
     Rustrover,
-    /// Install the AI agent skill: which work goes to tracebridge, which to t32mcp
-    Skill {
-        /// Skills directory (default: $CLAUDE_CONFIG_DIR/skills or ~/.claude/skills)
-        #[arg(long, value_name = "DIR")]
-        dir: Option<PathBuf>,
-    },
     /// Find the flash scripts for a chip (your library and the TRACE32 installation)
     Chips {
         /// Chip name or part of it, e.g. STM32H743ZI or STM32F407 (default: flash.chip or target.cpu)
@@ -148,15 +142,6 @@ fn run(cli: Cli) -> Result<i32> {
         return Ok(0);
     }
 
-    if let Command::Skill { dir } = &cli.command {
-        let dir = match dir {
-            Some(dir) => cwd.join(dir),
-            None => skill::default_dir(&pycompat::process_env()),
-        };
-        skill::install(&dir)?;
-        return Ok(0);
-    }
-
     // Help and usage errors of 'debug' need no configuration.
     if let Command::Debug { args } = &cli.command {
         if let Some(code) = debug::main_without_config(args) {
@@ -168,7 +153,7 @@ fn run(cli: Cli) -> Result<i32> {
     let config_file = find_config_file(cli.config.as_deref(), &cwd, &env)?;
     let mut config = load_config(&config_file, &env)?;
     match cli.command {
-        Command::Init | Command::Skill { .. } => unreachable!(),
+        Command::Init => unreachable!(),
         Command::Config => print_config(&config, &env),
         Command::Open => open(&config, None, &env)?,
         Command::Flash { chip, script } => {
@@ -414,22 +399,6 @@ fn print_config(config: &Config, env: &pycompat::Env) {
     println!("  {} {}", style.label("run    "), config.run_dir.display());
     if let Ok(exe) = ui::current_exe() {
         println!("  {} {}", style.label("exe    "), exe.display());
-    }
-    let skill = skill::skill_file(&skill::default_dir(env));
-    match skill::installed_version(&skill) {
-        Some(version) if version == env!("CARGO_PKG_VERSION") => {
-            println!("  {} {}", style.label("skill  "), skill.display());
-        }
-        Some(version) => println!(
-            "  {} {} is from {version}; run 'tracebridge skill' to update it",
-            style.warn("WARN   "),
-            skill.display()
-        ),
-        None => println!(
-            "  {} no agent skill; 'tracebridge skill' writes {}",
-            style.label("note   "),
-            skill.display()
-        ),
     }
     if config.t32_config.is_file() {
         let note = style.label("note   ");

@@ -256,28 +256,47 @@ enum Commands {
         port: Option<u16>,
     },
     /// FDX link of an image while the core runs: each line typed is a packet to the target, each packet from it a line (Ctrl-C to stop)
-    Fdx {
-        /// The n-th extra image (project.extra_elf, from 0) instead of the ELF
-        #[arg(long, value_name = "N")]
-        guest: Option<usize>,
-        /// Link symbol (default: fdx.symbol, RUSTVISOR_FDX)
-        #[arg(long)]
-        symbol: Option<String>,
-        /// Link address; skips the symbol lookup, e.g. 0x60000CC0
-        #[arg(long, value_parser = parse_address)]
-        address: Option<u64>,
-        /// Send this packet, then exit; repeat it to send several, in order
-        #[arg(long, value_name = "TEXT")]
-        send: Vec<String>,
-        /// Then wait for this packet; repeat it to wait for several, in order (exit 3 when one does not come)
-        #[arg(long, value_name = "TEXT")]
-        expect: Vec<String>,
-        /// With --send/--expect: seconds to wait for the link to open, for room and for each expected packet
-        #[arg(long, value_name = "SECONDS", default_value_t = 10.0)]
-        timeout: f64,
+    Fdx(FdxArgs),
+    /// Words of ordinary RAM in bulk while the cores run (TRACE32 AD:, the OpenOCD MEM-AP); never MMIO or coprocessor registers, use mem for those
+    Ram {
+        /// An address, or a symbol of the images
+        #[arg(value_name = "ADDRESS|SYMBOL")]
+        location: String,
+        /// Number of 32-bit words to read
+        #[arg(default_value_t = 1, conflicts_with = "write")]
+        count: u32,
+        /// Write these 32-bit words from the address on, one access each, instead of reading
+        #[arg(long, value_name = "VALUE", num_args = 1.., value_parser = parse_word)]
+        write: Vec<u32>,
     },
     /// Write the RustRover run configuration for TRACE32 (.run/, LSP4IJ)
     Rustrover,
+}
+
+/// The options of `rvdbg fdx`.
+#[derive(Debug, clap::Args)]
+struct FdxArgs {
+    /// The n-th extra image (project.extra_elf, from 0) instead of the ELF
+    #[arg(long, value_name = "N")]
+    guest: Option<usize>,
+    /// Link symbol (default: fdx.symbol, RUSTVISOR_FDX)
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Link address; skips the symbol lookup, e.g. 0x60000CC0
+    #[arg(long, value_parser = parse_address)]
+    address: Option<u64>,
+    /// Send this packet, then exit; repeat it to send several, in order
+    #[arg(long, value_name = "TEXT")]
+    send: Vec<String>,
+    /// Then wait for this packet; repeat it to wait for several, in order (exit 3 when one does not come)
+    #[arg(long, value_name = "TEXT")]
+    expect: Vec<String>,
+    /// With --send/--expect: seconds to wait for the link to open, for room and for each expected packet
+    #[arg(long, value_name = "SECONDS", default_value_t = 10.0)]
+    timeout: f64,
+    /// Mark the link closed and exit (while the board is held in reset: RAM keeps the last run's open link)
+    #[arg(long, conflicts_with_all = ["send", "expect"])]
+    close: bool,
 }
 
 fn main() -> ExitCode {
@@ -336,6 +355,9 @@ pub struct SessionLink<'a> {
     pub server: Option<&'a mut stellarbridge::Server>,
     /// Set by Ctrl-C while a command runs.
     pub interrupted: &'a AtomicBool,
+    /// The session's PowerView connection (TRACE32), made on first use and
+    /// dropped after a command fails.
+    pub powerview: Option<&'a mut Option<tracebridge::backend::Session>>,
 }
 
 impl Env<'_> {
@@ -345,6 +367,68 @@ impl Env<'_> {
         match &self.session {
             Some(link) => Ok(link.backend),
             None => select(self.config, self.flag),
+        }
+    }
+
+    /// Run `f` on the session's PowerView connection, or on one for this
+    /// command. A failure drops the session's, so that the next command
+    /// connects again; nothing is retried.
+    fn with_powerview<T>(
+        &mut self,
+        f: impl FnOnce(&mut tracebridge::backend::Session) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let project = trace32(self.config)?;
+        let connect = |project| tracebridge::backend::Session::connect(project).map_err(text);
+        match self
+            .session
+            .as_mut()
+            .and_then(|link| link.powerview.as_deref_mut())
+        {
+            Some(slot) => {
+                let session = match slot {
+                    Some(session) => session,
+                    None => slot.insert(connect(project)?),
+                };
+                let result = f(session);
+                if result.is_err() {
+                    *slot = None;
+                }
+                result
+            }
+            None => f(&mut connect(project)?),
+        }
+    }
+
+    /// Forget the session's PowerView connection.
+    fn drop_powerview(&mut self) {
+        if let Some(slot) = self
+            .session
+            .as_mut()
+            .and_then(|link| link.powerview.as_deref_mut())
+        {
+            *slot = None;
+        }
+    }
+
+    /// Run `f` on the backend's access to RAM while the cores run (TRACE32
+    /// `AD:`, the OpenOCD MEM-AP), with the probe's name.
+    fn with_ram<T>(
+        &mut self,
+        f: impl FnOnce(&mut dyn probecore::Memory, &'static str) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match self.backend()? {
+            Backend::OpenOcd => {
+                let memory_ap = self.config.openocd()?.memory_ap.clone().ok_or(
+                    "RAM is read and written through openocd.memory_ap; set it in rvdbg.toml",
+                )?;
+                self.with_server(|server| {
+                    f(
+                        &mut stellarbridge::core::ApMemory { server, memory_ap },
+                        "StellarLINK",
+                    )
+                })
+            }
+            Backend::Trace32 => self.with_powerview(|session| f(&mut session.memory(), "TRACE32")),
         }
     }
 
@@ -539,14 +623,12 @@ fn execute(env: &mut Env, command: Commands) -> Result<u8, String> {
                 Ok(0)
             }
         },
-        Commands::Fdx {
-            guest,
-            symbol,
-            address,
-            send,
-            expect,
-            timeout,
-        } => fdx(env, guest, symbol, address, send, expect, timeout),
+        Commands::Fdx(args) => fdx(env, args),
+        Commands::Ram {
+            location,
+            count,
+            write,
+        } => ram(env, location, count, write),
         command => inspect_command(env, command),
     }
 }
@@ -567,7 +649,16 @@ fn inspect_command(env: &mut Env, command: Commands) -> Result<u8, String> {
             if json {
                 args.insert(0, "--json".into());
             }
-            let code = project.debug(args).map_err(text)?;
+            let code = if env.session.is_some() {
+                let code = env.with_powerview(|session| session.debug(args).map_err(text))?;
+                if code == 1 {
+                    // The error may have been the connection's.
+                    env.drop_powerview();
+                }
+                code
+            } else {
+                project.debug(args).map_err(text)?
+            };
             Ok(u8::try_from(code).unwrap_or(1))
         }
         Backend::OpenOcd => {
@@ -731,15 +822,16 @@ fn trace32_only(what: &str) -> String {
 
 /// `rvdbg fdx`: the link's address, then the terminal on the backend's
 /// memory access.
-fn fdx(
-    env: &mut Env,
-    guest: Option<usize>,
-    symbol: Option<String>,
-    address: Option<u64>,
-    send: Vec<String>,
-    expect: Vec<String>,
-    timeout: f64,
-) -> Result<u8, String> {
+fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
+    let FdxArgs {
+        guest,
+        symbol,
+        address,
+        send,
+        expect,
+        timeout,
+        close,
+    } = args;
     let config = env.config;
     if !(timeout > 0.0 && timeout.is_finite()) {
         return Err("--timeout must be positive".into());
@@ -759,9 +851,7 @@ fn fdx(
         None => rustvisor_debug::fdx::symbol_address(&image, &symbol)
             .map_err(|error| format!("{error}; build the images, or pass --address 0x<address>"))?,
     };
-    let backend = env.backend()?;
-    let mut options = fdx_terminal::Options {
-        probe: "TRACE32",
+    let options = fdx_terminal::Options {
         symbol,
         address,
         send,
@@ -780,23 +870,92 @@ fn fdx(
             &own
         }
     };
-    match backend {
-        Backend::OpenOcd => {
-            let memory_ap = config.openocd()?.memory_ap.clone().ok_or(
-                "FDX reads and writes memory through openocd.memory_ap; set it in rvdbg.toml",
-            )?;
-            options.probe = "StellarLINK";
-            env.with_server(|server| {
-                let mut memory = stellarbridge::core::ApMemory { server, memory_ap };
-                fdx_terminal::run(&mut memory, &options, interrupted)
-            })
+    env.with_ram(|mut memory, probe| {
+        if close {
+            rustvisor_debug::fdx::Link::close(&mut memory, address).map_err(text)?;
+            if !options.json {
+                println!("closed {} at 0x{address:08X}", options.symbol);
+            }
+            return Ok(0);
         }
-        Backend::Trace32 => {
-            let mut session =
-                tracebridge::backend::Session::connect(trace32(config)?).map_err(text)?;
-            fdx_terminal::run(&mut session.memory(), &options, interrupted)
+        fdx_terminal::run(&mut memory, probe, &options, interrupted)
+    })
+}
+
+/// `rvdbg ram`: words of RAM in bulk while the cores run.
+fn ram(env: &mut Env, location: String, count: u32, write: Vec<u32>) -> Result<u8, String> {
+    let config = env.config;
+    let json = env.json;
+    let (address, symbol) = match probecore::text::parse_int_auto(&location)
+        .and_then(|value| u64::try_from(value).ok())
+    {
+        Some(address) => (address, None),
+        None => {
+            let address = inspect::symbols(config)
+                .range(&location)
+                .map(|(start, _)| start)
+                .ok_or_else(|| {
+                    format!("{location} is neither an address nor a symbol of the images")
+                })?;
+            (address, Some(location))
         }
+    };
+    if address % 4 != 0 {
+        return Err(format!("0x{address:X} is not word-aligned"));
     }
+    let result = env.with_ram(|memory, _| {
+        if !write.is_empty() {
+            for (index, value) in write.iter().enumerate() {
+                memory
+                    .write_u32(address + 4 * index as u64, *value)
+                    .map_err(|error| format!("cannot write 0x{address:08X}: {error}"))?;
+            }
+            return Ok(inspect::Outcome {
+                text: format!("wrote {} word(s) at 0x{address:08X}", write.len()),
+                json: serde_json::json!({
+                    "symbol": symbol,
+                    "address": format!("0x{address:08X}"),
+                    "written": write.len(),
+                }),
+                code: 0,
+            });
+        }
+        if count == 0 || count > RAM_MAX_WORDS {
+            return Err(format!("count must be between 1 and {RAM_MAX_WORDS}"));
+        }
+        let words = memory
+            .read_u32s(address, count as usize)
+            .map_err(|error| format!("cannot read 0x{address:08X}: {error}"))?;
+        let text = words
+            .chunks(4)
+            .enumerate()
+            .map(|(row, chunk)| {
+                let values: Vec<String> = chunk.iter().map(|w| format!("{w:08X}")).collect();
+                format!("0x{:08X}  {}", address + 16 * row as u64, values.join(" "))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(inspect::Outcome {
+            text,
+            json: serde_json::json!({
+                "symbol": symbol,
+                "address": format!("0x{address:08X}"),
+                "words": words,
+                "hex": words.iter().map(|w| format!("0x{w:08X}")).collect::<Vec<_>>(),
+            }),
+            code: 0,
+        })
+    });
+    inspect::emit("ram", json, result)
+}
+
+/// The most words one `rvdbg ram` reads: 4 MiB.
+const RAM_MAX_WORDS: u32 = 1 << 20;
+
+fn parse_word(text: &str) -> Result<u32, String> {
+    probecore::text::parse_int_auto(text)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| format!("invalid 32-bit value: {text}"))
 }
 
 fn parse_address(text: &str) -> Result<u64, String> {

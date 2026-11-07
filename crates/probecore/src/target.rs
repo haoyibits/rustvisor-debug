@@ -188,6 +188,23 @@ pub trait Memory {
     fn write_u32(&mut self, address: u64, value: u32) -> Result<()>;
 }
 
+/// A borrowed memory access is one too, so `&mut dyn Memory` works where
+/// `impl Memory` is asked for.
+impl<M: Memory + ?Sized> Memory for &mut M {
+    fn read(&mut self, address: u64, length: usize) -> Result<Vec<u8>> {
+        (**self).read(address, length)
+    }
+    fn read_u32s(&mut self, address: u64, count: usize) -> Result<Vec<u32>> {
+        (**self).read_u32s(address, count)
+    }
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<()> {
+        (**self).write(address, data)
+    }
+    fn write_u32(&mut self, address: u64, value: u32) -> Result<()> {
+        (**self).write_u32(address, value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

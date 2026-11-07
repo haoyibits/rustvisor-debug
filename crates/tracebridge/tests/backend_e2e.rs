@@ -55,6 +55,60 @@ fn same_session_returns_typed_check_failures_and_bulk_ram() {
 }
 
 #[test]
+fn debug_commands_share_the_session_connection() {
+    let rcl = FakeRcl::start();
+    let fixture = Fixture::new(rcl.port, "");
+    rcl.state()
+        .functions
+        .insert("Data.Long(AD:0x20000000)".into(), (4, "0x6".into()));
+    let mut backend = session(&rcl, &fixture);
+    // Connecting knocks on the port once before it connects.
+    let connected = rcl.state().connections;
+    let mem = |text: &str| text.split(' ').map(String::from).collect::<Vec<_>>();
+    assert_eq!(backend.debug(mem("--json mem AD:0x20000000")).unwrap(), 0);
+    assert_eq!(backend.debug(mem("--json mem AD:0x20000000")).unwrap(), 0);
+    assert_eq!(backend.debug(mem("mem")).unwrap(), 2, "usage error");
+    assert_eq!(backend.debug(Vec::new()).unwrap(), 2, "no session here");
+    assert_eq!(rcl.state().connections, connected);
+}
+
+#[test]
+fn the_session_memory_reads_header_words_whole_and_drives_an_fdx_channel() {
+    use probecore::Memory;
+    use probecore::fdx::{self, Channel, Packet};
+    let rcl = FakeRcl::start();
+    let fixture = Fixture::new(rcl.port, "");
+    // An FDX channel from the target at 0x20000000: 32 data bytes, one
+    // packet "ok" at index 0.
+    let mut ring = vec![0u8; 32 + 32];
+    ring[4..8].copy_from_slice(&32u32.to_le_bytes());
+    ring[32..36].copy_from_slice(&[2, b'o', b'k', 0]);
+    rcl.state().write_memory(0x20000000, &ring);
+    let mut backend = session(&rcl, &fixture);
+    let mut memory = backend.memory();
+    assert_eq!(memory.read_u32s(0x20000004, 1).unwrap(), [32]);
+    let channel = Channel {
+        address: 0x20000000,
+        size: 32,
+    };
+    assert_eq!(
+        fdx::receive(&mut memory, &channel).unwrap(),
+        Some(Packet::Data(b"ok".to_vec()))
+    );
+    assert_eq!(fdx::receive(&mut memory, &channel).unwrap(), None);
+    let log = rcl.state().log.clone();
+    assert!(
+        log.contains(&"read 0x20000000 32 width 4".to_string()),
+        "{log:?}"
+    );
+    // hostindex moved past the packet, in one word.
+    assert!(
+        log.contains(&"write 0x20000008 03000000".to_string()),
+        "{log:?}"
+    );
+}
+
+#[test]
 fn library_flash_uses_the_existing_sequence_and_stops_on_failure() {
     let rcl = FakeRcl::start();
     let fixture = Fixture::new(rcl.port, "");

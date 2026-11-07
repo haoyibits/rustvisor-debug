@@ -33,6 +33,7 @@ asks for, despite t32mcp's advice not to drive the debugger by other means.
 | Run a halted core to a symbol or address | `rvdbg run-until <symbol> --json` |
 | AArch32 Hyp fault: vector, HSR decoded, fault addresses | `rvdbg fault --json` |
 | Memory words at an address or symbol | `rvdbg mem <address|symbol> [count] --json` |
+| Many words of ordinary RAM while the cores run (not MMIO) | `rvdbg ram <address|symbol> [count] --json` |
 | A register by PER name or field (TRACE32) | `rvdbg reg <name>... --json` |
 | Target memory against the ELF's loadable content | `rvdbg verify --json` |
 | A check file of expected register values and clocks | `rvdbg check <file> --json` |
@@ -57,8 +58,9 @@ runs OpenOCD's GDB server for GDB or VS Code.
   `--write-otp`. `flash` resets the target and erases flash; it can take
   minutes, so raise the shell timeout. Never pass `--write-otp` on your own:
   it changes one-time-programmable flash permanently.
-- Read-only: `config`, `status`, `fault`, `mem`, `reg`, `verify`, `check`
-  without `--halt`, `clock`, `trace`.
+- Read-only: `config`, `status`, `fault`, `mem`, `ram` without `--write`,
+  `reg`, `verify`, `check` without `--halt`, `clock`, `trace`. Ask before
+  `ram --write` and `fdx --close`.
 - Exit codes: 0 ok, 1 error, 2 usage error, 3 a check failed, `verify`
   found differences, or `run-until` stopped elsewhere.
 - Commands marked TRACE32 above fail with StellarLINK; say so instead of

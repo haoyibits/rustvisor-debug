@@ -26,6 +26,8 @@ pub struct State {
     /// Commands and functions that fail with this message (T32_ERR_FN1).
     /// Like TRACE32, `PER.ReProgram` clears "No default peripheral file".
     pub errors: HashMap<String, String>,
+    /// RCL connections accepted so far.
+    pub connections: usize,
 }
 
 fn error_answer(id: u8, message: &str) -> Vec<u8> {
@@ -70,6 +72,7 @@ impl FakeRcl {
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
+                shared.lock().unwrap().connections += 1;
                 let state = shared.clone();
                 thread::spawn(move || serve(stream, state));
             }
@@ -104,19 +107,24 @@ fn text(payload: &[u8]) -> String {
     String::from_utf8_lossy(&body[..end]).into_owned()
 }
 
-/// Parse `u16 chunk | address parameters` and return (address, length, rest).
-fn memory_request(payload: &[u8]) -> (u64, usize, usize) {
+/// Parse `u16 chunk | address parameters` and return (address, length,
+/// rest, access width).
+fn memory_request(payload: &[u8]) -> (u64, usize, usize, Option<u16>) {
     let length = u16::from_le_bytes([payload[0], payload[1]]) as usize;
     let address = u64::from_le_bytes(payload[4..12].try_into().unwrap());
     let mut index = 12;
+    let mut width = None;
     loop {
         match &payload[index..index + 2] {
             b"AC" => {
                 let len = u16::from_le_bytes([payload[index + 2], payload[index + 3]]) as usize;
                 index += 4 + len;
             }
-            b"WI" => index += 4,
-            b"XX" => return (address, length, index + 2),
+            b"WI" => {
+                width = Some(u16::from_le_bytes([payload[index + 2], payload[index + 3]]));
+                index += 4;
+            }
+            b"XX" => return (address, length, index + 2, width),
             other => panic!("unexpected address parameter {other:?}"),
         }
     }
@@ -195,14 +203,19 @@ fn answer(state: &Mutex<State>, data: &[u8]) -> Vec<u8> {
             }
         }
         (0x74, 0x35) => {
-            let (address, length, _) = memory_request(payload);
-            state.log.push(format!("read {address:#x} {length}"));
+            let (address, length, _, width) = memory_request(payload);
+            match width {
+                Some(width) => state
+                    .log
+                    .push(format!("read {address:#x} {length} width {width}")),
+                None => state.log.push(format!("read {address:#x} {length}")),
+            }
             let mut answer = vec![0, id];
             answer.extend(state.read_memory(address, length));
             answer
         }
         (0x74, 0x36) => {
-            let (address, length, start) = memory_request(payload);
+            let (address, length, start, _) = memory_request(payload);
             let bytes = payload[start..start + length].to_vec();
             let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
             state.log.push(format!("write {address:#x} {hex}"));

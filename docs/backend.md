@@ -47,6 +47,10 @@ alignment and arithmetic, while rustvisor bounds target-provided pointers to the
 measured Guest's RAM. CP15/MMIO keep their existing expression-based reads and
 are not automatically converted to bulk accesses.
 
+`Session::debug(args)` runs one `tracebridge debug` command on the session's
+connection, printed as `Project::debug` prints it; rvdbg's interactive session
+uses it so that its TRACE32 commands share one connection.
+
 `Session::memory()` lends the connection as a `probecore::Memory` (`AD:`, word
 reads in 32-bit accesses) for the RAM channels; `rustvisor_debug::fdx::Link`
 drives the images' FDX link over it, the same code `rvdbg fdx` runs on both

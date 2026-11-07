@@ -23,8 +23,6 @@ use crate::EXIT_FAILED;
 const POLL: Duration = Duration::from_millis(20);
 
 pub struct Options {
-    /// The probe's name in the status lines (`TRACE32`, `StellarLINK`).
-    pub probe: &'static str,
     pub symbol: String,
     pub address: u64,
     /// Packets to send, then exit.
@@ -42,16 +40,18 @@ impl Options {
     }
 }
 
-/// Runs `rvdbg fdx`; Ctrl-C sets `interrupted`.
+/// Runs `rvdbg fdx`; Ctrl-C sets `interrupted`. `probe` names the probe in
+/// the status lines (`TRACE32`, `StellarLINK`).
 pub fn run(
     memory: &mut impl Memory,
+    probe: &str,
     options: &Options,
     interrupted: &AtomicBool,
 ) -> Result<u8, String> {
     if options.scripted() {
         scripted(memory, options, interrupted)
     } else {
-        interactive(memory, options, interrupted)
+        interactive(memory, probe, options, interrupted)
     }
 }
 
@@ -194,11 +194,11 @@ fn scripted(
 
 fn interactive(
     memory: &mut impl Memory,
+    probe: &str,
     options: &Options,
     interrupted: &AtomicBool,
 ) -> Result<u8, String> {
     let style = Style::stderr();
-    let probe = options.probe;
     eprintln!(
         "{} {} @ {}; one line is one packet; Ctrl-C to stop",
         style.label(format!("{probe} FDX:")),
@@ -402,7 +402,6 @@ mod tests {
 
     fn options(send: &[&str], expect: &[&str]) -> Options {
         Options {
-            probe: "TEST",
             symbol: "RUSTVISOR_FDX".into(),
             address: BASE,
             send: send.iter().map(|s| s.to_string()).collect(),
@@ -418,6 +417,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         let code = run(
             &mut board,
+            "TEST",
             &options(&["boot single"], &["ok boot single"]),
             &stop,
         );
@@ -428,7 +428,7 @@ mod tests {
     fn a_missing_answer_exits_3() {
         let mut board = Board::new();
         let stop = AtomicBool::new(false);
-        let code = run(&mut board, &options(&["boot"], &["ready"]), &stop);
+        let code = run(&mut board, "TEST", &options(&["boot"], &["ready"]), &stop);
         assert_eq!(code, Ok(EXIT_FAILED));
     }
 
@@ -437,11 +437,11 @@ mod tests {
         let mut board = Board::new();
         board.put_word(BASE + 4, 0);
         let stop = AtomicBool::new(false);
-        let error = run(&mut board, &options(&["x"], &[]), &stop).unwrap_err();
+        let error = run(&mut board, "TEST", &options(&["x"], &[]), &stop).unwrap_err();
         assert!(error.contains("did not open"), "{error}");
         let mut board = Board::new();
         let long = "x".repeat(40);
-        let error = run(&mut board, &options(&[long.as_str()], &[]), &stop).unwrap_err();
+        let error = run(&mut board, "TEST", &options(&[long.as_str()], &[]), &stop).unwrap_err();
         assert!(error.contains("1 to 29 bytes"), "{error}");
     }
 }

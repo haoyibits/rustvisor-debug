@@ -5,7 +5,13 @@
 //!
 //! With StellarLINK the session keeps one OpenOCD for all commands, with its
 //! GDB server open, so GDB or VS Code can attach while the session runs. With
-//! TRACE32 each command talks to PowerView as on the command line.
+//! TRACE32 the inspect commands, `ram` and `fdx` share one PowerView
+//! connection, made on first use and dropped after a failure; the others
+//! connect as on the command line.
+//!
+//! `rvdbg --json` with commands on a pipe is for programs: a `ready` JSON
+//! line first, then after each command's own output (one JSON line for the
+//! inspect commands) an `end` JSON line with its exit code and error.
 //!
 //! Ctrl-C stops a waiting command (`rtt`, `fdx`, `run-until`), not the session;
 //! `quit`, `exit` or Ctrl-D end it.
@@ -49,6 +55,7 @@ const GROUPS: &[(&str, &[(&str, Need)])] = &[
         &[
             ("status", Need::Probe),
             ("mem", Need::Probe),
+            ("ram", Need::Probe),
             ("fault", Need::Probe),
             ("verify", Need::Probe),
             ("check", Need::Probe),
@@ -391,7 +398,12 @@ pub struct Session<'a> {
     /// Why this backend (or why none).
     reason: String,
     server: Option<stellarbridge::Server>,
+    /// The PowerView connection the TRACE32 commands share.
+    powerview: Option<tracebridge::backend::Session>,
     interrupted: Arc<AtomicBool>,
+    /// The last line's exit code and error, for the `end` line.
+    code: u8,
+    failure: Option<String>,
     /// Look for probes; tests replace it.
     detect: fn(&Config) -> Result<Vec<probe::Found>, String>,
 }
@@ -406,7 +418,10 @@ impl<'a> Session<'a> {
             backend: None,
             reason: String::new(),
             server: None,
+            powerview: None,
             interrupted: Arc::new(AtomicBool::new(false)),
+            code: 0,
+            failure: None,
             detect: probe::detect,
         }
     }
@@ -415,14 +430,19 @@ impl<'a> Session<'a> {
         eprintln!("{} {text}", self.style.label("[rvdbg]"));
     }
 
-    fn error(&self, text: &str) {
+    fn error(&mut self, text: &str) {
         eprintln!("{} {text}", self.style.bad("error:"));
+        self.failure = Some(text.to_string());
+        if self.code == 0 {
+            self.code = 1;
+        }
     }
 
     /// Choose the backend (`forced`, else `--backend`, `project.backend`,
     /// the connected probe) and, for OpenOCD, start or attach to OpenOCD.
     fn connect(&mut self, forced: Option<Backend>) {
         self.server = None;
+        self.powerview = None;
         let fixed = match forced {
             Some(backend) => Some((backend, "the 'backend' command")),
             None => crate::fixed(self.config, self.flag),
@@ -544,6 +564,8 @@ impl<'a> Session<'a> {
     }
 
     pub fn handle_line(&mut self, line: &str) -> Flow {
+        self.code = 0;
+        self.failure = None;
         let args = match split_line(line) {
             Ok(args) => args,
             Err(error) => {
@@ -585,7 +607,10 @@ impl<'a> Session<'a> {
                     Some(backend) => {
                         self.note(&format!("backend {} ({})", backend.name(), self.reason))
                     }
-                    None => self.error(&self.reason.clone()),
+                    None => {
+                        let reason = self.reason.clone();
+                        self.error(&reason);
+                    }
                 }
                 println!("{}", help_text(self.style, self.backend));
                 return Flow::Continue;
@@ -600,6 +625,10 @@ impl<'a> Session<'a> {
             }
             Err(error) => {
                 let _ = error.print();
+                self.code = u8::try_from(error.exit_code()).unwrap_or(2);
+                if self.code != 0 {
+                    self.failure = Some(error.kind().to_string());
+                }
                 return Flow::Continue;
             }
         };
@@ -646,6 +675,11 @@ impl<'a> Session<'a> {
             }
             command => {
                 self.interrupted.store(false, Ordering::SeqCst);
+                if !SHARES_POWERVIEW.contains(&name.as_str()) {
+                    // flash, load, open and the like manage PowerView
+                    // themselves.
+                    self.powerview = None;
+                }
                 // Commands that need no probe (config, vscode, rustrover) also
                 // run without one.
                 let mut env = Env {
@@ -656,9 +690,11 @@ impl<'a> Session<'a> {
                         backend,
                         server: self.server.as_mut(),
                         interrupted: &self.interrupted,
+                        powerview: Some(&mut self.powerview),
                     }),
                 };
                 let code = execute(&mut env, command)?;
+                self.code = code;
                 if code != 0 {
                     eprintln!("{}", self.style.dim(format!("(exit code {code})")));
                 }
@@ -681,6 +717,41 @@ impl<'a> Session<'a> {
                 .to_string(),
         }
     }
+}
+
+/// The commands that use the session's PowerView connection.
+const SHARES_POWERVIEW: &[&str] = &[
+    "status",
+    "halt",
+    "go",
+    "attach",
+    "reset",
+    "down",
+    "fault",
+    "reg",
+    "mem",
+    "verify",
+    "check",
+    "clock",
+    "run-until",
+    "trace",
+    "eval",
+    "cmd",
+    "watch",
+    "do",
+    "ram",
+    "fdx",
+];
+
+/// The `end` line after a command in `--json` pipe mode.
+fn end_line(line: &str, code: u8, error: Option<&str>) -> String {
+    serde_json::json!({
+        "end": line.trim(),
+        "ok": code == 0,
+        "exit_code": code,
+        "error": error,
+    })
+    .to_string()
 }
 
 /// The subcommand's name as the help lists it.
@@ -734,16 +805,41 @@ pub fn run(
     signal_hook::flag::register(signal_hook::consts::SIGINT, interrupted.clone())
         .map_err(|error| format!("cannot handle Ctrl-C: {error}"))?;
 
+    let machine = json && !std::io::stdin().is_terminal();
+    let style = if machine { Style::PLAIN } else { style };
     let mut session = Session::new(&config, flag, json, style);
     session.interrupted = interrupted;
     session.connect(None);
-    print!("{}", session.header());
+    if machine {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ready": true,
+                "version": env!("CARGO_PKG_VERSION"),
+                "config": config.file.display().to_string(),
+                "backend": session.backend.map(Backend::name),
+                "reason": session.reason,
+            })
+        );
+    } else {
+        print!("{}", session.header());
+    }
 
     if !std::io::stdin().is_terminal() {
         // Lines from a pipe or a file: no prompt, no line editor.
         for line in std::io::stdin().lock().lines() {
             let line = line.map_err(|error| format!("cannot read the input: {error}"))?;
-            if session.handle_line(&line) == Flow::Quit {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let flow = session.handle_line(&line);
+            if machine {
+                println!(
+                    "{}",
+                    end_line(&line, session.code, session.failure.as_deref())
+                );
+            }
+            if flow == Flow::Quit {
                 break;
             }
         }
@@ -887,6 +983,41 @@ mod tests {
         assert_eq!(session.handle_line("vscode"), Flow::Continue);
         assert!(dir.path().join(".vscode/launch.json").exists());
         assert_eq!(session.handle_line("exit"), Flow::Quit);
+    }
+
+    #[test]
+    fn each_line_leaves_its_exit_code_and_error_for_the_end_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let mut session = Session::new(&config, None, true, Style::PLAIN);
+        session.detect = nothing_found;
+        session.connect(None);
+        session.handle_line("status");
+        assert_eq!(session.code, 1);
+        assert_eq!(
+            session.failure.as_deref(),
+            Some("status needs a probe; plug one in, then 'reconnect'")
+        );
+        session.handle_line("ram");
+        assert_eq!(session.code, 2, "a usage error");
+        session.handle_line("help");
+        assert_eq!((session.code, session.failure.as_deref()), (0, None));
+        assert_eq!(
+            end_line(" status ", 1, Some("no probe")),
+            r#"{"end":"status","ok":false,"exit_code":1,"error":"no probe"}"#
+        );
+        assert_eq!(
+            end_line("help", 0, None),
+            r#"{"end":"help","ok":true,"exit_code":0,"error":null}"#
+        );
+    }
+
+    #[test]
+    fn the_commands_sharing_powerview_are_rvdbg_commands() {
+        let cli = Cli::command();
+        for name in SHARES_POWERVIEW {
+            assert!(cli.find_subcommand(name).is_some(), "{name}");
+        }
     }
 
     #[test]

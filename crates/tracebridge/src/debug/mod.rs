@@ -426,23 +426,55 @@ pub fn main(config: &Config, cwd: &Path, args: Vec<String>) -> Result<i32> {
         return repl::run(config, cwd, json);
     };
     let result = connect(config).and_then(|mut debugger| {
-        if command == DebugCommand::Reconnect {
-            return Ok(Outcome::ok(
-                format!("connected to PowerView on RCL port {}", config.rcl_port),
-                json!({"rcl_port": config.rcl_port}),
-            ));
-        }
         let mut per = PerSnapshot::new(Some(config.t32_sys.clone()));
-        let mut ctx = Context {
-            probe: &mut debugger as &mut dyn Probe,
-            per: &mut per,
-            config,
-            cwd,
-            style: Style::stdout(),
-        };
-        execute(&mut ctx, &command)
+        run_command(config, cwd, &mut debugger, &mut per, &command)
     });
     Ok(emit(command.name(), json, result))
+}
+
+/// One command of `args` on an open connection, printed as `main` prints
+/// it. Without a command it is a usage error: the interactive session needs
+/// a connection of its own.
+pub fn main_on(
+    config: &Config,
+    cwd: &Path,
+    args: Vec<String>,
+    debugger: &mut Debugger,
+    per: &mut PerSnapshot,
+) -> i32 {
+    if let Some(code) = main_without_config(&args) {
+        return code;
+    }
+    let (cli, json) = parse(args).expect("checked by main_without_config");
+    let Some(command) = cli.command else {
+        eprintln!("tracebridge: debug needs a command here");
+        return 2;
+    };
+    let result = run_command(config, cwd, debugger, per, &command);
+    emit(command.name(), json, result)
+}
+
+fn run_command(
+    config: &Config,
+    cwd: &Path,
+    debugger: &mut Debugger,
+    per: &mut PerSnapshot,
+    command: &DebugCommand,
+) -> DResult<Outcome> {
+    if *command == DebugCommand::Reconnect {
+        return Ok(Outcome::ok(
+            format!("connected to PowerView on RCL port {}", config.rcl_port),
+            json!({"rcl_port": config.rcl_port}),
+        ));
+    }
+    let mut ctx = Context {
+        probe: debugger as &mut dyn Probe,
+        per,
+        config,
+        cwd,
+        style: Style::stdout(),
+    };
+    execute(&mut ctx, command)
 }
 
 #[cfg(test)]

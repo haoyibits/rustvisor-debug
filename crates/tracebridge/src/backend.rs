@@ -242,11 +242,27 @@ impl Session {
     /// Connect to an existing PowerView without starting it or resetting the target.
     pub fn connect(project: Project) -> Result<Self> {
         let debugger = debug::connect(&project.0).map_err(|e| bridge_error!("{e}"))?;
+        let per = probe::PerSnapshot::new(Some(project.0.t32_sys.clone()));
         Ok(Self {
             project,
             debugger,
-            per: probe::PerSnapshot::default(),
+            per,
         })
+    }
+
+    /// [`Project::debug`] on this connection: one `tracebridge debug`
+    /// command, printed the same way, without connecting again. The result
+    /// is its exit code (0 ok, 1 error, 2 usage, 3 a check failed, ...).
+    pub fn debug(&mut self, args: Vec<String>) -> Result<i32> {
+        let cwd = std::env::current_dir()
+            .map_err(|error| bridge_error!("cannot read the current directory: {error}"))?;
+        Ok(debug::main_on(
+            &self.project.0,
+            &cwd,
+            args,
+            &mut self.debugger,
+            &mut self.per,
+        ))
     }
 
     pub fn images(&mut self, elf: PathBuf, extra: Vec<PathBuf>, program: String) {

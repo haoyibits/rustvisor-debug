@@ -115,11 +115,12 @@ Day to day:
 | `status`, `halt`, `go` | run state; PC and CPSR when halted; stop; resume | yes | yes |
 | `fault` | AArch32 Hyp fault report | also `--trace [N]` | the same report; the core must be halted in Hyp mode |
 | `mem <addr\|symbol> [n]` | 32-bit words | yes | through the MEM-AP, symbols from the ELF |
+| `ram <addr\|symbol> [n]`, `ram … --write v…` | ordinary RAM in bulk while the cores run (never MMIO) | through `AD:` | through the MEM-AP |
 | `verify [ELF]` | target memory against the images | also `--t32` | through the MEM-AP |
 | `check FILE` | a check file of expected values | every read kind | `addr`, `core` and `clock` reads |
 | `clock` | the clock tree with frequencies | also `--html` | yes |
 | `rtt` | SEGGER RTT terminal on channel 0 | yes | through the MEM-AP while the core runs |
-| `fdx` | the image's FDX link: one line per packet, or `--send`/`--expect` | through `AD:` while the cores run | through the MEM-AP while the core runs |
+| `fdx` | the image's FDX link: one line per packet, `--send`/`--expect`, or `--close` | through `AD:` while the cores run | through the MEM-AP while the core runs |
 | `reset` | reset and halt at the reset vector | yes | `reset halt` |
 | `attach` | connect without resetting | `SYStem.Mode Attach` | yes |
 | `run-until <symbol\|addr>` | run a halted core to a symbol or address | on-chip breakpoint | hardware breakpoint |
@@ -171,13 +172,19 @@ rvdbg [openocd halted]> quit
   server open on `gdb_port`. GDB, or VS Code's `StellarLINK: Attach`, can
   connect while the session runs, and the session's commands use the same
   OpenOCD. `debug` in the session only says where the GDB server is.
-- With TRACE32 each command talks to PowerView as on the command line.
+- With TRACE32 the inspect commands, `ram` and `fdx` share one PowerView
+  connection, made on first use and dropped after a failure (nothing is
+  retried); `flash`, `load`, `open` and the like connect on their own.
 - Session commands: `help [command]`, `backend trace32|openocd`,
   `reconnect` (look for the probe again, e.g. after plugging it in), and
   `quit` / `exit` / Ctrl-D. Ctrl-C stops a waiting command (`rtt`,
   `fdx`, `run-until`), not the session. A failing command does not end it.
 - Tab completes command names. The history is kept in `.rvdbg/history`.
 - Read from a pipe, the session runs one command per line without a prompt.
+- `rvdbg --json` reading from a pipe is for programs (the board runner): a
+  `{"ready": true, "backend": …}` line first, then after each command's own
+  output (for the inspect commands, `ram` and `fdx --send/--expect` one JSON
+  line) an `{"end": "<line>", "ok": …, "exit_code": …, "error": …}` line.
 
 ## Configuration
 
@@ -424,7 +431,9 @@ rvdbg fdx --send "boot single" --expect "ok boot" --json
 ```
 
 Interactive, packets from the target are printed one per line until Ctrl-C;
-a target reset that reopens the link is followed. With `--send` the packets
+a target reset that reopens the link is followed. `--close` marks the link
+closed, for use while the board is held in reset: RAM keeps the last run's
+open link until the image opens it again. With `--send` the packets
 are sent in order, then each `--expect` packet is waited for (`--timeout`
 seconds each, default 10); exit 3 when one does not come. The link's address
 comes from the ELF's symbol table (`--symbol`, `fdx.symbol`), or `--address`.
@@ -710,7 +719,7 @@ asking. In the project's `.claude/settings.json`:
 
 `check` is allowed with **exact** command lines rather than a `:*` prefix: a
 prefix rule would also allow `check … --halt`, which stops the core.
-Everything else (`flash`, `load`, `open`, `rtt`, `fdx`, `attach`, `reset`,
+Everything else (`flash`, `load`, `open`, `rtt`, `fdx`, `ram` (it can write), `attach`, `reset`,
 `down`, `halt`, `go`, `run-until`, `do`, `cmd`, `check --halt`) still asks. For these
 rules to match, run the commands inside the project (no `--config` or
 `--backend` before the command) and put `--json` after the command's

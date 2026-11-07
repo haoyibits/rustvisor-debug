@@ -93,6 +93,7 @@ rvdbg vscode                 # 或：rvdbg rustrover（TRACE32）
 | `check 文件` | 按检查文件比对期望值 | 所有读取方式 | `addr`、`core`、`clock` 读取 |
 | `clock` | 带频率的时钟树 | 还有 `--html` | 支持 |
 | `rtt` | 通道 0 上的 SEGGER RTT 终端 | 支持 | 经 MEM-AP，核照常运行 |
+| `fdx` | 镜像的 FDX 链接：一行一个包，或用 `--send`/`--expect` | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
 | `reset` | 复位并停在复位向量 | 支持 | `reset halt` |
 | `attach` | 连上目标但不复位 | `SYStem.Mode Attach` | 支持 |
 | `run-until <符号\|地址>` | 让停着的核运行到某个符号或地址 | 片上断点 | 硬件断点 |
@@ -127,7 +128,7 @@ rvdbg [openocd halted]> quit
 - 提示符显示后端，用 OpenOCD 时还显示核在运行还是停着（`rvdbg [trace32]>`、`rvdbg [trace32 no-PowerView]>`、`rvdbg [no probe]>`）。
 - 用 StellarLINK 时，会话期间一直开着一个 OpenOCD，GDB server 在 `gdb_port` 上。GDB 或 VS Code 的 `StellarLINK: Attach` 可以同时连上，会话里的命令也用这个 OpenOCD。会话里的 `debug` 只提示 GDB server 在哪里。
 - 用 TRACE32 时，每条命令和命令行上一样连 PowerView。
-- 会话自己的命令：`help [命令]`、`backend trace32|openocd`、`reconnect`（重新检测调试器，比如刚插上之后）、`quit` / `exit` / Ctrl-D。Ctrl-C 只停止正在等待的命令（`rtt`、`run-until`），不退出会话。命令出错也不会结束会话。
+- 会话自己的命令：`help [命令]`、`backend trace32|openocd`、`reconnect`（重新检测调试器，比如刚插上之后）、`quit` / `exit` / Ctrl-D。Ctrl-C 只停止正在等待的命令（`rtt`、`fdx`、`run-until`），不退出会话。命令出错也不会结束会话。
 - Tab 补全命令名，历史记录在 `.rvdbg/history`。
 - 从管道读入时不显示提示符，每行执行一条命令。
 
@@ -140,6 +141,7 @@ rvdbg [openocd halted]> quit
 | `[project]` | `backend`（可选）、`program`（TRACE32 的程序名）、`elf`、`extra_elf`（和 `elf` 一起烧录、加载、比对的其他镜像） |
 | `[clock]` | 只有板子知道的频率，给 `clock` 和检查文件用：`XOSC = "40MHz"` |
 | `[rtt]` | `symbol`、`control_block_address`、`poll_interval` |
+| `[fdx]` | `symbol`：镜像里 FDX 链接的符号（默认 `RUSTVISOR_FDX`） |
 | `[trace32]` | `sys`、`host`、`executable`、`binary`、`config`、`debug_adapter`、`rcl_port`、`dap_port`、`dap_backend_port`、`dap_backend_timeout`、`operation_timeout` |
 | `[trace32.target]` | `cpu`、`cores`、`mem_access`、`jtag_clock`、`dual_port` |
 | `[trace32.flash]` | `chip` 或 `script`（见下文）、`args` |
@@ -292,6 +294,18 @@ rvdbg rtt --replay        # 先显示缓冲区里已有的内容
 ```
 
 核运行时双向使用通道 0：TRACE32 通过运行时内存访问（`dual_port = "ON"`），StellarLINK 通过 MEM-AP。终端会切换成逐字符输入，退出时恢复原来的设置。
+
+## FDX
+
+rustvisor 的镜像通过 FDX（Lauterbach 的 Fast Data eXchange，BufferE 方式）和调试器通信：一个名为 `RUSTVISOR_FDX` 的静态变量里首尾相连放着两个 FDX 通道，发往目标的在前。调试器在核运行时直接读写它们，双方都不用停下对方；因为只需要内存访问，StellarLINK 也能用。
+
+```sh
+rvdbg fdx                                      # 输入的每一行是一个包
+rvdbg fdx --guest 0                            # 第一个额外镜像的链接
+rvdbg fdx --send "boot single" --expect "ok boot" --json
+```
+
+交互模式下，目标发来的包一行一个打印出来，直到按 Ctrl-C；目标复位后重新打开链接，会自动跟上。用 `--send` 时按顺序发出这些包，然后依次等待每个 `--expect` 的包（每个最多等 `--timeout` 秒，默认 10）；有一个没等到就以退出码 3 结束。链接地址从 ELF 的符号表里查（`--symbol`、`fdx.symbol`），也可以用 `--address` 直接给。同一条链接同一时间只能有一个程序在用：`rvdbg fdx` 不要和板级 runner 或 PowerView 自己的 `FDX.*` 窗口同时用。
 
 ## 查看目标
 
@@ -480,7 +494,7 @@ claude mcp add-json -s user t32mcp '{"type":"stdio","command":"/path/to/t32mcp",
 }
 ```
 
-`check` 用的是**完整**命令行，而不是 `:*` 前缀：前缀规则也会放行 `check … --halt`，而它会停核。其余命令（`flash`、`load`、`open`、`rtt`、`attach`、`reset`、`down`、`halt`、`go`、`run-until`、`do`、`cmd`、`check --halt`）仍然要询问。要让这些规则匹配上，命令要在项目里运行（命令前面不要加 `--config` 或 `--backend`），`--json` 放在命令参数后面。
+`check` 用的是**完整**命令行，而不是 `:*` 前缀：前缀规则也会放行 `check … --halt`，而它会停核。其余命令（`flash`、`load`、`open`、`rtt`、`fdx`、`attach`、`reset`、`down`、`halt`、`go`、`run-until`、`do`、`cmd`、`check --halt`）仍然要询问。要让这些规则匹配上，命令要在项目里运行（命令前面不要加 `--config` 或 `--backend`），`--json` 放在命令参数后面。
 
 ## 排障
 
@@ -513,11 +527,12 @@ cargo clippy --all-targets -- -D warnings
 | `crates/t32rcl` | Lauterbach Python 库 `lauterbach-trace32-rcl` 中 tracebridge 用到的部分的纯 Rust 移植（只支持 TCP） |
 | `crates/stellarbridge` | OpenOCD（StellarLINK）后端；OpenOCD 作为独立程序运行 |
 | `crates/oocd` | OpenOCD Tcl 端口的客户端 |
-| `crates/probecore` | 两个后端共用的部分：检查文件、时钟树、ELF 比对、RTT、异常报告 |
+| `crates/probecore` | 两个后端共用的部分：检查文件、时钟树、ELF 比对、RTT 和 FDX 通道、异常报告 |
+| `crates/fdx-oracle` | 只用于测试：拿 Lauterbach 的 FDX 目标端代码（`vendor/t32fdx.c`）对照 probecore 的 FDX 主机端 |
 | `skills/` | 二进制文件会安装的 agent skill |
 
 依赖只朝一个方向（`rvdbg → tracebridge, stellarbridge, probecore`；`tracebridge → t32rcl, probecore`；`stellarbridge → oocd, probecore`），由 `crates/rustvisor-debug/tests/workspace_deps.rs` 检查。`t32rcl` 用从 Python 库录下的通信数据做逐字节测试；对着真实 PowerView 录制的方法见 `crates/t32rcl/tools/`，以及示例 `capture_proxy` 和 `smoke`。
 
 ## 许可证
 
-MIT。`crates/t32rcl` 包含从 lauterbach-trace32-rcl 移植的代码（Copyright (c) 2020 Lauterbach GmbH，MIT），见 [NOTICE](NOTICE)。
+MIT。`crates/t32rcl` 包含从 lauterbach-trace32-rcl 移植的代码（Copyright (c) 2020 Lauterbach GmbH，MIT）。`crates/fdx-oracle/vendor` 里是 Lauterbach 的 FDX 目标端代码（Copyright (c) 1989-2022 Lauterbach GmbH，MIT），只在它的测试里编译。见 [NOTICE](NOTICE)。

@@ -191,6 +191,30 @@ impl Client {
         Ok(bytes)
     }
 
+    /// `count` words from `address`, each read in one 32-bit access.
+    pub fn read_words(&mut self, target: &str, address: u64, count: usize) -> Result<Vec<u32>> {
+        let mut words = Vec::with_capacity(count);
+        const CHUNK: usize = 1024;
+        while words.len() < count {
+            let n = CHUNK.min(count - words.len());
+            let at = address + 4 * words.len() as u64;
+            let answer = self.eval(&format!("{} read_memory 0x{at:X} 32 {n}", quote(target)))?;
+            let values = parse_numbers(&answer)?;
+            if values.len() != n {
+                return Err(Error::Protocol(format!(
+                    "read_memory at 0x{at:X} returned {} words, expected {n}",
+                    values.len()
+                )));
+            }
+            for value in values {
+                words.push(u32::try_from(value).map_err(|_| {
+                    Error::Protocol(format!("read_memory returned {value:#x} for a word"))
+                })?);
+            }
+        }
+        Ok(words)
+    }
+
     /// Write `data` at `address` through the memory access of `target`, in
     /// bytes.
     pub fn write_memory(&mut self, target: &str, address: u64, data: &[u8]) -> Result<()> {
@@ -306,6 +330,23 @@ mod tests {
         drop(client);
         let received = handle.join().unwrap();
         assert!(received[0].contains("{chip.axi read_memory 0x29F87E00 8 4}"));
+    }
+
+    #[test]
+    fn read_words_reads_32_bits_at_a_time() {
+        let (address, handle) = server(vec!["0 0x60 0xdeadbeef", "0 0x1 0x100000000"]);
+        let mut client = client(address);
+        assert_eq!(
+            client.read_words("chip.axi", 0x6000_0CC0, 2).unwrap(),
+            [0x60, 0xDEAD_BEEF]
+        );
+        assert!(matches!(
+            client.read_words("chip.axi", 0, 2),
+            Err(Error::Protocol(_))
+        ));
+        drop(client);
+        let received = handle.join().unwrap();
+        assert!(received[0].contains("{chip.axi read_memory 0x60000CC0 32 2}"));
     }
 
     #[test]

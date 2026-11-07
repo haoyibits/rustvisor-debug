@@ -5,6 +5,7 @@
 //! tracebridge     → t32rcl, probecore
 //! stellarbridge   → oocd, probecore
 //! probecore, t32rcl, oocd → (no workspace crates)
+//! fdx-oracle      → probecore (tests only)
 //! ```
 //!
 //! Only `rustvisor-debug` knows about rustvisor; the generic crates must never
@@ -29,6 +30,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("probecore", &[]),
     ("t32rcl", &[]),
     ("oocd", &[]),
+    ("fdx-oracle", &["probecore"]),
 ];
 
 /// Returns one message per violation of [`ALLOWED`] in `cargo metadata` output.

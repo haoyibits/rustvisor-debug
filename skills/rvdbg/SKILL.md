@@ -1,6 +1,6 @@
 ---
 name: rvdbg
-description: Use this skill in a project that has an rvdbg.toml (rustvisor), or when the user wants to flash, debug or inspect the rustvisor board through TRACE32 or StellarLINK, e.g. flash the images, read SEGGER RTT output, decode an AArch32 Hyp fault, read memory or registers, run a check file, compute the clock tree, compare target memory with the ELF, reset the board or run to a symbol. rvdbg picks the backend from the connected probe. With TRACE32, generic interactive debugging (step, breakpoints, source, stack, locals) goes through t32mcp and lauterbach-trace32-debug-basic instead.
+description: Use this skill in a project that has an rvdbg.toml (rustvisor), or when the user wants to flash, debug or inspect the rustvisor board through TRACE32 or StellarLINK, e.g. flash the images, read SEGGER RTT output, talk to an image over its FDX link, decode an AArch32 Hyp fault, read memory or registers, run a check file, compute the clock tree, compare target memory with the ELF, reset the board or run to a symbol. rvdbg picks the backend from the connected probe. With TRACE32, generic interactive debugging (step, breakpoints, source, stack, locals) goes through t32mcp and lauterbach-trace32-debug-basic instead.
 metadata:
   version: "{version}"
 ---
@@ -40,6 +40,7 @@ asks for, despite t32mcp's advice not to drive the debugger by other means.
 | The newest trace records (TRACE32, trace set up) | `rvdbg trace --last <n> --json` |
 | The project's PRACTICE script, waiting for its end (TRACE32) | `rvdbg do <script>` |
 | Target output over SEGGER RTT | `timeout 10 rvdbg rtt --output-only` |
+| Send packets over the image's FDX link and wait for the answers | `rvdbg fdx --send <packet> --expect <answer> --json` (`--guest <n>` for an extra image) |
 
 With TRACE32, generic interactive debugging (single steps, breakpoints,
 source, locals, stack, any PRACTICE command) goes through t32mcp and the
@@ -76,3 +77,7 @@ runs OpenOCD's GDB server for GDB or VS Code.
 - TRACE32: one PowerView runs one PRACTICE script at a time; `flash`,
   `reset` and `do` stop with "PowerView is busy" while one is active.
 - `rtt` keeps reading until it is stopped; always bound it with `timeout`.
+- `fdx` without `--send`/`--expect` is the user's interactive terminal; do
+  not start it yourself. What a packet makes the image do is the image's
+  command protocol, so ask before sending one. Only one program may drive a
+  link at a time: not while the board runner runs.

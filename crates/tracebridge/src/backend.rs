@@ -22,6 +22,8 @@ pub const VERSION: &str = concat!(
     ")"
 );
 
+/// Target RAM through PowerView while the core runs (RTT, FDX).
+pub use crate::memory::RamMemory;
 /// The process environment, as [`Project::from_document_with_env`] takes it.
 pub use crate::pycompat::process_env;
 /// The RTT terminal loop, for any memory access that works while the core
@@ -367,6 +369,11 @@ impl Session {
             .collect())
     }
 
+    /// RAM through `AD:` while the cores run, for the RAM channels (FDX).
+    pub fn memory(&mut self) -> RamMemory<'_> {
+        RamMemory::absolute(&mut self.debugger)
+    }
+
     pub fn write_ram_word(&mut self, address: u64, value: u32) -> Result<()> {
         ram_length(address, 1)?;
         self.debugger
@@ -422,7 +429,7 @@ pub fn merge_vscode_file(
 
 /// `<prefix>/Cellar/<name>/<version>/bin/<exe>` → `<prefix>/opt/<name>/bin/<exe>`:
 /// the Homebrew path that survives `brew upgrade`, for files that name a program.
-pub use crate::ui::homebrew_stable_path;
+pub use crate::ui::{homebrew_stable_path, read_stdin_now};
 
 /// The same ELF parser used by verify: load addresses and bytes, excluding debug information.
 pub fn loadable_content(path: &Path) -> Result<Vec<(u64, Vec<u8>)>> {

@@ -175,10 +175,16 @@ pub trait Target {
     }
 }
 
-/// Memory access while the core runs, with writes (RTT).
+/// Memory access while the core runs, with writes: what the RAM channels
+/// between the debugger and the target (RTT, FDX) need.
 pub trait Memory {
     fn read(&mut self, address: u64, length: usize) -> Result<Vec<u8>>;
+    /// `count` little-endian words from a word-aligned `address`, each read
+    /// in one 32-bit access, so that a word the target updates is never seen
+    /// half old and half new.
+    fn read_u32s(&mut self, address: u64, count: usize) -> Result<Vec<u32>>;
     fn write(&mut self, address: u64, data: &[u8]) -> Result<()>;
+    /// One aligned 32-bit write in a single access.
     fn write_u32(&mut self, address: u64, value: u32) -> Result<()>;
 }
 

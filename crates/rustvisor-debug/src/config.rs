@@ -12,6 +12,9 @@
 //!
 //! [rtt]                                # symbol, control_block_address, poll_interval
 //!
+//! [fdx]                                # the images' FDX link (rvdbg fdx)
+//! symbol = "RUSTVISOR_FDX"
+//!
 //! [trace32]                            # PowerView: the keys of trace32.toml's [trace32]
 //! rcl_port = 20000
 //! [trace32.target]                     # trace32.toml's [target]
@@ -90,6 +93,8 @@ pub struct Config {
     pub elf: PathBuf,
     pub extra_elf: Vec<PathBuf>,
     pub openocd: Option<OpenOcd>,
+    /// `fdx.symbol`: the FDX link's symbol in the images.
+    pub fdx_symbol: String,
     /// The tables for tracebridge, in trace32.toml's shape.
     pub trace32: Table,
 }
@@ -408,10 +413,11 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
     for key in document.keys() {
         if !matches!(
             key.as_str(),
-            "project" | "clock" | "rtt" | "trace32" | "openocd"
+            "project" | "clock" | "rtt" | "fdx" | "trace32" | "openocd"
         ) {
             return Err(format!(
-                "unknown section [{key}] (expected [project], [clock], [rtt], [trace32], [openocd])"
+                "unknown section [{key}] (expected [project], [clock], [rtt], [fdx], [trace32], \
+                 [openocd])"
             ));
         }
     }
@@ -453,6 +459,14 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
     if backend == Some(Backend::OpenOcd) && openocd.is_none() {
         return Err("project.backend is \"openocd\" but there is no [openocd] section".into());
     }
+    let fdx_symbol = match table(&document, "fdx")? {
+        Some(fdx) => {
+            check_keys(fdx, "fdx", &["symbol"])?;
+            string(fdx, "fdx", "symbol")?.filter(|symbol| !symbol.is_empty())
+        }
+        None => None,
+    }
+    .unwrap_or_else(|| crate::fdx::SYMBOL.to_string());
     let trace32 = trace32_document(&document, project, &program)?;
     Ok(Config {
         file: file.to_path_buf(),
@@ -462,6 +476,7 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
         elf,
         extra_elf,
         openocd,
+        fdx_symbol,
         trace32,
     })
 }
@@ -483,6 +498,8 @@ mod tests {
         XOSC = "40MHz"
         [rtt]
         symbol = "_SEGGER_RTT"
+        [fdx]
+        symbol = "APP_FDX"
         [trace32]
         rcl_port = 20001
         [trace32.target]
@@ -516,6 +533,7 @@ mod tests {
             ]
         );
         assert_eq!(config.run_dir(), PathBuf::from("/p/.rvdbg"));
+        assert_eq!(config.fdx_symbol, "APP_FDX");
         let openocd = config.openocd.unwrap();
         assert_eq!(openocd.search, [PathBuf::from("/p/scripts")]);
         assert_eq!((openocd.tcl_port, openocd.gdb_port), (7777, 4444));
@@ -603,6 +621,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.program, "p");
+        assert_eq!(config.fdx_symbol, "RUSTVISOR_FDX");
         let openocd = config.openocd.unwrap();
         assert_eq!(openocd.executable, PathBuf::from("openocd-stellar"));
         assert_eq!((openocd.tcl_port, openocd.gdb_port), (6666, 3333));
@@ -627,7 +646,7 @@ mod tests {
         let error = |text: &str| parse_text(text).unwrap_err();
         assert_eq!(
             error("[target]\n"),
-            "unknown section [target] (expected [project], [clock], [rtt], [trace32], [openocd])"
+            "unknown section [target] (expected [project], [clock], [rtt], [fdx], [trace32], [openocd])"
         );
         assert_eq!(error("[openocd]\n"), "[project] is missing");
         assert_eq!(
@@ -672,6 +691,11 @@ mod tests {
             "[trace32.target] must be a table"
         );
         assert!(trace32("[rtt]\nsym = 1").starts_with("unknown key rtt.sym"));
+        assert_eq!(
+            trace32("[fdx]\nlink = \"L\""),
+            "unknown key fdx.link (expected symbol)"
+        );
+        assert_eq!(trace32("[fdx]\nsymbol = 1"), "fdx.symbol must be a string");
         assert!(
             error("[project]\nbackend = \"openocd\"\nelf = \"a\"\ntypo = 1")
                 .starts_with("unknown key project.typo")

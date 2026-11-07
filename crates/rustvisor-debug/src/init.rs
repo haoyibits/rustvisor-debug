@@ -116,6 +116,12 @@ pub fn render() -> String {
     text.push_str(&section(RTT));
 
     text.push_str(
+        "\n# The images' FDX link ('rvdbg fdx', the board runner): two FDX channels\n\
+         # (BufferE) back to back in one static.\n[fdx]\n",
+    );
+    text.push_str(&format!("symbol = \"{}\"\n", rustvisor_debug::fdx::SYMBOL));
+
+    text.push_str(
         "\n# TRACE32 (tracebridge). Empty paths are derived from sys (default ~/t32).\n[trace32]\n",
     );
     text.push_str(&section(TRACE32));

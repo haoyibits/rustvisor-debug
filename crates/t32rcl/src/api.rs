@@ -86,8 +86,9 @@ pub(crate) fn memory_read_payload(
     address: &Address,
     offset: u64,
     chunk: usize,
+    width: Option<u16>,
 ) -> (Vec<u8>, usize) {
-    let parameters = address.serialize(offset, None);
+    let parameters = address.serialize(offset, width);
     let mut payload = (chunk as u16).to_le_bytes().to_vec();
     payload.extend_from_slice(&parameters);
     (payload, parameters.len() + 6)
@@ -163,7 +164,7 @@ mod tests {
                 "14 00 00 00 10 00 00 00 12 72 05 03 00 10 00 00 53 59 53 74 65 6d 2e 55 70 28 29 00 00 00 00 00"
             )
         );
-        let (payload, force) = memory_read_payload(&address, 0, 16);
+        let (payload, force) = memory_read_payload(&address, 0, 16, None);
         assert_eq!(
             frame(
                 RAPI_CMD_DEVICE_SPECIFIC,
@@ -213,6 +214,34 @@ mod tests {
             ),
             hex(
                 "26 00 00 00 10 00 00 00 24 74 68 07 26 00 4e 4d 1a 00 5c 5c 61 70 70 5c 47 6c 6f 62 61 6c 5c 5f 53 45 47 47 45 52 5f 52 54 54 00 00 58 58 00 00"
+            )
+        );
+    }
+
+    /// Reads with an access width, from the Python library's
+    /// `t32_readmemoryobj(address, length, width=4)`.
+    #[test]
+    fn reads_with_a_width_match_python_reference_bytes() {
+        let read = |address: &Address, length: usize| {
+            let (payload, force) = memory_read_payload(address, 0, length, Some(4));
+            frame(
+                RAPI_CMD_DEVICE_SPECIFIC,
+                RAPI_DSCMD_MEMORY_OBJ_READ,
+                4,
+                &payload,
+                Some(force),
+            )
+        };
+        assert_eq!(
+            read(&Address::new(Some("E"), 0x2000_0000), 16),
+            hex(
+                "1c 00 00 00 10 00 00 00 1c 74 35 04 10 00 03 00 00 00 00 20 00 00 00 00 41 43 02 00 45 00 57 49 04 00 58 58 00 00 00 00"
+            )
+        );
+        assert_eq!(
+            read(&Address::new(Some("AD"), 0x6000_0000), 32),
+            hex(
+                "1e 00 00 00 10 00 00 00 1e 74 35 04 20 00 03 00 00 00 00 60 00 00 00 00 41 43 04 00 41 44 00 00 57 49 04 00 58 58 00 00"
             )
         );
     }

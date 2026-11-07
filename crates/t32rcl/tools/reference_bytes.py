@@ -40,3 +40,8 @@ s = Symbol(None, name="\\\\app\\Global\\_SEGGER_RTT")
 show("symbol query", lambda: lib.t32_querysymbolobj(s))
 link.mid = 253
 show("id 254 then wrap", lambda: (lib.t32_attach(1), lib.t32_attach(1), lib.t32_attach(1)))
+link.mid = 3
+show("read E len16 width4", lambda: lib.t32_readmemoryobj(a, 16, width=4))
+link.mid = 3
+b = Address(None, access="AD", value=0x60000000)
+show("read AD len32 width4", lambda: lib.t32_readmemoryobj(b, 32, width=4))

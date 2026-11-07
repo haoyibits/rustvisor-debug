@@ -212,6 +212,13 @@ mod tests {
             self.log.push(format!("read {address:#x} {length}"));
             Ok(self.get(address, length))
         }
+        fn read_u32s(&mut self, address: u64, count: usize) -> Result<Vec<u32>> {
+            let bytes = self.read(address, 4 * count)?;
+            Ok(bytes
+                .chunks_exact(4)
+                .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+                .collect())
+        }
         fn write(&mut self, address: u64, data: &[u8]) -> Result<()> {
             self.log.push(format!("write {address:#x} {data:?}"));
             self.put(address, data);

@@ -267,10 +267,31 @@ impl Debugger {
 
     /// `memory.read(address, length=n)`.
     pub fn memory_read(&mut self, address: &Address, length: usize) -> Result<Vec<u8>> {
+        self.read_memory(address, length, None)
+    }
+
+    /// `memory.read(address, length=n, width=w)`: every access `width` bytes
+    /// wide, e.g. 4 so that a word the target updates is never read in parts.
+    pub fn memory_read_width(
+        &mut self,
+        address: &Address,
+        length: usize,
+        width: u16,
+    ) -> Result<Vec<u8>> {
+        self.read_memory(address, length, Some(width))
+    }
+
+    fn read_memory(
+        &mut self,
+        address: &Address,
+        length: usize,
+        width: Option<u16>,
+    ) -> Result<Vec<u8>> {
         let mut result = Vec::with_capacity(length);
         while result.len() < length {
             let chunk = (length - result.len()).min(api::READ_CHUNK_SIZE);
-            let (payload, force) = api::memory_read_payload(address, result.len() as u64, chunk);
+            let (payload, force) =
+                api::memory_read_payload(address, result.len() as u64, chunk, width);
             let data = self
                 .call(
                     api::RAPI_CMD_DEVICE_SPECIFIC,

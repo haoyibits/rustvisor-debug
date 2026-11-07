@@ -8,6 +8,7 @@ mod debug;
 mod errors;
 mod flash;
 mod init;
+mod memory;
 mod powerview;
 mod pycompat;
 mod remote;

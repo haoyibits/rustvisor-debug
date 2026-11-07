@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 use rustvisor_debug::config;
+mod fdx_terminal;
 mod init;
 mod inspect;
 mod openocd;
@@ -253,6 +254,27 @@ enum Commands {
         /// TRACE32: Remote API port (default: trace32.rcl_port)
         #[arg(long)]
         port: Option<u16>,
+    },
+    /// FDX link of an image while the core runs: each line typed is a packet to the target, each packet from it a line (Ctrl-C to stop)
+    Fdx {
+        /// The n-th extra image (project.extra_elf, from 0) instead of the ELF
+        #[arg(long, value_name = "N")]
+        guest: Option<usize>,
+        /// Link symbol (default: fdx.symbol, RUSTVISOR_FDX)
+        #[arg(long)]
+        symbol: Option<String>,
+        /// Link address; skips the symbol lookup, e.g. 0x60000CC0
+        #[arg(long, value_parser = parse_address)]
+        address: Option<u64>,
+        /// Send this packet, then exit; repeat it to send several, in order
+        #[arg(long, value_name = "TEXT")]
+        send: Vec<String>,
+        /// Then wait for this packet; repeat it to wait for several, in order (exit 3 when one does not come)
+        #[arg(long, value_name = "TEXT")]
+        expect: Vec<String>,
+        /// With --send/--expect: seconds to wait for the link to open, for room and for each expected packet
+        #[arg(long, value_name = "SECONDS", default_value_t = 10.0)]
+        timeout: f64,
     },
     /// Write the RustRover run configuration for TRACE32 (.run/, LSP4IJ)
     Rustrover,
@@ -517,6 +539,14 @@ fn execute(env: &mut Env, command: Commands) -> Result<u8, String> {
                 Ok(0)
             }
         },
+        Commands::Fdx {
+            guest,
+            symbol,
+            address,
+            send,
+            expect,
+            timeout,
+        } => fdx(env, guest, symbol, address, send, expect, timeout),
         command => inspect_command(env, command),
     }
 }
@@ -697,6 +727,76 @@ fn plan(
 
 fn trace32_only(what: &str) -> String {
     format!("{what} is available with TRACE32 only (--backend trace32)")
+}
+
+/// `rvdbg fdx`: the link's address, then the terminal on the backend's
+/// memory access.
+fn fdx(
+    env: &mut Env,
+    guest: Option<usize>,
+    symbol: Option<String>,
+    address: Option<u64>,
+    send: Vec<String>,
+    expect: Vec<String>,
+    timeout: f64,
+) -> Result<u8, String> {
+    let config = env.config;
+    if !(timeout > 0.0 && timeout.is_finite()) {
+        return Err("--timeout must be positive".into());
+    }
+    let image = match guest {
+        None => config.elf.clone(),
+        Some(n) => config.extra_elf.get(n).cloned().ok_or_else(|| {
+            format!(
+                "--guest {n}: project.extra_elf has {} image(s)",
+                config.extra_elf.len()
+            )
+        })?,
+    };
+    let symbol = symbol.unwrap_or_else(|| config.fdx_symbol.clone());
+    let address = match address {
+        Some(address) => address,
+        None => rustvisor_debug::fdx::symbol_address(&image, &symbol)
+            .map_err(|error| format!("{error}; build the images, or pass --address 0x<address>"))?,
+    };
+    let backend = env.backend()?;
+    let mut options = fdx_terminal::Options {
+        probe: "TRACE32",
+        symbol,
+        address,
+        send,
+        expect,
+        timeout: std::time::Duration::from_secs_f64(timeout),
+        json: env.json,
+    };
+    // Ctrl-C: the session's flag, else one for this command.
+    let own = std::sync::Arc::new(AtomicBool::new(false));
+    let interrupted: &AtomicBool = match env.session.as_ref().map(|link| link.interrupted) {
+        Some(flag) => flag,
+        None => {
+            #[cfg(unix)]
+            signal_hook::flag::register(signal_hook::consts::SIGINT, own.clone())
+                .map_err(|error| format!("cannot handle Ctrl-C: {error}"))?;
+            &own
+        }
+    };
+    match backend {
+        Backend::OpenOcd => {
+            let memory_ap = config.openocd()?.memory_ap.clone().ok_or(
+                "FDX reads and writes memory through openocd.memory_ap; set it in rvdbg.toml",
+            )?;
+            options.probe = "StellarLINK";
+            env.with_server(|server| {
+                let mut memory = stellarbridge::core::ApMemory { server, memory_ap };
+                fdx_terminal::run(&mut memory, &options, interrupted)
+            })
+        }
+        Backend::Trace32 => {
+            let mut session =
+                tracebridge::backend::Session::connect(trace32(config)?).map_err(text)?;
+            fdx_terminal::run(&mut session.memory(), &options, interrupted)
+        }
+    }
 }
 
 fn parse_address(text: &str) -> Result<u64, String> {

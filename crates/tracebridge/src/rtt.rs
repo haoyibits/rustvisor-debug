@@ -12,35 +12,13 @@ use std::time::Duration;
 use clap::Parser;
 use probecore::Memory;
 use probecore::rtt::{DESC_RD_OFF, RttChannel, UP_DESCRIPTOR};
-use t32rcl::{Address, Debugger};
+use t32rcl::Debugger;
 
 use crate::config::Config;
 use crate::errors::Result;
+use crate::memory::RamMemory;
 use crate::style::Style;
 use crate::{bail, bridge_error};
-
-/// RCL run-time memory access (`E:`), so the core keeps running.
-struct RunTime<'a>(&'a mut Debugger);
-
-fn run_time(address: u64) -> Address {
-    Address::new(Some("E"), address)
-}
-
-fn lift<T>(result: t32rcl::Result<T>) -> probecore::Result<T> {
-    result.map_err(|error| probecore::Error::new(error.to_string()))
-}
-
-impl Memory for RunTime<'_> {
-    fn read(&mut self, address: u64, length: usize) -> probecore::Result<Vec<u8>> {
-        lift(self.0.memory_read(&run_time(address), length))
-    }
-    fn write(&mut self, address: u64, data: &[u8]) -> probecore::Result<()> {
-        lift(self.0.memory_write(&run_time(address), data))
-    }
-    fn write_u32(&mut self, address: u64, value: u32) -> probecore::Result<()> {
-        lift(self.0.memory_write_u32(&run_time(address), value))
-    }
-}
 
 fn parse_address(value: &str) -> std::result::Result<u64, String> {
     crate::pycompat::parse_int_auto(value)
@@ -145,28 +123,11 @@ impl Drop for TerminalGuard {
 /// `read_terminal_input`: whatever is available right now, without blocking.
 /// Embedded consoles usually treat BS as erase; most terminals send DEL.
 fn read_terminal_input() -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-        use std::os::fd::AsFd;
-        let stdin = std::io::stdin();
-        let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
-        if !matches!(poll(&mut fds, PollTimeout::ZERO), Ok(count) if count > 0) {
-            return Vec::new();
-        }
-        let mut buffer = [0u8; 256];
-        match nix::unistd::read(stdin.as_fd(), &mut buffer) {
-            Ok(count) => buffer[..count]
-                .iter()
-                .map(|&b| if b == 0x7f { 0x08 } else { b })
-                .collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        Vec::new()
-    }
+    crate::ui::read_stdin_now()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|b| if b == 0x7f { 0x08 } else { b })
+        .collect()
 }
 
 /// `run`.
@@ -210,7 +171,7 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
             })?,
     };
 
-    let mut memory = RunTime(&mut debugger);
+    let mut memory = RamMemory::run_time(&mut debugger);
     terminal(
         &mut memory,
         &Terminal {

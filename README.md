@@ -119,6 +119,7 @@ Day to day:
 | `check FILE` | a check file of expected values | every read kind | `addr`, `core` and `clock` reads |
 | `clock` | the clock tree with frequencies | also `--html` | yes |
 | `rtt` | SEGGER RTT terminal on channel 0 | yes | through the MEM-AP while the core runs |
+| `fdx` | the image's FDX link: one line per packet, or `--send`/`--expect` | through `AD:` while the cores run | through the MEM-AP while the core runs |
 | `reset` | reset and halt at the reset vector | yes | `reset halt` |
 | `attach` | connect without resetting | `SYStem.Mode Attach` | yes |
 | `run-until <symbol\|addr>` | run a halted core to a symbol or address | on-chip breakpoint | hardware breakpoint |
@@ -174,7 +175,7 @@ rvdbg [openocd halted]> quit
 - Session commands: `help [command]`, `backend trace32|openocd`,
   `reconnect` (look for the probe again, e.g. after plugging it in), and
   `quit` / `exit` / Ctrl-D. Ctrl-C stops a waiting command (`rtt`,
-  `run-until`), not the session. A failing command does not end it.
+  `fdx`, `run-until`), not the session. A failing command does not end it.
 - Tab completes command names. The history is kept in `.rvdbg/history`.
 - Read from a pipe, the session runs one command per line without a prompt.
 
@@ -189,6 +190,7 @@ the SR6P6 defaults.
 | `[project]` | `backend` (optional), `program` (TRACE32 program name), `elf`, `extra_elf` (further images flashed, loaded and verified together with `elf`) |
 | `[clock]` | frequencies only the board knows, for `clock` and check files: `XOSC = "40MHz"` |
 | `[rtt]` | `symbol`, `control_block_address`, `poll_interval` |
+| `[fdx]` | `symbol`: the images' FDX link (default `RUSTVISOR_FDX`) |
 | `[trace32]` | `sys`, `host`, `executable`, `binary`, `config`, `debug_adapter`, `rcl_port`, `dap_port`, `dap_backend_port`, `dap_backend_timeout`, `operation_timeout` |
 | `[trace32.target]` | `cpu`, `cores`, `mem_access`, `jtag_clock`, `dual_port` |
 | `[trace32.flash]` | `chip` or `script` (see below), `args` |
@@ -406,6 +408,28 @@ Channel 0 is used in both directions while the core runs: with TRACE32
 through run-time memory access (`dual_port = "ON"`), with StellarLINK
 through the MEM-AP. The terminal switches to character-at-a-time input and
 restores its settings on exit.
+
+## FDX
+
+rustvisor's images talk to the debugger over FDX (Lauterbach's Fast Data
+eXchange, BufferE method): one static, `RUSTVISOR_FDX`, holds two FDX
+channels back to back, the one to the target first. The debugger reads and
+writes them while the cores run, so neither side stops the other; with
+StellarLINK too, since only memory access is needed.
+
+```sh
+rvdbg fdx                                      # each line typed is one packet
+rvdbg fdx --guest 0                            # the link of the first extra image
+rvdbg fdx --send "boot single" --expect "ok boot" --json
+```
+
+Interactive, packets from the target are printed one per line until Ctrl-C;
+a target reset that reopens the link is followed. With `--send` the packets
+are sent in order, then each `--expect` packet is waited for (`--timeout`
+seconds each, default 10); exit 3 when one does not come. The link's address
+comes from the ELF's symbol table (`--symbol`, `fdx.symbol`), or `--address`.
+Only one program may drive a link at a time: not `rvdbg fdx` together with
+the board runner or PowerView's own `FDX.*` windows.
 
 ## Inspecting the target
 
@@ -686,8 +710,8 @@ asking. In the project's `.claude/settings.json`:
 
 `check` is allowed with **exact** command lines rather than a `:*` prefix: a
 prefix rule would also allow `check … --halt`, which stops the core.
-Everything else (`flash`, `load`, `open`, `rtt`, `attach`, `reset`, `down`,
-`halt`, `go`, `run-until`, `do`, `cmd`, `check --halt`) still asks. For these
+Everything else (`flash`, `load`, `open`, `rtt`, `fdx`, `attach`, `reset`,
+`down`, `halt`, `go`, `run-until`, `do`, `cmd`, `check --halt`) still asks. For these
 rules to match, run the commands inside the project (no `--config` or
 `--backend` before the command) and put `--json` after the command's
 arguments.
@@ -745,7 +769,8 @@ A virtual workspace:
 | `crates/t32rcl` | pure Rust port of the parts of Lauterbach's `lauterbach-trace32-rcl` Python library (TCP only) that tracebridge uses |
 | `crates/stellarbridge` | the OpenOCD (StellarLINK) backend; OpenOCD runs as a separate program |
 | `crates/oocd` | client for OpenOCD's Tcl port |
-| `crates/probecore` | what both backends share: check files, clock trees, ELF compare, RTT, fault report |
+| `crates/probecore` | what both backends share: check files, clock trees, ELF compare, the RTT and FDX channels, fault report |
+| `crates/fdx-oracle` | tests only: probecore's FDX end against Lauterbach's FDX target agent (`vendor/t32fdx.c`) |
 | `skills/` | the agent skills the binaries install |
 
 Dependencies point one way only (`rvdbg → tracebridge, stellarbridge,
@@ -758,4 +783,6 @@ examples for recording against a real PowerView.
 ## License
 
 MIT. `crates/t32rcl` contains code ported from lauterbach-trace32-rcl
-(Copyright (c) 2020 Lauterbach GmbH, MIT); see [NOTICE](NOTICE).
+(Copyright (c) 2020 Lauterbach GmbH, MIT). `crates/fdx-oracle/vendor` holds
+Lauterbach's FDX target agent (Copyright (c) 1989-2022 Lauterbach GmbH,
+MIT), compiled for its tests only. See [NOTICE](NOTICE).

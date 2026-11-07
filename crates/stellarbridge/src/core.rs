@@ -301,7 +301,8 @@ impl Target for CoreTarget<'_> {
     }
 }
 
-/// Physical memory through a MEM-AP while the core runs, for RTT.
+/// Physical memory through a MEM-AP while the core runs, for the RAM
+/// channels (RTT, FDX).
 pub struct ApMemory<'a> {
     pub server: &'a mut Server,
     pub memory_ap: String,
@@ -312,6 +313,13 @@ impl Memory for ApMemory<'_> {
         self.server
             .client
             .read_memory(&self.memory_ap, address, length)
+            .map_err(lift)
+    }
+
+    fn read_u32s(&mut self, address: u64, count: usize) -> target::Result<Vec<u32>> {
+        self.server
+            .client
+            .read_words(&self.memory_ap, address, count)
             .map_err(lift)
     }
 

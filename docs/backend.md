@@ -47,6 +47,24 @@ alignment and arithmetic, while rustvisor bounds target-provided pointers to the
 measured Guest's RAM. CP15/MMIO keep their existing expression-based reads and
 are not automatically converted to bulk accesses.
 
+`Session::memory()` lends the connection as a `probecore::Memory` (`AD:`, word
+reads in 32-bit accesses) for the RAM channels; `rustvisor_debug::fdx::Link`
+drives the images' FDX link over it, the same code `rvdbg fdx` runs on both
+backends:
+
+```rust,no_run
+# fn example(session: &mut tracebridge::backend::Session) -> Result<(), Box<dyn std::error::Error>> {
+use rustvisor_debug::fdx::Link;
+let mut memory = session.memory();
+let address = rustvisor_debug::fdx::symbol_address("build/el2.elf".as_ref(), "RUSTVISOR_FDX")?;
+if let Some(link) = Link::locate(&mut memory, address)? {
+    link.send(&mut memory, b"boot single")?;
+    let answer = link.receive(&mut memory)?;
+}
+# Ok(())
+# }
+```
+
 `loadable_content` reuses verify's ELF parser. `evidence_inputs` resolves the
 selected flash script and clock description with the effective configuration;
 the runner keys their contents, its linked executable and project criteria.

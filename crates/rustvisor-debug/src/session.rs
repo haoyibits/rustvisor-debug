@@ -7,7 +7,7 @@
 //! GDB server open, so GDB or VS Code can attach while the session runs. With
 //! TRACE32 each command talks to PowerView as on the command line.
 //!
-//! Ctrl-C stops a waiting command (`rtt`, `run-until`), not the session;
+//! Ctrl-C stops a waiting command (`rtt`, `fdx`, `run-until`), not the session;
 //! `quit`, `exit` or Ctrl-D end it.
 
 use std::borrow::Cow;
@@ -75,7 +75,7 @@ const GROUPS: &[(&str, &[(&str, Need)])] = &[
         "program",
         &[("flash", Need::Probe), ("load", Need::Trace32)],
     ),
-    ("terminal", &[("rtt", Need::Probe)]),
+    ("terminal", &[("rtt", Need::Probe), ("fdx", Need::Probe)]),
     (
         "project",
         &[

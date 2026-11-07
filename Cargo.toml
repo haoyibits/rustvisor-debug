@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/fdx-oracle",
     "crates/oocd",
     "crates/probecore",
     "crates/rustvisor-debug",

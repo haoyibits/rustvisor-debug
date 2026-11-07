@@ -2,6 +2,32 @@
 
 use std::path::{Path, PathBuf};
 
+/// What stdin holds right now, without blocking: empty when nothing is
+/// there, `None` at the end of the input. A terminal in its usual (line)
+/// mode only shows a line once Return is pressed.
+pub fn read_stdin_now() -> Option<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        use std::os::fd::AsFd;
+        let stdin = std::io::stdin();
+        let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
+        if !matches!(poll(&mut fds, PollTimeout::ZERO), Ok(count) if count > 0) {
+            return Some(Vec::new());
+        }
+        let mut buffer = [0u8; 256];
+        match nix::unistd::read(stdin.as_fd(), &mut buffer) {
+            Ok(0) => None,
+            Ok(count) => Some(buffer[..count].to_vec()),
+            Err(_) => Some(Vec::new()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        Some(Vec::new())
+    }
+}
+
 /// `info` in cli.py: a cyan `[tracebridge]` prefix on stdout.
 pub fn info(message: &str) {
     println!("\x1b[1;36m[tracebridge]\x1b[0m {message}");

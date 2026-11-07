@@ -1,6 +1,6 @@
 [package]
 name = "probecore"
-description = "Probe-independent analysis for embedded targets: check files, clock trees, ELF compare, RTT ring buffers, fault decode"
+description = "Probe-independent analysis for embedded targets: check files, clock trees, ELF compare, RTT and FDX channels, fault decode"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true

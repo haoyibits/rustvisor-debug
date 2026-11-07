@@ -1,16 +1,17 @@
 # Backend used by rustvisor
 
-The public surface is `tracebridge::backend`. It grows from concrete calls in
-rustvisor's `tools/board-tests`; it is not a generic test workflow framework.
+The public surface is `tracebridge::backend`, plus `rustvisor_debug::config`
+to read the project's `rvdbg.toml`. It grows from concrete calls in rustvisor's
+`tools/board-tests`; it is not a generic test workflow framework.
 
 ```rust,no_run
 use std::path::Path;
 use tracebridge::backend::{Project, Session, CheckOptions};
 
 # fn example() -> Result<(), Box<dyn std::error::Error>> {
-let mut project = Project::load(Path::new("trace32.toml"))?;
+let mut project = rustvisor_debug::config::load(Path::new("rvdbg.toml"))?.trace32_project()?;
 project.images("build/el2.elf".into(), vec!["build/guest.elf".into()], "hypervisor".into());
-// PowerView must already be running (tracebridge open).
+// PowerView must already be running (rvdbg open).
 let mut session = Session::connect(project)?;
 session.flash()?;
 session.verify()?;
@@ -25,13 +26,13 @@ session.resume()?;
 
 Loading a project does not connect, start PowerView or touch a target. Connecting
 uses RCL attach/version negotiation; it does not issue a target reset. PowerView
-launch remains with the CLI so its generated toolbar points to the correct CLI
-executable, rather than to an embedding runner.
+launch remains with rvdbg (`rvdbg open`) so its generated toolbar points to the
+rvdbg executable, rather than to an embedding runner.
 
 `images` explicitly replaces both the primary and extra images, including an
 empty extra list. `flash` and `load` use the existing sequences, including flash
 script selection, derivative arguments, PRACTICE-idle checks and cleanup of
-FLASH.ReProgram on failure. `load` retains the CLI's symbol-load-and-resume
+FLASH.ReProgram on failure. `load` retains rvdbg's symbol-load-and-resume
 behavior. `reset` uses project CPU, core and memory-access settings.
 
 Check failures are typed `CheckReport` values with `passed() == false` and exit

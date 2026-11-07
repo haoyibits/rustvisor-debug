@@ -20,7 +20,7 @@ brew install haoyibits/tap/rvdbg     # 会一起装上 openocd-stellar
 curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download/install.sh | sh
 ```
 
-安装脚本把 `rvdbg` 装到 `~/.local/bin`：用 `RVDBG_INSTALL_DIR` 改目录，用 `RVDBG_VERSION=v0.1.21` 固定版本。这个目录需要在 `PATH` 里。它不装 StellarLINK 后端需要的 openocd-stellar；只用 TRACE32 时不需要。
+安装脚本把 `rvdbg` 装到 `~/.local/bin`：用 `RVDBG_INSTALL_DIR` 改目录，用 `RVDBG_VERSION=v0.1.22` 固定版本。这个目录需要在 `PATH` 里。它不装 StellarLINK 后端需要的 openocd-stellar；只用 TRACE32 时不需要。
 
 手动安装：从 releases 页面下载 `rvdbg-<target>.tar.gz`，用 `.sha256` 文件核对，再把二进制文件放到 `PATH` 里的某个目录。
 
@@ -58,7 +58,7 @@ xattr -d com.apple.quarantine /path/to/rvdbg
 
 ```sh
 cd ~/work/rustvisor-sdk      # 项目根目录
-rvdbg init                   # 生成 rvdbg.toml（目录里有 trace32.toml 时沿用其中的设置）
+rvdbg init                   # 生成 rvdbg.toml，默认值是 SR6P6 的
 $EDITOR rvdbg.toml           # program、elf、extra_elf……
 rvdbg config                 # 镜像、找到的调试器、会用的后端
 rvdbg flash                  # 烧录镜像并运行
@@ -113,7 +113,7 @@ rvdbg vscode                 # 或：rvdbg rustrover（TRACE32）
 
 ```text
 $ rvdbg
-rvdbg 0.1.20  /work/rustvisor-sdk/rvdbg.toml
+rvdbg 0.1.22  /work/rustvisor-sdk/rvdbg.toml
 backend  openocd (StellarLINK on USB 0483:0499)
   inspect   status  mem  fault  verify  check  clock  reg  trace  eval
   control   halt  go  reset  attach  run-until  down  do  cmd
@@ -133,7 +133,7 @@ rvdbg [openocd halted]> quit
 
 ## 配置
 
-`rvdbg.toml` 所在的目录就是项目根目录，文件里的相对路径都相对于这个目录。`rvdbg init` 生成带注释的文件，默认值是 SR6P6 的；同一目录里有 `trace32.toml` 时沿用其中的值。
+`rvdbg.toml` 所在的目录就是项目根目录，文件里的相对路径都相对于这个目录。`rvdbg init` 生成带注释的文件，默认值是 SR6P6 的。
 
 | 段 | 键 |
 |---|---|
@@ -481,15 +481,6 @@ claude mcp add-json -s user t32mcp '{"type":"stdio","command":"/path/to/t32mcp",
 ```
 
 `check` 用的是**完整**命令行，而不是 `:*` 前缀：前缀规则也会放行 `check … --halt`，而它会停核。其余命令（`flash`、`load`、`open`、`rtt`、`attach`、`reset`、`down`、`halt`、`go`、`run-until`、`do`、`cmd`、`check --halt`）仍然要询问。要让这些规则匹配上，命令要在项目里运行（命令前面不要加 `--config` 或 `--backend`），`--json` 放在命令参数后面。
-
-## 从 tracebridge 迁移
-
-1. 在 `trace32.toml` 所在的目录运行 `rvdbg init`：`rvdbg.toml` 会沿用它的值（`[target]`、`[flash]`、`[rtos]` 挪到 `[trace32]` 下面）。然后删掉 `trace32.toml`。
-2. 运行 `rvdbg vscode`（以及 `rvdbg rustrover`）。`TRACE32: Attach` 配置改为启动 `rvdbg adapter`，旁边再加上 `StellarLINK: Attach`。
-3. 把脚本和 agent 权限里的 `tracebridge`、`tracebridge debug` 换成 `rvdbg`（`debug break` 对应 `rvdbg halt`）。
-4. 运行 `rvdbg skill`，删掉 `~/.claude/skills/tracebridge`。
-
-把烧录脚本和时钟描述从 `~/.config/tracebridge/` 挪到 `~/.config/rvdbg/`（0.1.21 起）。
 
 ## 排障
 

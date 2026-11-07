@@ -2,15 +2,13 @@
 //!
 //! The defaults are rustvisor's: the diagnostic boot image and its Guest,
 //! the SR6P6 TRACE32 settings, the SR6P6 EVB OpenOCD script, the UTEST boot
-//! record as the OTP area. When the directory has a trace32.toml (the file
-//! tracebridge and the board tests read), its values replace the TRACE32
-//! defaults and the images, so both tools start from the same settings.
+//! record as the OTP area.
 
 use std::path::{Path, PathBuf};
 
-use toml::{Table, Value};
+use toml::Value;
 
-use crate::config::{self, FILE_NAME, FLASH_KEYS, RTOS_KEYS, RTT_KEYS, TARGET_KEYS, TRACE32_KEYS};
+use crate::config::{self, FILE_NAME};
 
 /// `(key, default)` pairs in the order they are written.
 type Defaults = &'static [(&'static str, Default)];
@@ -86,43 +84,22 @@ fn line(key: &str, value: &Value) -> String {
     format!("{key} = {value}\n")
 }
 
-/// The keys of one section: the defaults in their order, each replaced by
-/// the imported value of the same key; imported keys tracebridge knows but
-/// that have no default (rtos) follow.
-fn section(defaults: Defaults, imported: Option<&Table>, known: &[&str]) -> String {
-    let mut text = String::new();
-    for (key, default) in defaults {
-        let value = imported
-            .and_then(|table| table.get(*key))
-            .cloned()
-            .unwrap_or_else(|| default.value());
-        text.push_str(&line(key, &value));
-    }
-    if let Some(table) = imported {
-        for (key, value) in table {
-            if known.contains(&key.as_str()) && !defaults.iter().any(|(name, _)| name == key) {
-                text.push_str(&line(key, value));
-            }
-        }
-    }
-    text
+/// The keys of one section with their defaults, in order.
+fn section(defaults: Defaults) -> String {
+    defaults
+        .iter()
+        .map(|(key, default)| line(key, &default.value()))
+        .collect()
 }
 
-fn sub<'a>(document: Option<&'a Table>, key: &str) -> Option<&'a Table> {
-    document?.get(key)?.as_table()
-}
-
-/// The text of `rvdbg.toml`; `imported` is a parsed trace32.toml.
-pub fn render(imported: Option<&Table>) -> String {
+/// The text of `rvdbg.toml`.
+pub fn render() -> String {
     let mut text = String::new();
     text.push_str(
         "# rvdbg project configuration, written by 'rvdbg init'.\n\
          # Relative paths are relative to this file. 'rvdbg flash' flashes the images,\n\
          # 'rvdbg debug' starts the debug server, 'rvdbg vscode' writes the IDE files.\n",
     );
-    if imported.is_some() {
-        text.push_str("# The images and the TRACE32 settings were taken from trace32.toml.\n");
-    }
     text.push_str(
         "\n[project]\n\
          # The backend follows the connected probe: a Lauterbach probe or a running\n\
@@ -130,40 +107,25 @@ pub fn render(imported: Option<&Table>) -> String {
          # trace32. 'rvdbg --backend <name>' or this key fixes it.\n\
          # backend = \"openocd\"\n",
     );
-    text.push_str(&section(
-        PROJECT,
-        sub(imported, "project"),
-        &["program", "elf", "extra_elf"],
-    ));
+    text.push_str(&section(PROJECT));
 
     text.push_str("\n# Frequencies only the board knows (debug clock, check files).\n[clock]\n");
-    match sub(imported, "clock") {
-        Some(clock) => {
-            for (key, value) in clock {
-                text.push_str(&line(key, value));
-            }
-        }
-        None => text.push_str("XOSC = \"40MHz\"\n"),
-    }
+    text.push_str("XOSC = \"40MHz\"\n");
 
     text.push_str("\n# SEGGER RTT.\n[rtt]\n");
-    text.push_str(&section(RTT, sub(imported, "rtt"), RTT_KEYS));
+    text.push_str(&section(RTT));
 
     text.push_str(
         "\n# TRACE32 (tracebridge). Empty paths are derived from sys (default ~/t32).\n[trace32]\n",
     );
-    text.push_str(&section(TRACE32, sub(imported, "trace32"), TRACE32_KEYS));
+    text.push_str(&section(TRACE32));
     text.push_str("\n[trace32.target]\n");
-    text.push_str(&section(TARGET, sub(imported, "target"), TARGET_KEYS));
+    text.push_str(&section(TARGET));
     text.push_str(
         "\n# Empty script: chosen by chip (flash.chip, else target.cpu) from\n\
          # ~/.config/rvdbg/flash and the TRACE32 installation.\n[trace32.flash]\n",
     );
-    text.push_str(&section(FLASH, sub(imported, "flash"), FLASH_KEYS));
-    if let Some(rtos) = sub(imported, "rtos") {
-        text.push_str("\n[trace32.rtos]\n");
-        text.push_str(&section(&[], Some(rtos), RTOS_KEYS));
-    }
+    text.push_str(&section(FLASH));
 
     text.push_str(
         "\n# StellarLINK through OpenOCD (brew install haoyibits/tap/openocd-stellar).\n\
@@ -197,18 +159,7 @@ pub fn init(directory: &Path) -> Result<PathBuf, String> {
             path.display()
         ));
     }
-    let trace32 = directory.join("trace32.toml");
-    let imported = if trace32.is_file() {
-        let text = std::fs::read_to_string(&trace32)
-            .map_err(|error| format!("cannot read {}: {error}", trace32.display()))?;
-        Some(
-            text.parse::<Table>()
-                .map_err(|error| format!("cannot parse {}: {error}", trace32.display()))?,
-        )
-    } else {
-        None
-    };
-    let text = render(imported.as_ref());
+    let text = render();
     // What is written must load.
     config::parse(&text, &path, directory).map_err(|error| {
         format!("internal error: the generated {FILE_NAME} is invalid: {error}")
@@ -225,7 +176,7 @@ mod tests {
     #[test]
     fn defaults_load_for_both_backends() {
         {
-            let text = render(None);
+            let text = render();
             let config = config::parse(&text, Path::new("/p/rvdbg.toml"), Path::new("/p")).unwrap();
             assert_eq!(config.backend, None);
             assert_eq!(config.program, "boot_diagnostic");
@@ -237,48 +188,6 @@ mod tests {
             assert_eq!(config.trace32["target"]["cpu"].as_str(), Some("SR6P6"));
             assert_eq!(config.trace32["clock"]["XOSC"].as_str(), Some("40MHz"));
         }
-    }
-
-    #[test]
-    fn a_trace32_toml_is_imported() {
-        let imported: Table = r#"
-            [project]
-            program = "app"
-            elf = "build/app.elf"
-            extra_elf = []
-            [target]
-            cpu = "STM32H743ZI"
-            cores = "1."
-            [flash]
-            script = "flash/h7.cmm"
-            args = ["PREPAREONLY"]
-            [rtos]
-            config = "~~/demo/arm/kernel/freertos/freertos.t32"
-            [trace32]
-            rcl_port = 20001
-            [rtt]
-            poll_interval = 0.05
-            [clock]
-            HSE = "25MHz"
-        "#
-        .parse()
-        .unwrap();
-        let text = render(Some(&imported));
-        assert!(text.contains("taken from trace32.toml"), "{text}");
-        let config = config::parse(&text, Path::new("/p/rvdbg.toml"), Path::new("/p")).unwrap();
-        assert_eq!(config.program, "app");
-        assert!(config.extra_elf.is_empty());
-        let shaped = &config.trace32;
-        assert_eq!(shaped["target"]["cpu"].as_str(), Some("STM32H743ZI"));
-        assert_eq!(shaped["flash"]["script"].as_str(), Some("flash/h7.cmm"));
-        assert_eq!(
-            shaped["rtos"]["config"].as_str(),
-            Some("~~/demo/arm/kernel/freertos/freertos.t32")
-        );
-        assert_eq!(shaped["trace32"]["rcl_port"].as_integer(), Some(20001));
-        assert_eq!(shaped["rtt"]["poll_interval"].as_float(), Some(0.05));
-        assert_eq!(shaped["clock"]["HSE"].as_str(), Some("25MHz"));
-        assert!(shaped["clock"].get("XOSC").is_none());
     }
 
     #[test]

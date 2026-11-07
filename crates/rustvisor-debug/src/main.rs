@@ -72,7 +72,7 @@ impl From<BackendArg> for Backend {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Write rvdbg.toml in the current directory (values from trace32.toml if there is one)
+    /// Write rvdbg.toml with the SR6P6 defaults in the current directory
     Init,
     /// Show the configuration, the connected probes and the backend they select
     Config,
@@ -784,12 +784,6 @@ fn init_command(cwd: &Path) -> Result<u8, String> {
     let path = init::init(cwd)?;
     let style = Style::stdout();
     println!("{} {}", style.good("wrote"), path.display());
-    if cwd.join("trace32.toml").is_file() {
-        println!(
-            "{}",
-            style.dim("  images and TRACE32 settings taken from trace32.toml")
-        );
-    }
     println!(
         "{}",
         style.dim("  the backend follows the connected probe (StellarLINK or Lauterbach)")

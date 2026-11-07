@@ -29,7 +29,7 @@ curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download
 ```
 
 This installs `rvdbg` into `~/.local/bin` (set `RVDBG_INSTALL_DIR` to change
-it, `RVDBG_VERSION=v0.1.21` to pin a release). Make sure the directory is on
+it, `RVDBG_VERSION=v0.1.22` to pin a release). Make sure the directory is on
 your `PATH`. It does not install openocd-stellar, which the StellarLINK
 backend needs; TRACE32 works without it.
 
@@ -80,7 +80,7 @@ From source: `cargo install --path crates/rustvisor-debug`.
 
 ```sh
 cd ~/work/rustvisor-sdk      # the project root
-rvdbg init                   # writes rvdbg.toml (takes over trace32.toml if there is one)
+rvdbg init                   # writes rvdbg.toml with the SR6P6 defaults
 $EDITOR rvdbg.toml           # program, elf, extra_elf, ...
 rvdbg config                 # the images, the probe it found, the backend it picks
 rvdbg flash                  # program the images and run
@@ -153,7 +153,7 @@ Then type the commands without `rvdbg` (a leading `rvdbg` is accepted too):
 
 ```text
 $ rvdbg
-rvdbg 0.1.20  /work/rustvisor-sdk/rvdbg.toml
+rvdbg 0.1.22  /work/rustvisor-sdk/rvdbg.toml
 backend  openocd (StellarLINK on USB 0483:0499)
   inspect   status  mem  fault  verify  check  clock  reg  trace  eval
   control   halt  go  reset  attach  run-until  down  do  cmd
@@ -182,8 +182,7 @@ rvdbg [openocd halted]> quit
 
 `rvdbg.toml` marks the project root. Every relative path in it is relative
 to the directory that contains it. `rvdbg init` writes a commented file with
-the SR6P6 defaults, or with the values of a `trace32.toml` in the same
-directory.
+the SR6P6 defaults.
 
 | Section | Keys |
 |---|---|
@@ -692,21 +691,6 @@ Everything else (`flash`, `load`, `open`, `rtt`, `attach`, `reset`, `down`,
 rules to match, run the commands inside the project (no `--config` or
 `--backend` before the command) and put `--json` after the command's
 arguments.
-
-## Coming from tracebridge
-
-1. In the directory of `trace32.toml`, run `rvdbg init`: `rvdbg.toml` takes
-   its values (`[target]`, `[flash]` and `[rtos]` move under `[trace32]`).
-   Then delete `trace32.toml`.
-2. Run `rvdbg vscode` (and `rvdbg rustrover`). The `TRACE32: Attach`
-   configuration now starts `rvdbg adapter`, and `StellarLINK: Attach` is
-   added next to it.
-3. Replace `tracebridge` and `tracebridge debug` in scripts and agent
-   permissions with `rvdbg` (`debug break` is `rvdbg halt`).
-4. Run `rvdbg skill` and remove `~/.claude/skills/tracebridge`.
-
-Move the flash scripts and clock descriptions from `~/.config/tracebridge/`
-to `~/.config/rvdbg/` (since 0.1.21).
 
 ## Troubleshooting
 

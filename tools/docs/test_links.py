@@ -47,14 +47,30 @@ class GuideLinks(unittest.TestCase):
         result = preprocess(self.context, {"sections": [page]})
         self.assertNotIn("引用此页", result["sections"][0]["Chapter"]["content"])
 
-    def test_english_backlinks_and_content_language(self):
-        home = self.page("README.md", "[English](en/README.md)", "index.md")
-        english = self.page("en/README.md", "# Guide", "en/index.md")
-        preprocess(self.context, {"sections": [home, english]})
-        content = english["Chapter"]["content"]
+    def test_english_book_backlinks(self):
+        self.context["config"]["book"]["language"] = "en"
+        home = self.page("README.md", "[Guide](guide.md)", "index.md")
+        guide = self.page("guide.md", "# Guide")
+        preprocess(self.context, {"sections": [home, guide]})
+        content = guide["Chapter"]["content"]
         self.assertIn('aria-label="Referenced by"', content)
-        self.assertIn('<div lang="en">', content)
-        self.assertIn('href="../index.md"', content)
+        self.assertIn('href="index.md"', content)
+
+    def test_linked_book_must_exist_and_gives_no_backlink(self):
+        self.root = self.root / "cn"
+        self.context["root"] = str(self.root)
+        self.context["config"]["preprocessor"] = {"backlinks": {"linked-books": ["../en"]}}
+        (self.root.parent / "en").mkdir()
+        (self.root.parent / "en" / "a.md").write_text("# A")
+        page = self.page("a.md", "[English](../en/a.md)")
+        preprocess(self.context, {"sections": [page]})
+        self.assertNotIn("引用此页", page["Chapter"]["content"])
+        page = self.page("a.md", "[English](../en/gone.md)")
+        with self.assertRaisesRegex(ValueError, "missing local link"):
+            preprocess(self.context, {"sections": [page]})
+        page = self.page("a.md", "[other](../other/a.md)")
+        with self.assertRaisesRegex(ValueError, "leaves the book"):
+            preprocess(self.context, {"sections": [page]})
 
     def test_missing_link_fails(self):
         page = self.page("a.md", "[missing](gone.md)")

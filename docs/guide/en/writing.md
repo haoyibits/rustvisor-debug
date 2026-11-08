@@ -2,7 +2,7 @@
 
 [中文](../cn/writing.md)
 
-Chinese task pages are flat within `docs/guide/cn/`, with matching English files under `docs/guide/en/`. The root holds the language entry page, `SUMMARY.md` and `book.toml`. Keep short topics in one file; add directories only for substantial independently maintained topics. `README.md` provides entry points and `SUMMARY.md` the mdBook order; neither replaces the content.
+Chinese task pages are flat within `docs/guide/cn/`, with matching English files under `docs/guide/en/`. Each language is its own mdBook with its own `SUMMARY.md` and `book.toml`; the root `README.md` is the language entry on GitHub and in Obsidian, and `site/` holds the language page of the website. Keep short topics in one file; add directories only for substantial independently maintained topics. `README.md` provides entry points and `SUMMARY.md` the mdBook order; neither replaces the content.
 
 ## Follow one concrete operation
 
@@ -22,7 +22,7 @@ Open `docs/guide/` as an Obsidian vault and use Markdown link format. At build t
 
 Add every page to `SUMMARY.md`; validation rejects omissions, duplicates and broken local destinations. Use repository web URLs for sources/examples outside the guide. Reference links are supported; fenced/inline code examples do not count as references.
 
-Maintain matching filenames and coverage in both languages, and keep direct language-switch links. Both languages are built together with one configuration and separate table-of-contents groups. Keep English links within `en/` except for explicit language switches.
+Maintain matching filenames and coverage in both languages, and keep direct language-switch links. Links into the other language (`../cn/…`) are allowed only as language switches: they are checked but produce no backlinks. All other links stay within the book.
 
 ## Build and check locally
 
@@ -34,10 +34,9 @@ python3 -m venv target/docs-venv
 . target/docs-venv/bin/activate
 python -m pip install -r tools/docs/requirements.txt
 python -m unittest discover -s tools/docs -p 'test_*.py'
-mdbook build docs/guide
-python tools/docs/links.py --check-html target/guide
+tools/docs/build.sh
 ```
 
-Output is under `target/guide/`: open `index.html` to choose a language, `cn/index.html` for Chinese, or `en/index.html` for English. For live rebuilding use `mdbook serve docs/guide --open`. Keep the virtual environment active because mdBook invokes `python3` for the preprocessor. See the [mdBook preprocessor documentation](https://rust-lang.github.io/mdBook/format/configuration/preprocessors.html).
+`build.sh` builds both books and the language page into `target/guide/` and checks every rendered link: open `index.html` to choose a language, `cn/index.html` for Chinese, or `en/index.html` for English. For live rebuilding of one book use `mdbook serve docs/guide/en --open` (language switches then point at the other book, which `serve` does not build). The published site is <https://rvdbg.docs.haoyichen.com>; CI deploys it from `main`, locally `cd docs && npx wrangler deploy` after `build.sh`. Keep the virtual environment active because mdBook invokes `python3` for the preprocessor. See the [mdBook preprocessor documentation](https://rust-lang.github.io/mdBook/format/configuration/preprocessors.html).
 
 Check navigation, backlinks and long tables visually, then run `git diff --check`. HTML checks cover local files and fragments, not external site availability or board behavior.

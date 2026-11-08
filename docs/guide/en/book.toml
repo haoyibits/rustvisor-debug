@@ -1,0 +1,26 @@
+[book]
+title = "rvdbg User Guide"
+authors = ["rustvisor-debug contributors"]
+language = "en"
+src = "."
+
+[build]
+build-dir = "../../../target/guide/en"
+create-missing = false
+
+# Backlinks within this book; links into ../cn are the language switches.
+[preprocessor.backlinks]
+command = "python3 ../../../tools/docs/links.py"
+after = ["links", "index"]
+renderers = ["html"]
+linked-books = ["../cn"]
+
+[output.html]
+site-url = "/en/"
+git-repository-url = "https://github.com/haoyibits/rustvisor-debug"
+edit-url-template = "https://github.com/haoyibits/rustvisor-debug/edit/main/docs/guide/en/{path}"
+
+# Links to README.md (also from the other language) keep working after the
+# index preprocessor renames it.
+[output.html.redirect]
+"README.html" = "index.html"

@@ -45,7 +45,13 @@ def local_target(base, destination):
 
 def preprocess(context, book):
     root = Path(context["root"]).resolve()
-    source = (root / context["config"]["book"].get("src", "src")).resolve()
+    config = context["config"]
+    source = (root / config["book"].get("src", "src")).resolve()
+    # Other books the pages may link into (language switches); such links are
+    # checked for existence but give no backlinks.
+    options = config.get("preprocessor", {}).get("backlinks", {})
+    linked = [(root / path).resolve() for path in options.get("linked-books", [])]
+    english = config["book"].get("language", "").startswith("en")
     # mdBook 0.5 uses sections; 0.4 used items.
     items = book["sections"] if "sections" in book else book["items"]
     pages = list(chapters(items))
@@ -83,6 +89,10 @@ def preprocess(context, book):
                 if other != index:
                     incoming[other].add(index)
             elif not target.is_relative_to(source):
+                if any(target.is_relative_to(book) for book in linked):
+                    if not target.is_file():
+                        raise ValueError(f"{path}: missing local link: {destination}")
+                    continue
                 raise ValueError(f"{path}: local link leaves the book: {destination}")
             elif not target.is_file():
                 raise ValueError(f"{path}: missing local link: {destination}")
@@ -100,7 +110,6 @@ def preprocess(context, book):
             label = html.escape(page["name"])
             href = html.escape(Path(relative).as_posix(), quote=True)
             entries.append(f'<li><a href="{href}">{label}</a></li>')
-        english = Path(chapter.get("source_path") or chapter["path"]).parts[0] == "en"
         heading = "Referenced by" if english else "引用此页"
         chapter["content"] += (
             f'\n\n<hr>\n<aside aria-label="{heading}">\n'
@@ -108,9 +117,6 @@ def preprocess(context, book):
             + "\n".join(entries)
             + "\n</ul>\n</aside>\n"
         )
-    for chapter in pages:
-        if Path(chapter.get("source_path") or chapter["path"]).parts[0] == "en":
-            chapter["content"] = '<div lang="en">\n\n' + chapter["content"] + '\n\n</div>\n'
     return book
 
 

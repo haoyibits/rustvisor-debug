@@ -2,7 +2,7 @@
 
 [English](../en/writing.md)
 
-中文正文按任务平铺在 `docs/guide/cn/`，对应英文页面放在 `docs/guide/en/`。根目录保留语言入口、`SUMMARY.md` 和 `book.toml`。一个短主题使用一个文件；只有出现多个需要独立持续维护的长主题时，才考虑增加目录。`README.md` 提供任务入口，`SUMMARY.md` 维护 mdBook 阅读顺序，二者都不应替代正文。
+中文正文按任务平铺在 `docs/guide/cn/`，对应英文页面放在 `docs/guide/en/`。中英文各是一本独立的 mdBook，各有自己的 `SUMMARY.md` 和 `book.toml`；根目录的 `README.md` 是 GitHub 和 Obsidian 中的语言入口，`site/` 存放网站首页的语言选择页。一个短主题使用一个文件；只有出现多个需要独立持续维护的长主题时，才考虑增加目录。`README.md` 提供任务入口，`SUMMARY.md` 维护 mdBook 阅读顺序，二者都不应替代正文。
 
 ## 从一次操作往前写
 
@@ -22,7 +22,7 @@ CLI 默认值、选项及行为先核对当前实现，再修改手册。主要�
 
 新正文页必须加入 `SUMMARY.md`。工具会检查遗漏、重复收录、文件是否存在，以及链接目标是否属于手册。指向手册之外的源码、示例或旧文档时，使用仓库网页链接，避免生成网站后相对路径失效。参考式链接也可使用，代码块和行内代码中的示例链接不计入引用。
 
-中英文保持相同文件名和内容覆盖，每页提供双向语言切换。两种语言使用同一配置构建，目录按语言分组；英文正文除语言切换外链接到英文页面。
+中英文保持相同文件名和内容覆盖，每页提供双向语言切换。指向另一种语言（`../en/…`）的链接只用于语言切换：工具检查目标存在，但不生成反向链接。其他链接都留在本书之内。
 
 ## 本地构建与检查
 
@@ -34,10 +34,9 @@ python3 -m venv target/docs-venv
 . target/docs-venv/bin/activate
 python -m pip install -r tools/docs/requirements.txt
 python -m unittest discover -s tools/docs -p 'test_*.py'
-mdbook build docs/guide
-python tools/docs/links.py --check-html target/guide
+tools/docs/build.sh
 ```
 
-构建结果在 `target/guide/`，语言入口为 `index.html`，中文打开 `cn/index.html`，英文打开 `en/index.html`；需要自动重建预览时执行 `mdbook serve docs/guide --open`。启动 mdBook 时应保持虚拟环境激活，因为它通过 `python3` 调用预处理器。构建过程的依赖机制见 [mdBook 预处理器说明](https://rust-lang.github.io/mdBook/format/configuration/preprocessors.html)。
+`build.sh` 把两本手册和语言选择页构建到 `target/guide/`，并检查所有生成的链接：语言入口为 `index.html`，中文打开 `cn/index.html`，英文打开 `en/index.html`。需要自动重建预览一本时执行 `mdbook serve docs/guide/cn --open`（此时语言切换链接指向另一本，`serve` 不会构建它）。网站地址是 <https://rvdbg.docs.haoyichen.com>，CI 从 `main` 自动部署；本地部署在 `build.sh` 之后执行 `cd docs && npx wrangler deploy`。启动 mdBook 时应保持虚拟环境激活，因为它通过 `python3` 调用预处理器。构建过程的依赖机制见 [mdBook 预处理器说明](https://rust-lang.github.io/mdBook/format/configuration/preprocessors.html)。
 
 交稿前检查目录、页面间跳转、反向链接和长表格显示，并执行 `git diff --check`。HTML 检查确认生成文件和片段链接有效；它不验证外部网站可达性，也不代替实际操作命令的板级验证。

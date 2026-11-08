@@ -1,5 +1,5 @@
 # Cloudflare Worker serving the rvdbg user guide (static assets only).
-# Build first: mdbook build docs/guide  (output in target/guide)
+# Build first: tools/docs/build.sh  (output in target/guide)
 # Deployed by the deploy-docs job in .github/workflows/ci.yml.
 name = "rvdbg-docs"
 compatibility_date = "2026-11-01"

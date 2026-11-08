@@ -774,7 +774,7 @@ A virtual workspace:
 | Path | What |
 |---|---|
 | `crates/rustvisor-debug` | `rvdbg`: rustvisor's front end, backend choice, interactive session |
-| `crates/tracebridge` | the TRACE32 backend; rustvisor-sdk's board runner uses its library (`tracebridge::backend`, [docs/backend.md](docs/backend.md)) |
+| `crates/tracebridge` | the TRACE32 backend; its library (`tracebridge::backend`, [docs/backend.md](docs/backend.md)) is for programs that link it; rustvisor-sdk's board runner does not, it drives `rvdbg --json` |
 | `crates/t32rcl` | pure Rust port of the parts of Lauterbach's `lauterbach-trace32-rcl` Python library (TCP only) that tracebridge uses |
 | `crates/stellarbridge` | the OpenOCD (StellarLINK) backend; OpenOCD runs as a separate program |
 | `crates/oocd` | client for OpenOCD's Tcl port |

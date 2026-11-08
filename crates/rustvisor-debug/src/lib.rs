@@ -1,7 +1,9 @@
-//! rvdbg's conventions for other tools. rustvisor-sdk's board runner reads
-//! the project's `rvdbg.toml` through this library and drives TRACE32 with
-//! the tracebridge [`Project`](tracebridge::backend::Project) it yields, so
-//! it uses the same keys, defaults and environment overrides as `rvdbg`.
+//! rvdbg's conventions for other tools that link this crate. [`config`] reads
+//! a project's `rvdbg.toml` and yields a tracebridge
+//! [`Project`](tracebridge::backend::Project) with the same keys, defaults and
+//! environment overrides as `rvdbg`. rustvisor-sdk's board runner does not
+//! link this crate: it drives an installed rvdbg (0.1.24 or later, or `RVDBG`)
+//! as an `rvdbg --json` pipe session.
 //! [`fdx`] is the FDX link of rustvisor's images, over any memory access.
 //!
 //! ```no_run

@@ -525,7 +525,7 @@ cargo clippy --all-targets -- -D warnings
 | 路径 | 内容 |
 |---|---|
 | `crates/rustvisor-debug` | `rvdbg`：rustvisor 的前端、后端选择、交互会话 |
-| `crates/tracebridge` | TRACE32 后端；rustvisor-sdk 的板级 runner 用它的库（`tracebridge::backend`，见 [docs/backend.md](docs/backend.md)） |
+| `crates/tracebridge` | TRACE32 后端；它的库（`tracebridge::backend`，见 [docs/backend.md](docs/backend.md)）供链接它的程序使用；rustvisor-sdk 的板级 runner 不链接它，而是驱动 `rvdbg --json` |
 | `crates/t32rcl` | Lauterbach Python 库 `lauterbach-trace32-rcl` 中 tracebridge 用到的部分的纯 Rust 移植（只支持 TCP） |
 | `crates/stellarbridge` | OpenOCD（StellarLINK）后端；OpenOCD 作为独立程序运行 |
 | `crates/oocd` | OpenOCD Tcl 端口的客户端 |

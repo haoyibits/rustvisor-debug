@@ -1,8 +1,15 @@
 # Backend used by rustvisor
 
 The public surface is `tracebridge::backend`, plus `rustvisor_debug::config`
-to read the project's `rvdbg.toml`. It grows from concrete calls in rustvisor's
-`tools/board-tests`; it is not a generic test workflow framework.
+to read the project's `rvdbg.toml`, for a program that links these crates. It
+is not a generic test workflow framework.
+
+rustvisor-sdk's board runner (`tools/board-tests`) does not link them. It
+starts an installed rvdbg (0.1.24 or later, or the `RVDBG` path) with `--json`,
+one session per flash, with the images in `ELF`, `EXTRA_ELF` and
+`PROGRAM_NAME`. The first line is the ready JSON (`ready`, `version`, `config`,
+`backend`, `reason`); each command is one line, and after the command's own
+output comes an end line (`end`, `ok`, `exit_code`, `error`).
 
 ```rust,no_run
 use std::path::Path;
@@ -69,23 +76,24 @@ if let Some(link) = Link::locate(&mut memory, address)? {
 # }
 ```
 
-`loadable_content` reuses verify's ELF parser. `evidence_inputs` resolves the
-selected flash script and clock description with the effective configuration;
-the runner keys their contents, its linked executable and project criteria.
-Image output paths are excluded from the configuration identity so a new
-per-run evidence directory does not invalidate otherwise identical content.
+`loadable_content` reuses verify's ELF parser. `evidence_inputs` validates the
+selected flash script and clock description without connecting. It returns the
+effective configuration with image output paths cleared, so a new per-run
+evidence directory does not change otherwise identical configuration, plus the
+paths of the config file, the clock description and the selected flash script.
 
 The CLI behavior and wire protocol are checked by existing tests. Public API
 integration tests in `tests/backend_e2e.rs` use fake PowerView, never a board.
 
-## Board validation, 2026-10-28
+## Board validation, 2026-10-28 (historical)
 
-The linked backend was exercised by rustvisor's new runner on a Cortex-R52 board:
+That run linked this backend; it is not the current SDK integration (see
+above). rustvisor's runner of the time exercised it on a Cortex-R52 board:
 33 forced image runs and 32 intermediate resets passed; cache/no-flash behavior
 and five representative latency data-path variants passed. All 14,076 words
 read by the bulk RAM interface matched the original scalar Data.Long reader.
 A stale diagnostic PC criterion was fixed in rustvisor; backend code did not
 need a board-specific change. This verifies the exercised paths, not a new full
-performance baseline. Evidence and scope are documented in the sibling
-rustvisor-sdk `docs/02-verification.md` section 2.2 and
-`target/board-tests/board-validation-20261028/`.
+performance baseline. The record is
+`target/board-tests/board-validation-20261028/` and the write-up in the sibling
+rustvisor-sdk `docs/21-el2-readability-plan.md` section 11.6.

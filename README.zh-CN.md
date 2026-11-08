@@ -4,6 +4,8 @@
 
 *English: [README.md](README.md)*
 
+按任务阅读的[使用手册](docs/guide/cn/README.md)涵盖配置、烧录、调试、诊断、通信和自动化；同一组 Markdown 可用 Obsidian 阅读，并构建为带反向链接的 mdBook。构建方法见[手册维护说明](docs/guide/cn/writing.md)。
+
 支持的主机：Apple 芯片的 macOS 和 Linux（x86_64、aarch64）。[agent skill](skills/rvdbg/SKILL.md) 告诉 AI agent 哪个命令做什么。
 
 ## 安装

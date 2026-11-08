@@ -1,5 +1,9 @@
 # rustvisor-debug
 
+The [user guide](docs/guide/en/README.md) ([中文](docs/guide/cn/README.md)) covers configuration, flashing,
+debugging, inspection, channels and automation. It uses linked Markdown pages
+and builds as an mdBook with backlinks; see [building the guide](docs/guide/en/writing.md).
+
 `rvdbg` flashes, inspects and debugs rustvisor boards through a Lauterbach
 TRACE32 probe or ST's StellarLINK. It reads one `rvdbg.toml` and runs each
 command on the probe that is plugged in: TRACE32 through the built-in

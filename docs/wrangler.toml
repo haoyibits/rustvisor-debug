@@ -1,0 +1,15 @@
+# Cloudflare Worker serving the rvdbg user guide (static assets only).
+# Build first: mdbook build docs/guide  (output in target/guide)
+# Deployed by the deploy-docs job in .github/workflows/ci.yml.
+name = "rvdbg-docs"
+compatibility_date = "2026-11-01"
+workers_dev = false
+preview_urls = false
+
+# custom_domain lets Cloudflare create the DNS record and a certificate for
+# this second-level hostname (Universal SSL covers one level only).
+routes = [{ pattern = "rvdbg.docs.haoyichen.com", custom_domain = true }]
+
+[assets]
+directory = "../target/guide"
+not_found_handling = "404-page"

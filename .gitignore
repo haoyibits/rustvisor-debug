@@ -2,3 +2,5 @@
 .tracebridge/
 .DS_Store
 CLAUDE.md
+__pycache__/
+.wrangler/

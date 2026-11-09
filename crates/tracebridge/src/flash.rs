@@ -254,8 +254,11 @@ pub fn resolve(config: &Config, env: &Env) -> Result<Choice> {
     }
     let Some(chip) = chip_name(config) else {
         bail!(
-            "no flash script: set flash.chip (or target.cpu) or flash.script in trace32.toml; \
-             use load for RAM images"
+            "no flash script: set {} (or {}) or {} in {}; use load for RAM images",
+            crate::ui::config_key("flash.chip"),
+            crate::ui::config_key("target.cpu"),
+            crate::ui::config_key("flash.script"),
+            crate::ui::config_file()
         );
     };
     let (pattern, script) = choose(chip, &catalog(config, env)).map_err(|error| {

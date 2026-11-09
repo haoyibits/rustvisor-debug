@@ -302,18 +302,23 @@ pub fn render(report: &Report, heading: &Heading) -> String {
     let _ = writeln!(
         page,
         "<p class=\"meta\">{given} &middot; read {} &middot; <code>{}</code> &middot; \
-         tracebridge {}</p>",
+         {} {}</p>",
         escape(heading.generated),
         escape(heading.tree),
+        crate::ui::program(),
         env!("CARGO_PKG_VERSION")
     );
     if !report.missing.is_empty() {
-        let first = escape(&report.missing[0]);
         let _ = writeln!(
             page,
-            "<p class=\"missing\">{} not given: run <code>tracebridge debug clock \
-             {first}=&lt;frequency&gt; --html</code> or set it under [clock] in trace32.toml</p>",
-            escape(&report.missing.join(", "))
+            "<p class=\"missing\">{} not given: run <code>{}</code> or set it under [clock] \
+             in {}</p>",
+            escape(&report.missing.join(", ")),
+            escape(&crate::ui::command(&format!(
+                "debug clock {}=<frequency> --html",
+                report.missing[0]
+            ))),
+            crate::ui::config_file()
         );
     }
     if grouped {

@@ -323,7 +323,10 @@ pub(crate) fn chips(config: &Config, query: Option<&str>, env: &pycompat::Env) -
         config.t32_sys.join("demo/*/flash").display()
     );
     println!(
-        "  Use it with flash.chip = \"{query}\" in trace32.toml or 'tracebridge flash --chip {query}'."
+        "  Use it with {} = \"{query}\" in {} or '{}'.",
+        crate::ui::config_key("flash.chip"),
+        crate::ui::config_file(),
+        crate::ui::command(&format!("flash --chip {query}"))
     );
     Ok(())
 }

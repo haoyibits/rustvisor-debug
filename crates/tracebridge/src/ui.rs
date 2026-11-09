@@ -79,6 +79,33 @@ fn command_for(rvdbg: bool, tracebridge: &str) -> String {
     }
 }
 
+/// The configuration file the running program reads, for hints.
+pub fn config_file() -> &'static str {
+    if program() == "rvdbg" {
+        "rvdbg.toml"
+    } else {
+        crate::config::CONFIG_FILE_NAME
+    }
+}
+
+/// A trace32.toml key (`flash.chip`, `target.cpu`) as the running program's
+/// configuration file spells it: rvdbg.toml nests the TRACE32 tables under
+/// `[trace32]`.
+pub fn config_key(key: &str) -> String {
+    config_key_for(program() == "rvdbg", key)
+}
+
+fn config_key_for(rvdbg: bool, key: &str) -> String {
+    let nested = ["target.", "flash.", "rtos."]
+        .iter()
+        .any(|table| key.starts_with(table));
+    if rvdbg && nested {
+        format!("trace32.{key}")
+    } else {
+        key.to_string()
+    }
+}
+
 /// The command that halts the core, for hints.
 pub static HALT_COMMAND: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| command("debug break"));
@@ -125,6 +152,14 @@ mod tests {
         assert_eq!(command_for(true, "debug do <script>"), "rvdbg do <script>");
         assert_eq!(command_for(true, "load"), "rvdbg load");
         assert_eq!(command_for(false, "load"), "tracebridge load");
+    }
+
+    #[test]
+    fn hints_name_the_running_programs_config_keys() {
+        assert_eq!(config_key_for(false, "flash.chip"), "flash.chip");
+        assert_eq!(config_key_for(true, "flash.chip"), "trace32.flash.chip");
+        assert_eq!(config_key_for(true, "target.cpu"), "trace32.target.cpu");
+        assert_eq!(config_key_for(true, "project.program"), "project.program");
     }
 
     #[test]

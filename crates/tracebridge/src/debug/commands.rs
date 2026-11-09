@@ -645,7 +645,11 @@ fn clock_tree(ctx: &Context, tree: Option<&Path>) -> DResult<(PathBuf, clock::Tr
         }
         None => {
             let Some(chip) = crate::flash::chip_name(ctx.config) else {
-                fail!("no chip name: set target.cpu in trace32.toml or pass --tree <file>");
+                fail!(
+                    "no chip name: set {} in {} or pass --tree <file>",
+                    crate::ui::config_key("target.cpu"),
+                    crate::ui::config_file()
+                );
             };
             clock::find(chip, &clock::library_dir(&crate::pycompat::process_env()))
         }
@@ -816,7 +820,11 @@ pub fn attach(ctx: &mut Context) -> DResult<Outcome> {
 /// PRACTICE script is active.
 pub fn reset(ctx: &mut Context) -> DResult<Outcome> {
     if ctx.config.cpu.is_empty() {
-        fail!("reset needs target.cpu in trace32.toml: SYStem.RESet clears the CPU setting");
+        fail!(
+            "reset needs {} in {}: SYStem.RESet clears the CPU setting",
+            crate::ui::config_key("target.cpu"),
+            crate::ui::config_file()
+        );
     }
     probe::require_idle(ctx.probe)?;
     let commands = crate::target::reset_commands(ctx.config);

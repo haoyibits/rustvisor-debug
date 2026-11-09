@@ -371,7 +371,7 @@ pub fn config_from_document(document: &Table, config_file: &Path, env: &Env) -> 
 
     // validate_common
     if program.is_empty() {
-        bail!("project.program is empty in trace32.toml");
+        bail!("project.program is empty in {}", crate::ui::config_file());
     }
     let port = |name: &str, value: i64| -> Result<u16> {
         if (1..=65535).contains(&value) {

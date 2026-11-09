@@ -370,7 +370,11 @@ mod tests {
         )
         .unwrap();
         assert!(report.halted);
-        assert!(report.human(Style::PLAIN).contains("core halted (Break)"));
+        assert!(
+            report
+                .human(Style::PLAIN)
+                .contains("core halted for CP15/core register reads")
+        );
         let commands = probe.commands();
         assert_eq!(commands[0], "PER.Set.CONDitions");
         assert_eq!(commands[1], "Break");

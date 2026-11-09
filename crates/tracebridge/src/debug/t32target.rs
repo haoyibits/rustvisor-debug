@@ -103,7 +103,7 @@ impl Target for T32Target<'_> {
     }
 
     fn break_command(&self) -> &str {
-        "tracebridge debug break"
+        &crate::ui::HALT_COMMAND
     }
 
     fn begin_reads(&mut self, kinds: &[&str]) -> target::Result<()> {

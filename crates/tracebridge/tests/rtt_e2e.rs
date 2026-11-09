@@ -133,7 +133,11 @@ fn unknown_symbol_explains_what_to_do() {
         stderr.starts_with("tracebridge: cannot resolve _SEGGER_RTT in 'demo' ("),
         "{stderr}"
     );
-    assert!(stderr.contains("Run 'tracebridge load' first, or pass --cb 0x<address>."));
+    assert!(
+        stderr
+            .contains("Load an image that has it ('tracebridge load'), or pass --cb 0x<address>."),
+        "{stderr}"
+    );
 }
 
 #[test]

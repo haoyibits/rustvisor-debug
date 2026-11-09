@@ -45,7 +45,7 @@ rvdbg fdx
 rvdbg fdx --guest 0
 ```
 
-The first command uses the primary ELF. `--guest 0` means the first `project.extra_elf` entry, not VMID 0 or hardware core 0. In interactive mode each input line is one packet, and received packets print one per line. The terminal follows a link reopened after target reset.
+The first command uses the primary ELF. `--guest 0` means the first `project.extra_elf` entry, not VMID 0 or hardware core 0. In interactive mode each input line is one packet, and received packets print one per line. On a terminal received packets start with `< ` and a `> ` prompt marks the input line; through a pipe the lines are the bare packets. The terminal follows a link reopened after target reset.
 
 `--symbol` selects another symbol; `--address` bypasses symbol lookup. See [configuration](configuration.md) for image selection. A supplied address must identify a valid FDX link.
 

@@ -330,6 +330,15 @@ fn mem(target: &mut CoreTarget, text: &str, count: u32, style: Style) -> Result<
             return Err(format!("{base} is a coprocessor register; read one word"));
         }
         vec![u64::from(target.read_u32(&base).map_err(text_of)?)]
+    } else if base.value % 4 == 0 {
+        // 32-bit accesses, as TRACE32's AD: reads: peripheral registers
+        // can read 0 byte by byte.
+        target
+            .read_words(base.value, count as usize)
+            .map_err(|error| format!("cannot read {base}: {error}"))?
+            .into_iter()
+            .map(u64::from)
+            .collect()
     } else {
         let bytes = target
             .read_memory(base.value, count as usize * 4)
@@ -433,7 +442,7 @@ fn run_until(
             "hex": hex32(address),
             "reached": reached,
             "waited_ms": result.waited.as_millis() as u64,
-            "command": format!("bp 0x{address:X} 4 hw; resume"),
+            "command": format!("bp 0x{address:X} {} hw; resume", result.breakpoint_length),
             "pc": {"value": pc, "hex": hex32(pc), "symbol": fault::symbol_json(&pc_symbol)},
         }),
         code: if reached { 0 } else { EXIT_FAILED },

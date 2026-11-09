@@ -958,7 +958,7 @@ pub fn run_until(ctx: &mut Context, target: &str, timeout: Duration) -> DResult<
     if probe::core_running(probe)? {
         fail!(
             "the core is running; run-until starts a halted core, {}",
-            probe::HALT_HINT
+            probe::halt_hint()
         );
     }
     let address = eval_u64(probe, &format!("ADDRESS.OFFSET({address_text})")).map_err(|error| {
@@ -979,8 +979,9 @@ pub fn run_until(ctx: &mut Context, target: &str, timeout: Duration) -> DResult<
         if start.elapsed() > timeout {
             fail!(
                 "{target} was not reached within {}s; the core keeps running and the temporary \
-                 breakpoint stays set until it next stops ('tracebridge debug break' halts it)",
-                timeout.as_secs()
+                 breakpoint stays set until it next stops ('{}' halts it)",
+                timeout.as_secs(),
+                *crate::ui::HALT_COMMAND
             );
         }
         std::thread::sleep(RUN_UNTIL_POLL);
@@ -1026,7 +1027,7 @@ fn trace_dump(probe: &mut dyn Probe, config: &Config, last: u32) -> DResult<trac
     if probe::core_running(probe)? {
         fail!(
             "the core is running and the trace still records; {}",
-            probe::HALT_HINT
+            probe::halt_hint()
         );
     }
     config

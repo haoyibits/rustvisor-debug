@@ -39,6 +39,8 @@ pub struct RunUntil {
     pub cancelled: bool,
     pub waited: std::time::Duration,
     pub breakpoint_removed: bool,
+    /// The hardware breakpoint's length: 2 in Thumb code, 4 in A32 code.
+    pub breakpoint_length: u32,
 }
 
 /// One core of the target, by its OpenOCD target name (`chip.k0c0.core`).
@@ -108,12 +110,49 @@ fn dict_value(answer: &str, name: &str) -> Option<u64> {
 }
 
 impl CoreTarget<'_> {
+    /// The error of a failed op1 = 4 (Hyp) register read, explained when
+    /// the core is not in Hyp mode: OpenOCD executes the MRC in the current
+    /// mode, and the Hyp registers are only accessible at EL2 (no
+    /// equivalent of TRACE32's HC15: access).
+    fn outside_hyp(&mut self, error: target::Error) -> target::Error {
+        let Ok(cpsr) = self.read_core_register("CPSR") else {
+            return error;
+        };
+        let psr = probecore::decode::decode_psr(cpsr as u32);
+        if psr.mode == 0x1A {
+            return error;
+        }
+        let mode = psr.mode_name.unwrap_or("an unknown");
+        target::Error::new(format!(
+            "the core is halted in {mode} mode, not in Hyp mode, and OpenOCD reads the Hyp \
+             registers (op1 = 4) by executing an MRC in the current mode; stop the core in \
+             EL2, e.g. after 'rvdbg reset' or at a breakpoint in the hypervisor ({})",
+            error.message
+        ))
+    }
+
+    /// `count` words from a word-aligned `address`, each one 32-bit access.
+    /// Peripheral registers need it: byte reads of the SR6P6 PRAM
+    /// controller's CR read 0 where a word read gives 0x1C.
+    pub fn read_words(&mut self, address: u64, count: usize) -> target::Result<Vec<u32>> {
+        let via = self.memory_ap.clone().unwrap_or_else(|| self.core.clone());
+        self.server
+            .client
+            .read_words(&via, address, count)
+            .map_err(lift)
+    }
+
     fn eval(&mut self, command: &str) -> target::Result<String> {
         self.server.client.eval(command).map_err(lift)
     }
 
+    /// The core's state: `arp_poll`, then `curstate`. `curstate` alone
+    /// answers what OpenOCD last polled, which right after it attached can
+    /// still be `unknown` (seen as "other" on the SR6P6).
     pub fn run_state(&mut self) -> target::Result<RunState> {
-        let answer = self.eval(&format!("{} curstate", oocd::quote(&self.core)))?;
+        let core = oocd::quote(&self.core);
+        self.eval(&format!("{core} arp_poll"))?;
+        let answer = self.eval(&format!("{core} curstate"))?;
         Ok(match answer.trim() {
             "running" | "debug-running" => RunState::Running,
             "halted" => RunState::Halted,
@@ -121,10 +160,15 @@ impl CoreTarget<'_> {
         })
     }
 
-    /// Let the core run from where it stopped.
+    /// Let the core run from where it stopped: OpenOCD's `resume` acts on
+    /// the current target (a target has no `resume` of its own), so the
+    /// core is selected first. It refuses a core it has not seen halted
+    /// (ERROR_TARGET_NOT_HALTED, -304), which right after OpenOCD attached
+    /// it has not polled yet: `run_state` polls.
     pub fn resume(&mut self) -> target::Result<()> {
-        self.eval(&format!("{} resume", oocd::quote(&self.core)))
-            .map(|_| ())
+        self.run_state()?;
+        self.eval(&format!("targets {}", oocd::quote(&self.core)))?;
+        self.eval("resume").map(|_| ())
     }
 
     /// Reset through the target configuration's reset events and stop at
@@ -140,6 +184,20 @@ impl CoreTarget<'_> {
             .set_timeout(std::time::Duration::from_secs(5))
             .map_err(lift)?;
         result
+    }
+
+    /// The length of a hardware breakpoint at `address`: 2 in Thumb code,
+    /// 4 in A32 code. OpenOCD's aarch64 breakpoint of length 4 matches both
+    /// halfwords of the word (BAS 0b1111), so in Thumb code it also fires
+    /// on the other halfword: run-until 0x28000BB2 stopped at the push at
+    /// 0x28000BB0 (2026-11-09). The function symbol that contains the
+    /// address tells the instruction set, else the core's current CPSR.T.
+    pub fn breakpoint_length(&mut self, address: u64) -> target::Result<u32> {
+        let thumb = match self.symbols.thumb_at(address) {
+            Some(thumb) => thumb,
+            None => self.read_core_register("CPSR")? & (1 << 5) != 0,
+        };
+        Ok(if thumb { 2 } else { 4 })
     }
 
     /// Run a halted core until it stops, with a hardware breakpoint at
@@ -159,10 +217,11 @@ impl CoreTarget<'_> {
                  '{HALT_COMMAND}')"
             )));
         }
+        let length = self.breakpoint_length(address)?;
         let core = oocd::quote(&self.core);
         // bp and rbp act on the current target.
         self.eval(&format!("targets {core}"))?;
-        self.eval(&format!("bp 0x{address:X} 4 hw"))
+        self.eval(&format!("bp 0x{address:X} {length} hw"))
             .map_err(|error| error.context(format!("cannot set a breakpoint at 0x{address:X}")))?;
         if let Err(error) = self.resume() {
             let _ = self.eval(&format!("rbp 0x{address:X}"));
@@ -182,6 +241,7 @@ impl CoreTarget<'_> {
                     pc: None,
                     waited: start.elapsed(),
                     breakpoint_removed: removed,
+                    breakpoint_length: length,
                     cancelled,
                 });
             }
@@ -194,6 +254,7 @@ impl CoreTarget<'_> {
             pc: Some(pc),
             waited,
             breakpoint_removed: removed,
+            breakpoint_length: length,
             cancelled: false,
         })
     }
@@ -223,12 +284,14 @@ impl Target for CoreTarget<'_> {
     fn read_u32(&mut self, address: &TargetAddress) -> target::Result<u32> {
         if let Some([coprocessor, op1, crn, crm, op2]) = mrc_arguments(address) {
             self.require_halted(&format!("{address} (a coprocessor register)"))?;
-            let answer = self
-                .eval(&format!(
-                    "{} aarch64 mrc {coprocessor} {op1} {crn} {crm} {op2}",
-                    oocd::quote(&self.core)
-                ))
-                .map_err(|error| error.context(address))?;
+            let answer = match self.eval(&format!(
+                "{} aarch64 mrc {coprocessor} {op1} {crn} {crm} {op2}",
+                oocd::quote(&self.core)
+            )) {
+                Ok(answer) => answer,
+                Err(error) if error.lost || op1 != 4 => return Err(error.context(address)),
+                Err(error) => return Err(self.outside_hyp(error).context(address)),
+            };
             let value = oocd::parse_numbers(&answer)
                 .ok()
                 .and_then(|values| values.first().copied())
@@ -246,6 +309,9 @@ impl Target for CoreTarget<'_> {
                  coprocessors C15: and C14:)",
                 address.class
             )));
+        }
+        if address.value % 4 == 0 {
+            return Ok(self.read_words(address.value, 1)?[0]);
         }
         let bytes = self.read_memory(address.value, 4)?;
         Ok(u32::from_le_bytes(bytes.try_into().expect("4 bytes")))
@@ -347,29 +413,12 @@ pub fn fault_facts(target: &mut CoreTarget) -> target::Result<fault::Facts> {
              try again"
         )));
     }
-    // The core's mode, for the error when the Hyp registers cannot be read.
-    let mode = target
-        .read_core_register("CPSR")
-        .ok()
-        .map(|cpsr| probecore::decode::decode_psr(cpsr as u32));
-    let not_hyp = mode
-        .as_ref()
-        .filter(|psr| psr.mode != 0x1A)
-        .map(|psr| psr.mode_name.unwrap_or("an unknown").to_string());
+    // read_u32 explains a core outside Hyp mode.
     let no_hyp = |what: &str, error: target::Error| -> target::Error {
         if error.lost {
             return error;
         }
-        match &not_hyp {
-            Some(mode) => error.context(format!(
-                "cannot read {what}: the core is halted in {mode} mode, not in Hyp mode, and \
-                 OpenOCD reads the Hyp registers by executing instructions in the current \
-                 mode; stop the core in EL2, e.g. at a breakpoint in the hypervisor"
-            )),
-            None => error.context(format!(
-                "cannot read {what}; fault needs an AArch32 core with Hyp mode"
-            )),
-        }
+        error.context(format!("cannot read {what}"))
     };
     let cp15 = |target: &mut CoreTarget, text: &str, what: &str| {
         let address = TargetAddress::parse(text).expect("constant address");
@@ -469,6 +518,7 @@ mod tests {
     #[test]
     fn fault_reads_cp15_with_mrc_and_the_hyp_registers_with_get_reg() {
         let (port, handle) = tcl_server(vec![
+            ("arp_poll", "0 "),
             ("curstate", "0 halted"),
             ("get_reg -force cpsr", "0 cpsr 0x0000001a"),
             ("aarch64 mrc 15 4 5 2 0", "0 0x92000010"),
@@ -486,6 +536,8 @@ mod tests {
             name: "__hyp_vectors".into(),
             value: 0x2800_1000,
             size: 0x40,
+            thumb: false,
+            is_function: false,
         });
         let mut target = CoreTarget {
             server: &mut server,
@@ -515,8 +567,11 @@ mod tests {
     #[test]
     fn run_until_sets_a_hardware_breakpoint_and_removes_it() {
         let (port, handle) = tcl_server(vec![
+            ("arp_poll", "0 "),
             ("curstate", "0 halted"),
             ("targets", "0 "),
+            // No symbol covers the address: the instruction set is CPSR.T.
+            ("get_reg -force cpsr", "0 cpsr 0x000001da"),
             ("bp 0x28000100 4 hw", "0 "),
             ("resume", "0 "),
             ("rbp 0x28000100", "0 "),
@@ -540,7 +595,7 @@ mod tests {
         let order: Vec<usize> = [
             "{targets chip.core}",
             "{bp 0x28000100 4 hw}",
-            "{chip.core resume}",
+            "{resume}",
             "{rbp 0x28000100}",
         ]
         .iter()
@@ -552,9 +607,117 @@ mod tests {
         );
     }
 
+    /// A word is read with one 32-bit access: the SR6P6 PRAM controller's
+    /// CR reads 0 byte by byte and 0x1C as a word (2026-11-09).
+    #[test]
+    fn aligned_words_are_read_with_32_bit_accesses() {
+        let (port, handle) = tcl_server(vec![
+            ("read_memory 0x71198000 32 1", "0 0x1c"),
+            ("read_memory 0x71198001 8 4", "0 0x1 0x2 0x3 0x4"),
+        ]);
+        let mut server = Server::attach(port).unwrap();
+        let mut target = CoreTarget {
+            server: &mut server,
+            core: "chip.core".into(),
+            memory_ap: Some("chip.axi".into()),
+            symbols: SymbolTable::default(),
+        };
+        let word = TargetAddress::parse("AD:0x71198000").unwrap();
+        assert_eq!(target.read_u32(&word).unwrap(), 0x1C);
+        let unaligned = TargetAddress::parse("AD:0x71198001").unwrap();
+        assert_eq!(target.read_u32(&unaligned).unwrap(), 0x0403_0201);
+        drop(target);
+        drop(server);
+        let received = handle.join().unwrap();
+        assert!(
+            received
+                .iter()
+                .any(|c| c.contains("{chip.axi read_memory 0x71198000 32 1}")),
+            "{received:?}"
+        );
+    }
+
+    /// A Hyp register read outside Hyp mode says why (seen on the SR6P6:
+    /// the MRC fails with -4 while a Guest is halted in SVC mode).
+    #[test]
+    fn hyp_registers_outside_hyp_mode_are_explained() {
+        let (port, _handle) = tcl_server(vec![
+            ("arp_poll", "0 "),
+            ("curstate", "0 halted"),
+            ("aarch64 mrc 15 4 5 2 0", "-4 "),
+            ("get_reg -force cpsr", "0 cpsr 0x600001f3"),
+        ]);
+        let mut server = Server::attach(port).unwrap();
+        let mut target = CoreTarget {
+            server: &mut server,
+            core: "chip.core".into(),
+            memory_ap: None,
+            symbols: SymbolTable::default(),
+        };
+        let hsr = TargetAddress::parse("C15:0x4025").unwrap();
+        let error = target.read_u32(&hsr).unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("C15:0x4025: the core is halted in svc mode, not in Hyp mode"),
+            "{error}"
+        );
+        assert!(error.message.contains("OpenOCD error -4"), "{error}");
+        let error = fault_facts(&mut target).unwrap_err();
+        assert!(
+            error
+                .message
+                .starts_with("cannot read HSR (C15:0x4025): C15:0x4025: the core is halted in svc"),
+            "{error}"
+        );
+    }
+
+    /// In Thumb code the breakpoint covers one halfword: of length 4 it
+    /// would also fire on the other halfword of the word (BAS 0b1111).
+    #[test]
+    fn thumb_code_gets_a_halfword_breakpoint() {
+        let (port, handle) = tcl_server(vec![
+            ("arp_poll", "0 "),
+            ("curstate", "0 halted"),
+            ("targets", "0 "),
+            ("bp 0x28000BB2 2 hw", "0 "),
+            ("resume", "0 "),
+            ("rbp 0x28000BB2", "0 "),
+            ("get_reg -force pc", "0 pc 0x28000bb2"),
+        ]);
+        let mut server = Server::attach(port).unwrap();
+        let mut symbols = SymbolTable::default();
+        symbols.symbols.push(probecore::elf::Symbol {
+            name: "rustvisor_boot_main".into(),
+            value: 0x2800_0BB0,
+            size: 0x100,
+            thumb: true,
+            is_function: true,
+        });
+        let mut target = CoreTarget {
+            server: &mut server,
+            core: "chip.core".into(),
+            memory_ap: None,
+            symbols,
+        };
+        let result = target
+            .run_until(0x2800_0BB2, std::time::Duration::from_secs(1), &|| false)
+            .unwrap();
+        assert_eq!(result.pc, Some(0x2800_0BB2));
+        assert_eq!(result.breakpoint_length, 2);
+        drop(target);
+        drop(server);
+        let received = handle.join().unwrap();
+        assert!(
+            received.iter().any(|c| c.contains("{bp 0x28000BB2 2 hw}")),
+            "{received:?}"
+        );
+        assert!(!received.iter().any(|c| c.contains("get_reg -force cpsr")));
+    }
+
     #[test]
     fn a_running_core_is_not_read() {
-        let (port, _handle) = tcl_server(vec![("curstate", "0 running")]);
+        let (port, _handle) = tcl_server(vec![("arp_poll", "0 "), ("curstate", "0 running")]);
         let mut server = Server::attach(port).unwrap();
         let mut target = CoreTarget {
             server: &mut server,

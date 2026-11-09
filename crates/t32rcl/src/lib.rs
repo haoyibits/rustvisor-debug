@@ -348,9 +348,17 @@ impl Debugger {
         symbol::deserialize(&answer)
     }
 
-    /// `symbol.query_by_name(name).address.value`.
+    /// `symbol.query_by_name(name).address.value`. An unknown name is an
+    /// error: PowerView answers it with size -1 (and address 0xFFFFFFFF,
+    /// seen with R.2026.02), which Python passes on as a symbol.
     pub fn symbol_address(&mut self, name: &str) -> Result<u64> {
-        match self.symbol_query_by_name(name)?.address {
+        let symbol = self.symbol_query_by_name(name)?;
+        if symbol.size == u64::MAX {
+            return Err(
+                Trace32Error::new(Operation::Symbol, format!("symbol {name} not found")).into(),
+            );
+        }
+        match symbol.address {
             Some(address) => Ok(address.value),
             None => Err(Trace32Error::new(
                 Operation::Symbol,

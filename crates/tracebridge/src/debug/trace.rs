@@ -114,7 +114,8 @@ pub fn read(probe: &mut dyn Probe, run_dir: &Path, last: u32) -> DResult<Dump> {
     if available == 0 {
         fail!(
             "the trace is empty: set it up (Trace.METHOD, the trace sink, ETM.ON) and run \
-             the core, e.g. with 'tracebridge debug do <script>'"
+             the core, e.g. with '{}'",
+            crate::ui::command("debug do <script>")
         );
     }
     let count = available.min(u64::from(last));
@@ -130,9 +131,20 @@ pub fn read(probe: &mut dyn Probe, run_dir: &Path, last: u32) -> DResult<Dump> {
         Err(error) => fail!("cannot remove {path}: {error}"),
     }
     let command = format!("Trace.EXPORT.Ascii \"{path}\" (-{count}.)--(-1.) {EXPORT_ITEMS}");
-    probe
-        .cmd(&command)
-        .map_err(|error| DebugError::from(error).context(command.clone()))?;
+    // Without a trace set up PowerView may still count a record and then
+    // refuse the export ("command locked", R.2026.02).
+    probe.cmd(&command).map_err(|error| {
+        let error = DebugError::from(error);
+        if error.lost {
+            return error;
+        }
+        DebugError::new(format!(
+            "{command}: {}; is the trace set up (Trace.METHOD, the trace sink, ETM.ON), \
+             e.g. with '{}'?",
+            error.message,
+            crate::ui::command("debug do <script>")
+        ))
+    })?;
     let text = std::fs::read(&file).map_err(|error| {
         DebugError::new(format!("cannot read {path} after the export: {error}"))
     })?;

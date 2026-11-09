@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use t32rcl::{Address, Debugger, Value};
 
 use super::perfile;
-use crate::style;
+use crate::{style, ui};
 
 /// The RCL operations of a debug session.
 pub trait Probe {
@@ -434,12 +434,16 @@ pub fn require_idle(probe: &mut dyn Probe) -> DResult<()> {
     }
 }
 
-pub const HALT_HINT: &str = "halt it with 'tracebridge debug break' first";
+/// How to halt the core, in the running program's words.
+pub fn halt_hint() -> String {
+    format!("halt it with '{}' first", *ui::HALT_COMMAND)
+}
 
 /// The error for a core-register read while the core runs.
 pub fn running_error(what: &str) -> DebugError {
     DebugError::new(format!(
-        "{what} can only be read while the core is halted, and the core is running; {HALT_HINT}"
+        "{what} can only be read while the core is halted, and the core is running; {}",
+        halt_hint()
     ))
 }
 
@@ -733,6 +737,15 @@ pub fn resolve_register(
     per: &mut PerSnapshot,
     name: &str,
 ) -> DResult<PerRegister> {
+    // A name the PER file defines several times at one address: TRACE32
+    // would answer "Ambiguous keyword" (and the path without the dot "not
+    // found"), each also an error line in PowerView's AREA window.
+    if let Some(file) = per.file() {
+        let candidates = perfile::scan(file, name);
+        if let Some(register) = resolve_duplicate(probe, name, &candidates)? {
+            return Ok(register);
+        }
+    }
     let mut message = match try_paths(probe, name)? {
         Ok(register) => return Ok(register),
         Err(message) => message,
@@ -873,9 +886,11 @@ pub struct Choice {
     pub from_per_file: bool,
 }
 
-/// The BITFLD choice of a field with value `value`: `PER.VALUE.STRING`, or
-/// the choice list in the PER file when that fails (TRACE32 answers "Must be
-/// a BITFLD" even for BITFLDs whose value PER.VALUE reads).
+/// The BITFLD choice of a field with value `value`: the choice list in the
+/// PER file, else `PER.VALUE.STRING`. The PER file comes first because
+/// TRACE32 answers "Must be a BITFLD" even for BITFLDs whose value PER.VALUE
+/// reads (all Cortex-R52 core register fields on R.2026.02), and each
+/// failure is an error line in PowerView's AREA window.
 pub fn read_choice(
     probe: &mut dyn Probe,
     per: &PerSnapshot,
@@ -885,31 +900,29 @@ pub fn read_choice(
     if !has_several_elements(&register.path) {
         return Ok(None);
     }
+    if let Some(text) = per
+        .file()
+        .and_then(|file| perfile::scan_field_choice(file, &register.path, value))
+    {
+        return Ok(Some(Choice {
+            text,
+            from_per_file: true,
+        }));
+    }
     match probe.fnc(&format!(
         "PER.VALUE.STRING({})",
         practice_string(&register.path)
     )) {
-        Ok(Value::Text(text)) if !text.trim().is_empty() => {
-            return Ok(Some(Choice {
-                text: text.trim().to_string(),
-                from_per_file: false,
-            }));
-        }
-        Ok(_) => {}
+        Ok(Value::Text(text)) if !text.trim().is_empty() => Ok(Some(Choice {
+            text: text.trim().to_string(),
+            from_per_file: false,
+        })),
+        Ok(_) => Ok(None),
         Err(error) => {
             let error = DebugError::from(error);
-            if error.lost {
-                return Err(error);
-            }
+            if error.lost { Err(error) } else { Ok(None) }
         }
     }
-    Ok(per
-        .file()
-        .and_then(|file| perfile::scan_field_choice(file, &register.path, value))
-        .map(|text| Choice {
-            text,
-            from_per_file: true,
-        }))
 }
 
 /// The path without its last element (`.HSCTLR.C` → `.HSCTLR`).
@@ -1429,10 +1442,26 @@ tree.end
                  '\"Core (X)\".\"System Control\".SCTLR'"
             )
         );
+        // TRACE32 is not asked for the ambiguous short names: each failed
+        // lookup is an error line in PowerView's AREA window.
+        let asked = |probe: &FakeProbe, path: &str| {
+            let line = format!("fnc PER.ADDRESS({})", practice_string(path));
+            probe.log.contains(&line)
+        };
+        assert!(!asked(&probe, ".SCTLR"), "{:?}", probe.log);
         // A field with the same definition everywhere resolves too...
         ambiguous(&mut probe, "SCTLR.C");
         let register = resolve_register(&mut probe, &mut per, "SCTLR.C").unwrap();
         assert_eq!(register.path, format!("{first}.C"));
+        assert!(!asked(&probe, ".SCTLR.C") && !asked(&probe, "SCTLR.C"));
+        // The choice text comes from the PER file; PER.VALUE.STRING() is
+        // not asked (it fails for core register fields: "Must be a BITFLD").
+        let choice = read_choice(&mut probe, &per, &register, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(choice.text, "On");
+        assert!(choice.from_per_file);
+        assert!(!probe.log.iter().any(|l| l.contains("PER.VALUE.STRING")));
         // ...a field defined differently does not.
         ambiguous(&mut probe, "SCTLR.E");
         let error = resolve_register(&mut probe, &mut per, "SCTLR.E").unwrap_err();

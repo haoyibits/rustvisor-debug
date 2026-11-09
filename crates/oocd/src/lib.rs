@@ -157,7 +157,20 @@ impl Client {
         let (code, text) = answer.split_once(' ').unwrap_or((answer.as_str(), ""));
         match code {
             "0" | "2" => Ok(text.to_string()),
+            // Some commands fail without a message (a wrong subcommand
+            // prints its help to the log): name the command then.
+            "1" if text.trim().is_empty() => Err(Error::Command(format!(
+                "'{command}' failed without a message (see the OpenOCD log)"
+            ))),
             "1" => Err(Error::Command(text.trim_end().to_string())),
+            // A command handler's own error code (`ERROR_TARGET_NOT_HALTED`
+            // is -304, target.h) comes back as the Tcl return code.
+            code if code.starts_with('-') && code[1..].bytes().all(|b| b.is_ascii_digit()) => {
+                Err(Error::Command(match text.trim() {
+                    "" => format!("'{command}' failed with OpenOCD error {code}"),
+                    text => format!("'{command}' failed with OpenOCD error {code}: {text}"),
+                }))
+            }
             _ => Err(Error::Protocol(format!(
                 "unexpected answer from OpenOCD: {answer:?}"
             ))),
@@ -303,12 +316,27 @@ mod tests {
 
     #[test]
     fn eval_reports_results_and_tcl_errors() {
-        let (address, handle) = server(vec!["0 halted", "1 invalid command name \"nope\"\n"]);
+        let (address, handle) = server(vec![
+            "0 halted",
+            "1 invalid command name \"nope\"\n",
+            "1 ",
+            "-304 ",
+        ]);
         let mut client = client(address);
         assert_eq!(client.eval("sr6p6.k0c0.core curstate").unwrap(), "halted");
         assert_eq!(
             client.eval("nope").unwrap_err(),
             Error::Command("invalid command name \"nope\"".into())
+        );
+        assert_eq!(
+            client.eval("chip.core resume").unwrap_err(),
+            Error::Command(
+                "'chip.core resume' failed without a message (see the OpenOCD log)".into()
+            )
+        );
+        assert_eq!(
+            client.eval("resume").unwrap_err(),
+            Error::Command("'resume' failed with OpenOCD error -304".into())
         );
         drop(client);
         let received = handle.join().unwrap();

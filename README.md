@@ -434,7 +434,8 @@ rvdbg fdx --guest 0                            # the link of the first extra ima
 rvdbg fdx --send "boot single" --expect "ok boot" --json
 ```
 
-Interactive, packets from the target are printed one per line until Ctrl-C;
+Interactive, packets from the target are printed one per line until Ctrl-C
+(on a terminal as `< <packet>`, with a `> ` prompt for the line to send);
 a target reset that reopens the link is followed. `--close` marks the link
 closed, for use while the board is held in reset: RAM keeps the last run's
 open link until the image opens it again. With `--send` the packets

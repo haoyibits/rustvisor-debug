@@ -337,6 +337,19 @@ impl Target for MemoryTarget<'_> {
                 address.class
             )));
         }
+        // One 32-bit access: peripheral registers can read 0 byte by byte.
+        if address.value % 4 == 0 {
+            let ap = self.memory_ap.clone();
+            return self
+                .server
+                .client
+                .read_words(&ap, address.value, 1)
+                .map(|words| words[0])
+                .map_err(|error| target::Error {
+                    message: error.to_string(),
+                    lost: matches!(error, oocd::Error::Connect(_) | oocd::Error::Timeout),
+                });
+        }
         let bytes = self.read_memory(address.value, 4)?;
         Ok(u32::from_le_bytes(bytes.try_into().expect("4 bytes")))
     }

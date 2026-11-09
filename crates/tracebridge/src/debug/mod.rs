@@ -443,7 +443,7 @@ pub fn main_on(
     }
     let (cli, json) = parse(args).expect("checked by main_without_config");
     let Some(command) = cli.command else {
-        eprintln!("tracebridge: debug needs a command here");
+        eprintln!("{}: debug needs a command here", crate::ui::program());
         return 2;
     };
     let result = run_command(config, cwd, debugger, per, &command);

@@ -613,9 +613,7 @@ impl Report {
             lines.push(style.value(description));
         }
         if self.halted {
-            lines.push(
-                style.warn("core halted (Break) for CP15/core register reads; it stays halted"),
-            );
+            lines.push(style.warn("core halted for CP15/core register reads; it stays halted"));
         }
         let width = self.results.iter().map(|r| r.name.len()).max().unwrap_or(0);
         for result in &self.results {

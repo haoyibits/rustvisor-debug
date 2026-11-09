@@ -129,6 +129,10 @@ pub struct Symbol {
     pub value: u64,
     /// 0 when the size is unknown.
     pub size: u64,
+    /// An Arm function in Thumb code (bit 0 of its ELF value was set).
+    pub thumb: bool,
+    /// STT_FUNC.
+    pub is_function: bool,
 }
 
 /// How far past a symbol without a size an address may lie and still be
@@ -154,6 +158,17 @@ impl SymbolTable {
     pub fn range(&self, name: &str) -> Option<(u64, u64)> {
         let symbol = self.symbols.iter().find(|symbol| symbol.name == name)?;
         Some((symbol.value, symbol.value + symbol.size.saturating_sub(1)))
+    }
+
+    /// Whether the code at `address` is Thumb: from the function symbol
+    /// that contains it; `None` when no function with a size does.
+    pub fn thumb_at(&self, address: u64) -> Option<bool> {
+        self.symbols
+            .iter()
+            .filter(|s| s.size > 0 && s.value <= address && address - s.value < s.size)
+            .filter(|s| s.is_function)
+            .min_by_key(|s| s.size)
+            .map(|s| s.thumb)
     }
 
     /// The symbol an address belongs to and the offset into it: the
@@ -254,7 +269,9 @@ pub fn symbols(bytes: &[u8]) -> Result<Vec<Symbol>, String> {
             if name.is_empty() || name.starts_with('$') {
                 continue;
             }
-            let value = if machine == EM_ARM && kind == 2 {
+            let function = kind == 2;
+            let thumb = machine == EM_ARM && function && value & 1 == 1;
+            let value = if machine == EM_ARM && function {
                 value & !1
             } else {
                 value
@@ -263,6 +280,8 @@ pub fn symbols(bytes: &[u8]) -> Result<Vec<Symbol>, String> {
                 name,
                 value,
                 size: symbol_size,
+                thumb,
+                is_function: function,
             });
         }
     }
@@ -504,6 +523,7 @@ mod tests {
         const NOTYPE: u8 = 0x10;
         let bytes = elf32_with_symbols(&[
             ("main", 0x2800_0101, 0x40, FUNC, 1),
+            ("arm_code", 0x2800_0200, 0x10, FUNC, 1),
             ("_SEGGER_RTT", 0x6000_0000, 0xA8, OBJECT, 2),
             ("__hyp_vectors", 0x2800_1000, 0, NOTYPE, 1),
             ("$t", 0x2800_0100, 0, 0x00, 1),
@@ -513,7 +533,12 @@ mod tests {
         let mut table = SymbolTable::default();
         table.add_elf(&bytes).unwrap();
         let names: Vec<&str> = table.symbols.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["main", "_SEGGER_RTT", "__hyp_vectors"]);
+        assert_eq!(names, ["main", "arm_code", "_SEGGER_RTT", "__hyp_vectors"]);
+        // The instruction set of the function that contains an address.
+        assert_eq!(table.thumb_at(0x2800_0102), Some(true));
+        assert_eq!(table.thumb_at(0x2800_0204), Some(false));
+        assert_eq!(table.thumb_at(0x2800_1004), None); // not a function
+        assert_eq!(table.thumb_at(0x6000_0000), None); // an object
         // Thumb bit cleared.
         assert_eq!(table.range("main"), Some((0x2800_0100, 0x2800_013F)));
         assert_eq!(

@@ -374,6 +374,29 @@ fn symbol_query_resolves_address() {
     server.finish();
 }
 
+/// PowerView's answer for a name the loaded symbols do not have: address
+/// 0xFFFFFFFF, size -1 (observed on R.2026.02 for `_SEGGER_RTT`).
+#[test]
+fn unknown_symbol_is_an_error() {
+    let name = "\\\\demo\\Global\\_SEGGER_RTT";
+    let mut answer = b"NM\x0c\x00_SEGGER_RTT\x00".to_vec();
+    answer.extend_from_slice(b"AD\x03\x00");
+    answer.extend_from_slice(&0xFFFF_FFFFu64.to_le_bytes());
+    answer.extend_from_slice(b"AC\x03\x00EA\x00XX");
+    answer.extend_from_slice(b"SZ");
+    answer.extend_from_slice(&u64::MAX.to_le_bytes());
+    answer.extend_from_slice(b"XX");
+    let server = FakeServer::start(vec![session(vec![Step::Exchange {
+        request: symbol_request(5, name),
+        reply: ok(5, &answer),
+    }])]);
+    let mut debugger = connect(&server);
+    let error = debugger.symbol_address(name).unwrap_err().to_string();
+    assert!(error.contains("not found"), "{error}");
+    drop(debugger);
+    server.finish();
+}
+
 #[test]
 fn symbol_without_address_is_an_error() {
     let server = FakeServer::start(vec![session(vec![Step::Exchange {

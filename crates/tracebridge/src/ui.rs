@@ -28,9 +28,22 @@ pub fn read_stdin_now() -> Option<Vec<u8>> {
     }
 }
 
-/// `info` in cli.py: a cyan `[tracebridge]` prefix on stdout.
+/// The running program's name for messages and hints: `rvdbg` when this
+/// executable is rvdbg (which runs tracebridge built in), else
+/// `tracebridge`.
+pub fn program() -> &'static str {
+    static PROGRAM: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
+        let rvdbg = std::env::current_exe()
+            .ok()
+            .is_some_and(|exe| exe.file_stem().is_some_and(|stem| stem == "rvdbg"));
+        if rvdbg { "rvdbg" } else { "tracebridge" }
+    });
+    *PROGRAM
+}
+
+/// `info` in cli.py: a cyan `[tracebridge]` (`[rvdbg]`) prefix on stdout.
 pub fn info(message: &str) {
-    println!("\x1b[1;36m[tracebridge]\x1b[0m {message}");
+    println!("\x1b[1;36m[{}]\x1b[0m {message}", program());
 }
 
 /// The absolute path of this executable, used wherever tracebridge calls itself
@@ -49,14 +62,32 @@ pub fn current_exe() -> crate::errors::Result<PathBuf> {
         .unwrap_or(exe))
 }
 
+/// A tracebridge command (`debug break`, `debug do <script>`, `load`) as the
+/// running program spells it: rvdbg has the `debug` commands at its top
+/// level and calls `debug break` `halt`.
+pub fn command(tracebridge: &str) -> String {
+    command_for(program() == "rvdbg", tracebridge)
+}
+
+fn command_for(rvdbg: bool, tracebridge: &str) -> String {
+    if !rvdbg {
+        return format!("tracebridge {tracebridge}");
+    }
+    match tracebridge.strip_prefix("debug ").unwrap_or(tracebridge) {
+        "break" => "rvdbg halt".to_string(),
+        other => format!("rvdbg {other}"),
+    }
+}
+
+/// The command that halts the core, for hints.
+pub static HALT_COMMAND: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| command("debug break"));
+
 /// The error when no PowerView answers on `port`, in the words of the
 /// program that runs (`tracebridge`, `rvdbg`): `flash` and `load` start
 /// PowerView themselves and go on, so they come first; `open` only starts it.
 pub fn no_powerview(port: u16) -> String {
-    let program = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "tracebridge".to_string());
+    let program = program();
     format!(
         "no PowerView on RCL port {port}; '{program} flash' or '{program} load' starts it \
          (or '{program} open', which leaves the target alone); this command never starts it"
@@ -86,6 +117,15 @@ pub fn homebrew_stable_path(exe: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hints_name_the_running_programs_command() {
+        assert_eq!(command_for(false, "debug break"), "tracebridge debug break");
+        assert_eq!(command_for(true, "debug break"), "rvdbg halt");
+        assert_eq!(command_for(true, "debug do <script>"), "rvdbg do <script>");
+        assert_eq!(command_for(true, "load"), "rvdbg load");
+        assert_eq!(command_for(false, "load"), "tracebridge load");
+    }
 
     #[test]
     fn homebrew_cellar_path_maps_to_opt() {

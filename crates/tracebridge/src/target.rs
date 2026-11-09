@@ -9,7 +9,7 @@ use crate::flash::{self, Choice};
 use crate::powerview::require_file;
 use crate::pycompat::Env;
 use crate::remote::{CONNECT_TIMEOUT, Rcl, connect_debugger};
-use crate::ui::info;
+use crate::ui::{self, info};
 use crate::{bail, bridge_error};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,9 +137,13 @@ pub fn program(config: &Config, script: &str, debugger: &mut impl Rcl) -> t32rcl
     }
     debugger.cmd("SYStem.Option.IMASKASM ON")?;
     debugger.cmd("SYStem.Option.IMASKHLL ON")?;
-    debugger.print(&format!("tracebridge: flashed {}", config.elf.display()))?;
+    debugger.print(&format!(
+        "{}: flashed {}",
+        ui::program(),
+        config.elf.display()
+    ))?;
     for extra in &config.extra_elf {
-        debugger.print(&format!("tracebridge: flashed {}", extra.display()))?;
+        debugger.print(&format!("{}: flashed {}", ui::program(), extra.display()))?;
     }
     Ok(())
 }
@@ -228,7 +232,8 @@ pub fn setup_debug(config: &Config, debugger: &mut impl Rcl) -> t32rcl::Result<(
         debugger.cmd("Go")?;
     }
     debugger.print(&format!(
-        "tracebridge: symbols loaded for {}",
+        "{}: symbols loaded for {}",
+        ui::program(),
         config.program
     ))
 }

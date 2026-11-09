@@ -3,11 +3,13 @@
 //! MEM-AP).
 //!
 //! Interactive, each line typed is one packet to the target and each packet
-//! from it is printed as one line, until Ctrl-C. With `--send`/`--expect`
+//! from it is printed as one line, until Ctrl-C. On a terminal the target's
+//! packets start with `< ` and a `> ` prompt marks the input line; through
+//! a pipe the lines are the bare packets. With `--send`/`--expect`
 //! it sends, waits for the expected packets and exits: what a script or the
 //! board runner needs.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -192,6 +194,57 @@ fn scripted(
     }
 }
 
+/// The interactive output on a terminal: `< <packet>` lines and a `> `
+/// prompt, taken off the screen before any other line. The terminal echoes
+/// what is typed after the prompt (line mode); a packet that arrives while
+/// a line is half typed hides that text, which stays in the input.
+struct Console<W: Write> {
+    out: W,
+    /// Prompt and markers: stdin and stdout are terminals.
+    marked: bool,
+    /// Input is still read (no prompt after the end of input).
+    reading: bool,
+    style: Style,
+    /// The prompt is the last thing on the screen.
+    shown: bool,
+}
+
+impl<W: Write> Console<W> {
+    fn prompt(&mut self) {
+        if self.marked && self.reading && !self.shown {
+            let _ = write!(self.out, "{}", self.style.dim("> "));
+            let _ = self.out.flush();
+            self.shown = true;
+        }
+    }
+
+    /// Take the prompt off the screen before another line.
+    fn clear(&mut self) {
+        if self.shown {
+            let _ = write!(self.out, "\r\x1b[K");
+            let _ = self.out.flush();
+            self.shown = false;
+        }
+    }
+
+    fn packet(&mut self, packet: &str) {
+        self.clear();
+        if self.marked {
+            let _ = writeln!(self.out, "{} {packet}", self.style.good("<"));
+        } else {
+            let _ = writeln!(self.out, "{packet}");
+        }
+        let _ = self.out.flush();
+        self.prompt();
+    }
+
+    /// A line was entered: the terminal moved below the prompt.
+    fn entered(&mut self) {
+        self.shown = false;
+        self.prompt();
+    }
+}
+
 fn interactive(
     memory: &mut impl Memory,
     probe: &str,
@@ -205,7 +258,13 @@ fn interactive(
         style.symbol(&options.symbol),
         style.address(format!("0x{:08X}", options.address))
     );
-    let mut stdout = std::io::stdout();
+    let mut console = Console {
+        out: std::io::stdout(),
+        marked: std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        reading: true,
+        style: Style::stdout(),
+        shown: false,
+    };
     let mut input_open = true;
     let mut pending: Vec<u8> = Vec::new();
     let mut queue: std::collections::VecDeque<String> = Default::default();
@@ -214,6 +273,7 @@ fn interactive(
         let link = match Link::locate(memory, options.address) {
             Ok(Some(link)) => link,
             Ok(None) => {
+                console.clear();
                 eprintln!(
                     "{} waiting for the target to open the link",
                     style.warn("[fdx]")
@@ -228,25 +288,33 @@ fn interactive(
             }
             Err(error) => return Err(format!("FDX: {error}")),
         };
+        console.clear();
         eprintln!(
             "{} open, {} bytes each way, packets up to {} bytes",
             style.label("[fdx]"),
             link.to_target.size,
             link.max_payload()
         );
+        console.prompt();
         while !interrupted.load(Ordering::SeqCst) {
             if input_open {
                 match tracebridge::backend::read_stdin_now() {
                     Some(bytes) => pending.extend(bytes),
-                    None => input_open = false,
+                    None => {
+                        input_open = false;
+                        console.reading = false;
+                        console.clear();
+                    }
                 }
                 while let Some(end) = pending.iter().position(|&b| b == b'\n') {
                     let line: Vec<u8> = pending.drain(..=end).collect();
                     let line = text(&line).trim_end_matches(['\r', '\n']).to_string();
+                    console.entered();
                     if line.is_empty() {
                         continue;
                     }
                     if line.len() > link.max_payload() {
+                        console.clear();
                         eprintln!(
                             "{} not sent: {} bytes, the link takes up to {}",
                             style.bad("[fdx]"),
@@ -261,14 +329,15 @@ fn interactive(
             let step = (|| -> Result<(), Error> {
                 while let Some(packet) = link.receive(memory)? {
                     match packet {
-                        Packet::Data(packet) => {
-                            let _ = writeln!(stdout, "{}", text(&packet));
-                            let _ = stdout.flush();
+                        Packet::Data(packet) => console.packet(&text(&packet)),
+                        Packet::Dropped => {
+                            console.clear();
+                            eprintln!(
+                                "{} the target dropped packets: its ring was full",
+                                style.warn("[fdx]")
+                            );
+                            console.prompt();
                         }
-                        Packet::Dropped => eprintln!(
-                            "{} the target dropped packets: its ring was full",
-                            style.warn("[fdx]")
-                        ),
                     }
                 }
                 while let Some(packet) = queue.front() {
@@ -285,6 +354,7 @@ fn interactive(
                     std::thread::sleep(POLL);
                 }
                 Err(Error::Closed) => {
+                    console.clear();
                     eprintln!(
                         "{} the target closed or reopened the link",
                         style.warn("[fdx]")
@@ -297,10 +367,12 @@ fn interactive(
                 Err(Error::Memory(error)) => {
                     consecutive_errors += 1;
                     if matches!(consecutive_errors, 5 | 50) || consecutive_errors % 300 == 0 {
+                        console.clear();
                         eprintln!(
                             "{} memory access failed x{consecutive_errors}: {error}",
                             style.warn("[fdx]")
                         );
+                        console.prompt();
                     }
                     std::thread::sleep(Duration::from_millis(200));
                 }
@@ -308,6 +380,7 @@ fn interactive(
             }
         }
     }
+    console.clear();
     eprintln!("{}", style.label(format!("{probe} FDX stopped")));
     Ok(0)
 }
@@ -409,6 +482,38 @@ mod tests {
             timeout: Duration::from_millis(300),
             json: true,
         }
+    }
+
+    fn test_console(marked: bool) -> Console<Vec<u8>> {
+        Console {
+            out: Vec::new(),
+            marked,
+            reading: true,
+            style: Style::PLAIN,
+            shown: false,
+        }
+    }
+
+    #[test]
+    fn a_terminal_marks_packets_and_the_input_line() {
+        let mut console = test_console(true);
+        console.prompt();
+        console.packet("ready");
+        console.entered();
+        console.packet("ok boot");
+        console.reading = false;
+        console.clear();
+        console.packet("bye");
+        assert_eq!(
+            String::from_utf8(console.out).unwrap(),
+            "> \r\x1b[K< ready\n> > \r\x1b[K< ok boot\n> \r\x1b[K< bye\n"
+        );
+        // Through a pipe: the bare packets, no prompt.
+        let mut console = test_console(false);
+        console.prompt();
+        console.packet("ready");
+        console.entered();
+        assert_eq!(String::from_utf8(console.out).unwrap(), "ready\n");
     }
 
     #[test]

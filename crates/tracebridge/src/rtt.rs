@@ -166,7 +166,8 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
             .map_err(|error| {
                 bridge_error!(
                     "cannot resolve {symbol} in '{program}' ({error})\n\
-                     Run 'tracebridge load' first, or pass --cb 0x<address>."
+                     Load an image that has it ('{}'), or pass --cb 0x<address>.",
+                    crate::ui::command("load")
                 )
             })?,
     };

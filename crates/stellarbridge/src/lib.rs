@@ -625,6 +625,10 @@ pub fn flash(
                 && s.paddr.saturating_add(s.data.len() as u64) > bank.base
         });
         if used {
+            // SR6's first auto-probe can consume the info command's output:
+            // it returns only the loader's capacity log. Complete probing
+            // explicitly before asking for the sector table.
+            server.eval(&format!("flash probe {}", bank.number))?;
             let info = server.eval(&format!("capture {{flash info {} sectors}}", bank.number))?;
             sectors.extend(flash_plan::sectors(&bank, &info)?);
         }
@@ -763,6 +767,7 @@ mod tests {
                     .unwrap();
                 let mut commands = Vec::new();
                 let mut staged = Vec::new();
+                let mut probed = false;
                 let mut buffer = Vec::new();
                 let mut byte = [0];
                 while let Ok(1) = stream.read(&mut byte) {
@@ -773,8 +778,15 @@ mod tests {
                     let command = String::from_utf8(std::mem::take(&mut buffer)).unwrap();
                     let answer = if command.contains("capture {flash banks}") {
                         "0 #0 : chip.flash (driver) at 0x1000, size 0x8000, buswidth 0, chipwidth 0"
+                    } else if command.contains("{flash probe 0}") {
+                        probed = true;
+                        "0 flash: 32 kbytes @ 0x1000"
                     } else if command.contains("capture {flash info 0 sectors}") {
-                        "0 #0 : driver at 0x1000\n# 0: 0x00000000 (0x8000 32kB) protected"
+                        if probed {
+                            "0 #0 : driver at 0x1000\n# 0: 0x00000000 (0x8000 32kB) protected"
+                        } else {
+                            "0 flash: 32 kbytes @ 0x1000"
+                        }
                     } else if let Some(rest) = command.split("flash write_image ").nth(1) {
                         let path = rest.split_whitespace().next().unwrap();
                         staged.extend(std::fs::read(path).unwrap());

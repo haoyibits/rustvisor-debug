@@ -300,14 +300,48 @@ struct FdxArgs {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(cli) {
-        Ok(code) => ExitCode::from(code),
-        Err(message) => {
-            eprintln!("{} {message}", Style::stderr().bad("rvdbg:"));
-            ExitCode::from(1)
+    quiet_on_closed_stdout(|| {
+        let cli = Cli::parse();
+        match run(cli) {
+            Ok(code) => ExitCode::from(code),
+            Err(message) => {
+                eprintln!("{} {message}", Style::stderr().bad("rvdbg:"));
+                ExitCode::from(1)
+            }
         }
+    })
+}
+
+/// A closed stdout (`rvdbg config | head -1`) ends rvdbg quietly with 141,
+/// the status a shell shows for a program that SIGPIPE ended. Rust ignores
+/// SIGPIPE, so `println!` panics on EPIPE instead; that panic prints nothing
+/// here and still unwinds, so an OpenOCD that rvdbg started is stopped as
+/// on any other exit (ending at the signal would leave it running).
+fn quiet_on_closed_stdout(run: impl FnOnce() -> ExitCode + std::panic::UnwindSafe) -> ExitCode {
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !is_closed_stdout(info.payload()) {
+            report(info);
+        }
+    }));
+    match std::panic::catch_unwind(run) {
+        Ok(code) => code,
+        Err(payload) if is_closed_stdout(payload.as_ref()) => ExitCode::from(141),
+        Err(payload) => std::panic::resume_unwind(payload),
     }
+}
+
+/// The panic of `print!`/`println!` on a closed stdout: std's
+/// "failed printing to stdout: Broken pipe (os error 32)" (EPIPE is 32 on
+/// Linux and macOS).
+fn is_closed_stdout(payload: &(dyn std::any::Any + Send)) -> bool {
+    let text = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied());
+    text.is_some_and(|text| {
+        text.starts_with("failed printing to stdout: ") && text.ends_with("(os error 32)")
+    })
 }
 
 fn run(cli: Cli) -> Result<u8, String> {

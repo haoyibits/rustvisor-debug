@@ -1,6 +1,6 @@
 //! The StellarLINK backend: OpenOCD (openocd-stellar) through stellarbridge.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -86,10 +86,12 @@ pub fn flash(
         timeout: Duration::from_secs(openocd.timeout),
     };
     let started = std::time::Instant::now();
-    let report = stellarbridge::flash(server, &images, &options, &mut |step| {
-        println!("{} {step}", style.label("step"));
-    })
-    .map_err(|e| e.0)?;
+    let mut display = FlashDisplay::new();
+    let result = stellarbridge::flash(server, &images, &options, &mut |event| {
+        display.update(event, style);
+    });
+    display.finish();
+    let report = result.map_err(|e| e.0)?;
 
     for check in &report.otp {
         let status = if check.differing == 0 {
@@ -145,6 +147,80 @@ pub fn flash(
         ))
     );
     Ok(0)
+}
+
+/// A single updating line on terminals; bounded, plain progress lines in logs.
+struct FlashDisplay {
+    terminal: bool,
+    active: bool,
+    last: Option<(&'static str, usize)>,
+    started: std::time::Instant,
+}
+
+impl FlashDisplay {
+    fn new() -> Self {
+        Self {
+            terminal: std::io::stdout().is_terminal()
+                && std::env::var("TERM").as_deref() != Ok("dumb"),
+            active: false,
+            last: None,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.active {
+            println!();
+            self.active = false;
+        }
+    }
+
+    fn update(&mut self, event: stellarbridge::FlashProgress, style: Style) {
+        match event {
+            stellarbridge::FlashProgress::Step(step) => {
+                self.finish();
+                println!("{} {step}", style.label("step"));
+            }
+            stellarbridge::FlashProgress::Bytes {
+                phase,
+                completed,
+                total,
+            } => {
+                let percent = if total == 0 {
+                    100
+                } else {
+                    ((completed as u128 * 100) / total as u128).min(100) as usize
+                };
+                let new_phase = self.last.is_none_or(|last| last.0 != phase);
+                if new_phase {
+                    self.finish();
+                    self.started = std::time::Instant::now();
+                }
+                // Logs advance in 10% steps; terminals in 1% steps.
+                let bucket = if self.terminal { percent } else { percent / 10 };
+                if !new_phase && self.last == Some((phase, bucket)) {
+                    return;
+                }
+                self.last = Some((phase, bucket));
+                let filled = percent / 5;
+                let line = format!(
+                    "{phase:7} [{}{}] {percent:3}%  {:.1}/{:.1} KiB  {:.1}s",
+                    "#".repeat(filled),
+                    "-".repeat(20 - filled),
+                    completed as f64 / 1024.0,
+                    total as f64 / 1024.0,
+                    self.started.elapsed().as_secs_f64()
+                );
+                if self.terminal {
+                    print!("\r\x1b[K{line}");
+                    let _ = std::io::stdout().flush();
+                    self.active = true;
+                } else {
+                    println!("{line}");
+                }
+            }
+        }
+    }
 }
 
 fn short(path: &Path) -> String {

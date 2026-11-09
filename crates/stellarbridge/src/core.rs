@@ -313,7 +313,12 @@ impl Target for CoreTarget<'_> {
         if address.value % 4 == 0 {
             return Ok(self.read_words(address.value, 1)?[0]);
         }
-        let bytes = self.read_memory(address.value, 4)?;
+        let via = self.memory_ap.clone().unwrap_or_else(|| self.core.clone());
+        let bytes = self
+            .server
+            .client
+            .read_memory(&via, address.value, 4)
+            .map_err(lift)?;
         Ok(u32::from_le_bytes(bytes.try_into().expect("4 bytes")))
     }
 
@@ -338,7 +343,7 @@ impl Target for CoreTarget<'_> {
         let via = self.memory_ap.clone().unwrap_or_else(|| self.core.clone());
         self.server
             .client
-            .read_memory(&via, address, length)
+            .read_memory_wide(&via, address, length)
             .map_err(lift)
     }
 

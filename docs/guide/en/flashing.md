@@ -56,7 +56,9 @@ Automatic selection needs suitable `; @Chip:` metadata and `PREPAREONLY` support
 
 ## StellarLINK: write, compare and run
 
-The normal path executes `reset init`, `flash write_image erase` for each image, compares loadable segments through `memory_ap`, then executes `reset run`.
+The normal path executes `reset init`, reads the flash sector geometry, erases each image's touched sectors, writes in chunks, compares loadable segments through `memory_ap`, then executes `reset run`. Segments sharing a sector are combined before writing, with gaps and the sector tail padded with `0xFF`.
+
+Writing and comparison each show a percentage based on completed bytes. Write totals include padding. Terminals display an updating progress bar; redirected output uses plain progress lines. Erase and initialization steps are shown separately without a percentage.
 
 ```sh
 rvdbg --backend openocd flash

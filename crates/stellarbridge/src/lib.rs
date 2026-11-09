@@ -13,6 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub mod core;
+mod flash_plan;
 
 use probecore::elf::{self, Segment, SegmentResult};
 use probecore::target::{self, Target, TargetAddress};
@@ -350,7 +351,15 @@ impl Target for MemoryTarget<'_> {
                     lost: matches!(error, oocd::Error::Connect(_) | oocd::Error::Timeout),
                 });
         }
-        let bytes = self.read_memory(address.value, 4)?;
+        let ap = self.memory_ap.clone();
+        let bytes = self
+            .server
+            .client
+            .read_memory(&ap, address.value, 4)
+            .map_err(|error| target::Error {
+                message: error.to_string(),
+                lost: matches!(error, oocd::Error::Connect(_) | oocd::Error::Timeout),
+            })?;
         Ok(u32::from_le_bytes(bytes.try_into().expect("4 bytes")))
     }
 
@@ -362,7 +371,7 @@ impl Target for MemoryTarget<'_> {
         let ap = self.memory_ap.clone();
         self.server
             .client
-            .read_memory(&ap, address, length)
+            .read_memory_wide(&ap, address, length)
             .map_err(|error| target::Error {
                 message: error.to_string(),
                 lost: matches!(error, oocd::Error::Connect(_) | oocd::Error::Timeout),
@@ -527,23 +536,36 @@ impl FlashReport {
     }
 }
 
-/// Write `images` to flash: `reset init` (the target configuration's
-/// preparation, e.g. the watchdog), `flash write_image erase` for each ELF
-/// (load addresses, `p_paddr`), then the comparison, then `reset run`.
-///
-/// Before anything is written, the parts of the images in OTP areas are
-/// compared with the board: a difference stops the flashing unless
-/// `write_otp` allows it, and a difference that would need a 0 bit to
-/// become 1 always does.
-///
-/// The images are compared only after all of them are written, so an image
-/// that erased a sector of an earlier one shows up as a difference.
-/// `progress` receives one line per step.
+fn flash_time_left(server: &mut Server, started: Instant, timeout: Duration) -> Result<()> {
+    let remaining = timeout
+        .checked_sub(started.elapsed())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| Error("flash image erase/write timed out".into()))?;
+    server.set_timeout(remaining)
+}
+
+/// Flash progress: steps have no invented percentage; byte counts advance only
+/// after successful writes or comparison reads. Write totals include padding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlashProgress {
+    Step(String),
+    Bytes {
+        phase: &'static str,
+        completed: usize,
+        total: usize,
+    },
+}
+
+/// Write loadable ELF segments using OpenOCD's sector geometry. Each image's
+/// touched sectors are erased once before its data is written in bounded chunks.
+/// Segments sharing a sector are combined with 0xFF padding, matching OpenOCD's
+/// default padding. OTP guards run before any erase. Comparison happens after
+/// all images, so later images cannot silently erase an earlier image's data.
 pub fn flash(
     server: &mut Server,
     images: &[PathBuf],
     options: &FlashOptions,
-    progress: &mut dyn FnMut(&str),
+    progress: &mut dyn FnMut(FlashProgress),
 ) -> Result<FlashReport> {
     if images.is_empty() {
         fail!("no image to flash");
@@ -571,7 +593,7 @@ pub fn flash(
 
     let mut otp = Vec::new();
     if !options.otp.is_empty() {
-        progress("check OTP areas");
+        progress(FlashProgress::Step("check OTP areas".into()));
         let named: Vec<(PathBuf, Vec<Segment>)> = images
             .iter()
             .cloned()
@@ -591,34 +613,110 @@ pub fn flash(
     }
 
     server.set_timeout(Duration::from_secs(60))?;
-    progress("reset init");
+    progress(FlashProgress::Step("reset init".into()));
     server.eval("reset init")?;
     server.set_timeout(options.timeout)?;
-    for image in images {
-        progress(&format!("write {}", image.display()));
-        server.eval(&format!(
-            "flash write_image erase {} 0 elf",
-            oocd::quote(&image.display().to_string())
-        ))?;
+    progress(FlashProgress::Step("read flash geometry".into()));
+    let banks = flash_plan::banks(&server.eval("capture {flash banks}")?)?;
+    let mut sectors = Vec::new();
+    for bank in banks {
+        let used = segments.iter().flatten().any(|s| {
+            s.paddr < bank.base + bank.size
+                && s.paddr.saturating_add(s.data.len() as u64) > bank.base
+        });
+        if used {
+            let info = server.eval(&format!("capture {{flash info {} sectors}}", bank.number))?;
+            sectors.extend(flash_plan::sectors(&bank, &info)?);
+        }
+    }
+    // Validate and materialize every plan before erasing anything.
+    let plans = segments
+        .iter()
+        .map(|s| flash_plan::plan(s, &sectors))
+        .collect::<Result<Vec<_>>>()?;
+    let total = plans.iter().flatten().map(|w| w.data.len()).sum();
+    let mut completed = 0;
+    let scratch = tempfile::tempdir()
+        .map_err(|e| Error(format!("cannot create flash scratch directory: {e}")))?;
+    let chunk_path = scratch.path().join("write.bin");
+    for (image, writes) in images.iter().zip(&plans) {
+        let image_started = Instant::now();
+        progress(FlashProgress::Step(format!("erase {}", image.display())));
+        let mut index = 0;
+        while index < writes.len() {
+            let first = &writes[index];
+            let mut last = first.sector;
+            index += 1;
+            while index < writes.len()
+                && writes[index].bank == first.bank
+                && writes[index].sector == last + 1
+            {
+                last += 1;
+                index += 1;
+            }
+            flash_time_left(server, image_started, options.timeout)?;
+            server.eval(&format!(
+                "flash erase_sector {} {} {last}",
+                first.bank, first.sector
+            ))?;
+        }
+        progress(FlashProgress::Bytes {
+            phase: "write",
+            completed,
+            total,
+        });
+        for write in writes {
+            for (index, chunk) in write.data.chunks(16384).enumerate() {
+                std::fs::write(&chunk_path, chunk)
+                    .map_err(|e| Error(format!("cannot stage flash data: {e}")))?;
+                let address = write.address + (index * 16384) as u64;
+                // No erase here: another chunk may share the same sector.
+                flash_time_left(server, image_started, options.timeout)?;
+                server.eval(&format!(
+                    "flash write_image {} 0x{address:X} bin",
+                    oocd::quote(&chunk_path.display().to_string())
+                ))?;
+                completed += chunk.len();
+                progress(FlashProgress::Bytes {
+                    phase: "write",
+                    completed,
+                    total,
+                });
+            }
+        }
     }
 
+    server.set_timeout(options.timeout)?;
     let mut verified = Vec::new();
     if options.verify {
         let mut target = MemoryTarget {
             server,
             memory_ap: memory_ap.clone(),
         };
+        let total = segments.iter().flatten().map(|s| s.data.len()).sum();
+        let mut completed = 0;
+        progress(FlashProgress::Bytes {
+            phase: "compare",
+            completed,
+            total,
+        });
         for (image, loadable) in images.iter().zip(&segments) {
-            progress(&format!("compare {}", image.display()));
-            let results =
-                elf::compare(&mut target, loadable).map_err(|error| Error(error.message))?;
+            let results = elf::compare_with_progress(&mut target, loadable, &mut |bytes| {
+                progress(FlashProgress::Bytes {
+                    phase: "compare",
+                    completed: completed + bytes,
+                    total,
+                });
+            })
+            .map_err(|error| Error(error.message))?;
+            completed += loadable.iter().map(|s| s.data.len()).sum::<usize>();
             verified.push((image.clone(), results));
         }
     }
 
     if options.run {
         server.set_timeout(Duration::from_secs(60))?;
-        progress("reset run");
+        progress(FlashProgress::Step("reset run".into()));
         server.eval("reset run")?;
     }
     Ok(FlashReport {
@@ -631,6 +729,124 @@ pub fn flash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Exercise real Tcl command ordering and staged binary bytes, including a
+    /// failure midway through a sector. Erasing again would lose the first chunk.
+    #[test]
+    fn flash_chunks_erase_once_and_only_report_completed_writes() {
+        use std::io::{Read, Write};
+        for fail_second in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let image = dir.path().join("app.elf");
+            let mut elf = vec![0u8; 84 + 17000];
+            elf[..6].copy_from_slice(b"\x7fELF\x01\x01");
+            elf[28..32].copy_from_slice(&52u32.to_le_bytes());
+            elf[42..44].copy_from_slice(&32u16.to_le_bytes());
+            elf[44..46].copy_from_slice(&1u16.to_le_bytes());
+            for (offset, value) in [
+                (52, 1u32),
+                (56, 84),
+                (60, 0x1000),
+                (64, 0x1000),
+                (68, 17000),
+            ] {
+                elf[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            elf[84..].fill(0x5A);
+            std::fs::write(&image, elf).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let worker = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut commands = Vec::new();
+                let mut staged = Vec::new();
+                let mut buffer = Vec::new();
+                let mut byte = [0];
+                while let Ok(1) = stream.read(&mut byte) {
+                    if byte[0] != oocd::TERMINATOR {
+                        buffer.push(byte[0]);
+                        continue;
+                    }
+                    let command = String::from_utf8(std::mem::take(&mut buffer)).unwrap();
+                    let answer = if command.contains("capture {flash banks}") {
+                        "0 #0 : chip.flash (driver) at 0x1000, size 0x8000, buswidth 0, chipwidth 0"
+                    } else if command.contains("capture {flash info 0 sectors}") {
+                        "0 #0 : driver at 0x1000\n# 0: 0x00000000 (0x8000 32kB) protected"
+                    } else if let Some(rest) = command.split("flash write_image ").nth(1) {
+                        let path = rest.split_whitespace().next().unwrap();
+                        staged.extend(std::fs::read(path).unwrap());
+                        if fail_second && staged.len() > 16384 {
+                            "1 injected write failure"
+                        } else {
+                            "0 "
+                        }
+                    } else if command.contains("{reset init}")
+                        || command.contains("{flash erase_sector 0 0 0}")
+                    {
+                        "0 "
+                    } else {
+                        "1 unexpected command"
+                    };
+                    commands.push(command);
+                    stream.write_all(answer.as_bytes()).unwrap();
+                    stream.write_all(&[oocd::TERMINATOR]).unwrap();
+                }
+                (commands, staged)
+            });
+            let mut server = Server::attach(port).unwrap();
+            let mut events = Vec::new();
+            let result = flash(
+                &mut server,
+                &[image],
+                &FlashOptions {
+                    memory_ap: None,
+                    verify: false,
+                    otp: Vec::new(),
+                    write_otp: false,
+                    run: false,
+                    timeout: Duration::from_secs(5),
+                },
+                &mut |event| events.push(event),
+            );
+            assert_eq!(result.is_err(), fail_second);
+            drop(server);
+            let (commands, staged) = worker.join().unwrap();
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|c| c.contains("flash erase_sector"))
+                    .count(),
+                1
+            );
+            assert!(!commands.iter().any(|c| c.contains("write_image erase")));
+            assert_eq!(staged.len(), 32768);
+            assert_eq!(&staged[..17000], &[0x5A; 17000]);
+            assert!(staged[17000..].iter().all(|b| *b == 255));
+            let completed: Vec<_> = events
+                .into_iter()
+                .filter_map(|event| match event {
+                    FlashProgress::Bytes {
+                        completed, total, ..
+                    } => {
+                        assert_eq!(total, 32768);
+                        Some(completed)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                completed,
+                if fail_second {
+                    vec![0, 16384]
+                } else {
+                    vec![0, 16384, 32768]
+                }
+            );
+        }
+    }
 
     /// Board memory for the OTP check; everything else is unused.
     struct Board(Vec<(u64, Vec<u8>)>, Vec<String>);

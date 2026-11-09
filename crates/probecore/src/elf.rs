@@ -339,17 +339,41 @@ pub struct SegmentResult {
 /// Read every segment at its load address (physical memory, `AD:<p_paddr>`
 /// in the data-file notation) and compare it byte by byte.
 pub fn compare(target: &mut dyn Target, segments: &[Segment]) -> TargetResult<Vec<SegmentResult>> {
+    compare_with_progress(target, segments, &mut |_| {})
+}
+
+/// Compare in bounded reads, reporting the cumulative successfully read bytes.
+pub fn compare_with_progress(
+    target: &mut dyn Target,
+    segments: &[Segment],
+    progress: &mut dyn FnMut(usize),
+) -> TargetResult<Vec<SegmentResult>> {
     let mut results = Vec::new();
+    let mut completed = 0;
     for segment in segments {
-        let memory = target
-            .read_memory(segment.paddr, segment.data.len())
-            .map_err(|error| {
-                error.context(format!(
-                    "cannot read AD:0x{:X} ({} bytes)",
-                    segment.paddr,
-                    segment.data.len()
-                ))
-            })?;
+        let mut memory = Vec::with_capacity(segment.data.len());
+        while memory.len() < segment.data.len() {
+            let count = (segment.data.len() - memory.len()).min(4096);
+            let part = target
+                .read_memory(segment.paddr + memory.len() as u64, count)
+                .map_err(|error| {
+                    error.context(format!(
+                        "cannot read AD:0x{:X} ({} bytes)",
+                        segment.paddr,
+                        segment.data.len()
+                    ))
+                })?;
+            if part.len() != count {
+                return Err(crate::target::Error::new(format!(
+                    "short memory read at AD:0x{:X}: got {} bytes, expected {count}",
+                    segment.paddr + memory.len() as u64,
+                    part.len()
+                )));
+            }
+            memory.extend_from_slice(&part);
+            completed += count;
+            progress(completed);
+        }
         let mut differing = 0;
         let mut first_difference = None;
         for (offset, (expected, actual)) in segment.data.iter().zip(&memory).enumerate() {
@@ -553,6 +577,25 @@ mod tests {
         // Past the slack of a symbol without size, and past main's end.
         assert!(table.lookup(0x2800_1100).is_none());
         assert!(table.lookup(0x2800_0140).is_none());
+    }
+
+    #[test]
+    fn comparison_progress_counts_only_successful_reads() {
+        let segments = [Segment {
+            paddr: 0x1000,
+            vaddr: 0x1000,
+            data: vec![0x5A; 5000],
+        }];
+        let mut ram = Ram(vec![(0x1000, vec![0x5A; 4096]), (0x2000, vec![0x5A; 904])]);
+        let mut progress = Vec::new();
+        let result = compare_with_progress(&mut ram, &segments, &mut |n| progress.push(n)).unwrap();
+        assert_eq!(progress, [4096, 5000]);
+        assert_eq!(result[0].differing, 0);
+        // A bus error after the first successful chunk must not report 100%.
+        let mut ram = Ram(vec![(0x1000, vec![0x5A; 4096])]);
+        progress.clear();
+        assert!(compare_with_progress(&mut ram, &segments, &mut |n| progress.push(n)).is_err());
+        assert_eq!(progress, [4096]);
     }
 
     #[test]

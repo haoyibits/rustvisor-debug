@@ -204,6 +204,30 @@ impl Client {
         Ok(bytes)
     }
 
+    /// `length` bytes at `address` like [`Client::read_memory`], but the
+    /// 4-byte-aligned middle in 32-bit accesses: a quarter of the transfers
+    /// of byte reads (reading back 86 KB of SR6P6 flash went from 15 s
+    /// down). The unaligned ends are read byte by byte.
+    pub fn read_memory_wide(
+        &mut self,
+        target: &str,
+        address: u64,
+        length: usize,
+    ) -> Result<Vec<u8>> {
+        let end = address + length as u64;
+        let middle_start = address.next_multiple_of(4).min(end);
+        let middle_end = (end / 4 * 4).max(middle_start);
+        let mut bytes = self.read_memory(target, address, (middle_start - address) as usize)?;
+        let words = self.read_words(
+            target,
+            middle_start,
+            ((middle_end - middle_start) / 4) as usize,
+        )?;
+        bytes.extend(words.iter().flat_map(|word| word.to_le_bytes()));
+        bytes.extend(self.read_memory(target, middle_end, (end - middle_end) as usize)?);
+        Ok(bytes)
+    }
+
     /// `count` words from `address`, each read in one 32-bit access.
     pub fn read_words(&mut self, target: &str, address: u64, count: usize) -> Result<Vec<u32>> {
         let mut words = Vec::with_capacity(count);
@@ -345,6 +369,39 @@ mod tests {
             "set _oocd_rc [catch {sr6p6.k0c0.core curstate} _oocd_out]; \
              format {%d %s} $_oocd_rc $_oocd_out"
         );
+    }
+
+    #[test]
+    fn wide_reads_use_words_for_the_aligned_middle() {
+        let (address, handle) = server(vec!["0 0x1 0x2 0x3", "0 0x07060504", "0 0x8 0x9 0xa"]);
+        let mut first = client(address);
+        assert_eq!(
+            first.read_memory_wide("chip.axi", 0x1001, 10).unwrap(),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        );
+        drop(first);
+        let received = handle.join().unwrap();
+        assert_eq!(received.len(), 3, "{received:?}");
+        assert!(received[0].contains("{chip.axi read_memory 0x1001 8 3}"));
+        assert!(received[1].contains("{chip.axi read_memory 0x1004 32 1}"));
+        assert!(received[2].contains("{chip.axi read_memory 0x1008 8 3}"));
+
+        // Aligned: words only; short and inside one word: bytes only.
+        let (address, handle) = server(vec!["0 0x44332211", "0 0x5 0x6"]);
+        let mut second = client(address);
+        assert_eq!(
+            second.read_memory_wide("chip.axi", 0x2000, 4).unwrap(),
+            [0x11, 0x22, 0x33, 0x44]
+        );
+        assert_eq!(
+            second.read_memory_wide("chip.axi", 0x2001, 2).unwrap(),
+            [5, 6]
+        );
+        drop(second);
+        let received = handle.join().unwrap();
+        assert_eq!(received.len(), 2, "{received:?}");
+        assert!(received[0].contains("{chip.axi read_memory 0x2000 32 1}"));
+        assert!(received[1].contains("{chip.axi read_memory 0x2001 8 2}"));
     }
 
     #[test]

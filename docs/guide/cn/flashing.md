@@ -56,7 +56,9 @@ rvdbg flash --script '~~/demo/arm/flash/my_chip.cmm'
 
 ## StellarLINK：写入、回读和运行
 
-正常过程是 `reset init`，逐镜像执行 `flash write_image erase`，通过 `memory_ap` 回读可加载段并比对，最后 `reset run`。
+正常过程是 `reset init`，读取 Flash 扇区布局，擦除每个镜像涉及的扇区，分块写入，通过 `memory_ap` 回读可加载段并比对，最后 `reset run`。同一扇区内的多个段先合并，空隙和扇区尾部按 `0xFF` 填充。
+
+写入和回读比对分别显示按已完成字节数计算的百分比，写入总量包含填充字节。终端显示原地刷新的进度条；重定向输出时使用普通进度行。擦除和初始化单独显示步骤，不显示百分比。
 
 ```sh
 rvdbg --backend openocd flash

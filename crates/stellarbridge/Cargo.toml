@@ -10,6 +10,4 @@ publish = false
 [dependencies]
 oocd = { path = "../oocd" }
 probecore = { path = "../probecore" }
-
-[dev-dependencies]
 tempfile = "3.27"

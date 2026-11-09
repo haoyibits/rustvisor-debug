@@ -22,7 +22,11 @@ brew install haoyibits/tap/rvdbg     # 会一起装上 openocd-stellar
 curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download/install.sh | sh
 ```
 
-安装脚本把 `rvdbg` 装到 `~/.local/bin`：用 `RVDBG_INSTALL_DIR` 改目录，用 `RVDBG_VERSION=v0.1.22` 固定版本。这个目录需要在 `PATH` 里。它不装 StellarLINK 后端需要的 openocd-stellar；只用 TRACE32 时不需要。
+安装脚本把 `rvdbg` 装到 `~/.local/bin`：用 `RVDBG_INSTALL_DIR` 改目录，用 `RVDBG_VERSION=v0.1.22` 固定版本。这个目录需要在 `PATH` 里。它不装 StellarLINK 后端需要的 openocd-stellar（只用 TRACE32 时不需要）。openocd-stellar 有自己的安装脚本，装到 `~/.local/bin`（文件放在 `~/.local/lib/openocd-stellar`；在 Linux 上会打印 StellarLINK 需要的 udev 规则）：
+
+```sh
+curl -fsSL https://github.com/haoyibits/OpenOCD/releases/latest/download/install.sh | sh
+```
 
 手动安装：从 releases 页面下载 `rvdbg-<target>.tar.gz`，用 `.sha256` 文件核对，再把二进制文件放到 `PATH` 里的某个目录。
 
@@ -53,7 +57,7 @@ xattr -d com.apple.quarantine /path/to/rvdbg
 
 **StellarLINK**
 
-- `openocd-stellar`（Homebrew formula 会一起装上）。
+- `openocd-stellar`（Homebrew formula 会一起装上，也可以用[它的安装脚本](#安装)）。
 - 用 `rvdbg debug` 时：`arm-none-eabi-gdb`，或者装了 [Cortex-Debug](https://marketplace.visualstudio.com/items?itemName=marus25.cortex-debug) 扩展的 VS Code。
 
 ## 快速上手

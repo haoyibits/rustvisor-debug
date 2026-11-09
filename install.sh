@@ -1,7 +1,8 @@
 #!/bin/sh
 # Install rvdbg from GitHub releases. The StellarLINK backend also needs the
-# patched OpenOCD (Homebrew: haoyibits/tap/openocd-stellar), which this
-# script does not install.
+# patched OpenOCD, which this script does not install; its own script does:
+#   curl -fsSL https://github.com/haoyibits/OpenOCD/releases/latest/download/install.sh | sh
+# (or Homebrew: haoyibits/tap/openocd-stellar).
 #
 #   curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download/install.sh | sh
 #

@@ -134,7 +134,8 @@ pub fn render() -> String {
     text.push_str(&section(FLASH));
 
     text.push_str(
-        "\n# StellarLINK through OpenOCD (brew install haoyibits/tap/openocd-stellar).\n\
+        "\n# StellarLINK through OpenOCD: brew install haoyibits/tap/openocd-stellar, or\n\
+         # curl -fsSL https://github.com/haoyibits/OpenOCD/releases/latest/download/install.sh | sh\n\
          [openocd]\n\
          executable = \"openocd-stellar\"\n\
          config = [\"board/sr6p6_evb.cfg\"]\n\

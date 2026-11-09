@@ -35,7 +35,13 @@ curl -fsSL https://github.com/haoyibits/rustvisor-debug/releases/latest/download
 This installs `rvdbg` into `~/.local/bin` (set `RVDBG_INSTALL_DIR` to change
 it, `RVDBG_VERSION=v0.1.22` to pin a release). Make sure the directory is on
 your `PATH`. It does not install openocd-stellar, which the StellarLINK
-backend needs; TRACE32 works without it.
+backend needs (TRACE32 works without it). Its own script installs it into
+`~/.local/bin` (files in `~/.local/lib/openocd-stellar`; on Linux it prints
+the udev rules to install for StellarLINK):
+
+```sh
+curl -fsSL https://github.com/haoyibits/OpenOCD/releases/latest/download/install.sh | sh
+```
 
 Manual install: download `rvdbg-<target>.tar.gz` from the releases page,
 check it against the `.sha256` file, and copy the binary somewhere on your
@@ -75,7 +81,8 @@ From source: `cargo install --path crates/rustvisor-debug`.
 
 **StellarLINK**
 
-- `openocd-stellar` (installed with the Homebrew formula).
+- `openocd-stellar` (installed with the Homebrew formula, or with
+  [its install script](#install)).
 - For `rvdbg debug`: `arm-none-eabi-gdb`, or VS Code with the
   [Cortex-Debug](https://marketplace.visualstudio.com/items?itemName=marus25.cortex-debug)
   extension.

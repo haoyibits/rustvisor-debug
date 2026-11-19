@@ -827,11 +827,23 @@ pub fn reset(ctx: &mut Context) -> DResult<Outcome> {
         );
     }
     probe::require_idle(ctx.probe)?;
-    let commands = crate::target::reset_commands(ctx.config);
+    let mut commands = crate::target::reset_commands(ctx.config);
     for command in &commands {
         ctx.probe
             .cmd(command)
             .map_err(|error| DebugError::from(error).context(command))?;
+    }
+    // SYStem.RESet also undoes what the awareness script set up (machine
+    // spaces): run it again, the core still halted at the reset vector.
+    if let Some(arguments) = ctx.config.awareness_command() {
+        let command = format!("DO {arguments}");
+        do_and_wait(
+            ctx.probe,
+            &crate::ui::config_key("awareness.script"),
+            &command,
+            Duration::from_secs(ctx.config.operation_timeout),
+        )?;
+        commands.push(command);
     }
     after_change(
         ctx,
@@ -891,11 +903,23 @@ pub fn run_script(
         .chain(arguments.iter().cloned())
         .collect::<Vec<_>>()
         .join(" ");
-    let probe = &mut *ctx.probe;
-    probe::require_idle(probe)?;
+    probe::require_idle(ctx.probe)?;
+    do_and_wait(ctx.probe, script, &command, timeout)?;
+    after_change(ctx, "script ended", &command)
+}
+
+/// Start `command` (a `DO`) and wait until the PRACTICE stack is empty. A
+/// script that stops at an error is ended; one that waits in a dialog or at
+/// `STOP` is left for the user. `script` names it in the errors.
+fn do_and_wait(
+    probe: &mut dyn Probe,
+    script: &str,
+    command: &str,
+    timeout: Duration,
+) -> DResult<()> {
     // ERROR.OCCURRED() then tells an error of this script from a STOP.
     probe.cmd("ERROR.RESet")?;
-    probe.cmd(&command)?;
+    probe.cmd(command)?;
     let start = Instant::now();
     let mut stopped_polls = 0;
     while eval_u64(probe, "PRACTICE.SD()")? != 0 {
@@ -928,7 +952,7 @@ pub fn run_script(
         }
         std::thread::sleep(DO_POLL);
     }
-    after_change(ctx, "script ended", &command)
+    Ok(())
 }
 
 /// How often `run-until` asks whether the core has stopped.
@@ -1752,6 +1776,47 @@ mod tests {
         probe.failing_commands.push("SYStem.Mode Up".into());
         let error = run(&mut probe, reset).unwrap_err();
         assert!(error.message.starts_with("SYStem.Mode Up: "), "{error:?}");
+    }
+
+    #[test]
+    fn reset_runs_the_awareness_script_again() {
+        let mut probe = FakeProbe::with(&[
+            ("PRACTICE.SD()", Value::Int(0)),
+            ("SYStem.Mode()", Value::Int(11)),
+            ("STATE.RUN()", Value::Bool(false)),
+        ]);
+        // Idle before the reset, running once, then ended.
+        probe.queue(
+            "PRACTICE.SD()",
+            &[Value::Int(0), Value::Int(1), Value::Int(0)],
+        );
+        probe.practice_states.extend([1]);
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = make_config(dir.path());
+        config.awareness_script = "/s/setup.cmm".into();
+        config.awareness_args = vec!["SPLIT".into()];
+        let mut per = PerSnapshot::default();
+        let mut ctx = Context {
+            probe: &mut probe,
+            per: &mut per,
+            config: &config,
+            cwd: dir.path(),
+            style: Style::PLAIN,
+        };
+        reset(&mut ctx).unwrap();
+        let elf = config.elf.display();
+        assert_eq!(
+            probe.commands(),
+            [
+                "SYStem.Down".to_string(),
+                "SYStem.RESet".into(),
+                "SYStem.CPU CPU".into(),
+                "CORE.ASSIGN 1.".into(),
+                "SYStem.Mode Up".into(),
+                "ERROR.RESet".into(),
+                format!("DO \"/s/setup.cmm\" \"{elf}\" \"SPLIT\""),
+            ]
+        );
     }
 
     fn script_probe() -> FakeProbe {

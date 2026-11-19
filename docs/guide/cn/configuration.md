@@ -40,6 +40,7 @@ rvdbg --backend trace32 status
 | `[trace32.target]` | `cpu`、`cores`、`mem_access`、`jtag_clock`、`dual_port` | 目标及运行中内存访问 |
 | `[trace32.flash]` | `chip`、`script`、`args` | 烧录脚本选择及参数 |
 | `[trace32.rtos]` | `config`、`menu`、`show_tasks` | 可选的 RTOS 感知 |
+| `[trace32.awareness]` | `script`、`args` | flash、load、reset 之后执行的脚本（如 hypervisor 感知） |
 | `[openocd]` | `executable`、`config`、`search`、`commands` | OpenOCD 程序和板级初始化脚本 |
 | `[openocd]` | `tcl_port`、`gdb_port`、`gdb_target`、`core` | 控制连接、GDB 服务核、查看类命令用的核 |
 | `[openocd]` | `memory_ap`、`timeout`、`otp` | 物理内存访问、操作超时及 OTP 保护范围 |

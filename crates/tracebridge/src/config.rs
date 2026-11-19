@@ -37,6 +37,13 @@ pub struct Config {
     pub rtos_config: String,
     pub rtos_menu: String,
     pub rtos_show_tasks: bool,
+    /// `[awareness] script`: a PRACTICE script that sets up an awareness
+    /// (machine spaces, an extension, symbols per machine) after every flash,
+    /// load and reset, which would otherwise undo it. Its arguments are the
+    /// ELF, the extra images and `[awareness] args`, each in double quotes.
+    /// TRACE32 paths (`~~...`) stay as they are; empty: no script.
+    pub awareness_script: String,
+    pub awareness_args: Vec<String>,
     pub flash_chip: String,
     pub flash_script: String,
     pub flash_args: Vec<String>,
@@ -227,6 +234,7 @@ pub fn config_from_document(document: &Table, config_file: &Path, env: &Env) -> 
     let target = table(&document, "target")?;
     let flash = table(&document, "flash")?;
     let rtos = table(&document, "rtos")?;
+    let awareness = table(&document, "awareness")?;
     let trace32 = table(&document, "trace32")?;
     let rtt = table(&document, "rtt")?;
     let mut clock = Vec::new();
@@ -346,6 +354,15 @@ pub fn config_from_document(document: &Table, config_file: &Path, env: &Env) -> 
     let rtos_config = text(rtos, "config", "")?;
     let rtos_menu = text(rtos, "menu", "")?;
     let rtos_show_tasks = boolean(rtos, "show_tasks", false)?;
+    let awareness_script = text(awareness, "script", "")?;
+    let awareness_script = if awareness_script.is_empty() || awareness_script.starts_with("~~") {
+        awareness_script
+    } else {
+        resolve(Path::new(&expand_path(&awareness_script, env)), &config_dir)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let awareness_args = string_list(awareness, "args")?;
     let flash_chip = env_text(env, "T32_FLASH_CHIP", text(flash, "chip", "")?);
     let flash_script = env_override(env, "T32_FLASH_SCRIPT", text(flash, "script", "")?);
     let flash_args = env_arguments(env, "T32_FLASH_ARGS", string_list(flash, "args")?)?;
@@ -412,6 +429,8 @@ pub fn config_from_document(document: &Table, config_file: &Path, env: &Env) -> 
         rtos_config,
         rtos_menu,
         rtos_show_tasks,
+        awareness_script,
+        awareness_args,
         flash_chip,
         flash_script,
         flash_args,
@@ -446,6 +465,24 @@ impl Config {
             .into_owned()
     }
 
+    /// The arguments of `DO` for the awareness script: the script, the ELF,
+    /// the extra images and `awareness.args`, each in double quotes (the
+    /// script reads them with `PARAMETERS`). `None` without a script.
+    pub fn awareness_command(&self) -> Option<String> {
+        if self.awareness_script.is_empty() {
+            return None;
+        }
+        let images = std::iter::once(&self.elf)
+            .chain(&self.extra_elf)
+            .map(|path| path.to_string_lossy().into_owned());
+        let words: Vec<String> = std::iter::once(self.awareness_script.clone())
+            .chain(images)
+            .chain(self.awareness_args.iter().cloned())
+            .map(|word| format!("\"{word}\""))
+            .collect();
+        Some(words.join(" "))
+    }
+
     /// `flash_script_exists`.
     pub fn flash_script_exists(&self) -> bool {
         let path = self.resolved_flash_script();
@@ -476,6 +513,8 @@ impl Config {
             ("rtos.menu", self.rtos_menu.clone()),
             ("flash.script", self.resolved_flash_script()),
             ("flash.args", self.flash_args.join(" ")),
+            ("awareness.script", self.awareness_script.clone()),
+            ("awareness.args", self.awareness_args.join(" ")),
         ];
         for (name, value) in values {
             if value.contains(['"', '\n', '\r']) {
@@ -655,6 +694,32 @@ poll_interval = 0.05
         let config = fixture.load(&[]).unwrap();
         assert_eq!(config.rtos_config, "~~/demo/freertos.t32");
         assert!(config.rtos_show_tasks);
+    }
+
+    #[test]
+    fn loads_optional_awareness_configuration() {
+        let fixture = Fixture::new(&format!(
+            "{CONFIG}\n[awareness]\nscript = \"debug/setup.cmm\"\nargs = [\"SPLIT\"]\n"
+        ));
+        let config = fixture.load(&[]).unwrap();
+        let script = fixture.root.join("debug/setup.cmm");
+        assert_eq!(config.awareness_script, script.to_string_lossy());
+        assert_eq!(
+            config.awareness_command().unwrap(),
+            format!(
+                "\"{}\" \"{}\" \"SPLIT\"",
+                script.display(),
+                config.elf.display()
+            )
+        );
+    }
+
+    #[test]
+    fn awareness_is_off_by_default_and_keeps_trace32_paths() {
+        let fixture = Fixture::new(CONFIG);
+        assert_eq!(fixture.load(&[]).unwrap().awareness_command(), None);
+        let fixture = Fixture::new(&format!("{CONFIG}\n[awareness]\nscript = \"~~/x.cmm\"\n"));
+        assert_eq!(fixture.load(&[]).unwrap().awareness_script, "~~/x.cmm");
     }
 
     // test_config.py: test_rejects_unsafe_trace32_value

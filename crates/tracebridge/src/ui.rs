@@ -96,7 +96,7 @@ pub fn config_key(key: &str) -> String {
 }
 
 fn config_key_for(rvdbg: bool, key: &str) -> String {
-    let nested = ["target.", "flash.", "rtos."]
+    let nested = ["target.", "flash.", "rtos.", "awareness."]
         .iter()
         .any(|table| key.starts_with(table));
     if rvdbg && nested {

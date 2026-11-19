@@ -1,6 +1,7 @@
 //! Flash and load sequences (target.py). The command order is part of the
 //! contract with the project's flash script and must not change.
 
+use std::path::Path;
 use std::time::Duration;
 
 use crate::config::Config;
@@ -37,6 +38,10 @@ pub fn validate_target_action(
     require_file(&config.elf, "ELF", false)?;
     for extra in &config.extra_elf {
         require_file(extra, "EXTRA_ELF", false)?;
+    }
+    let script = &config.awareness_script;
+    if !script.is_empty() && !script.starts_with("~~") {
+        require_file(Path::new(script), "awareness script", false)?;
     }
     if action == Action::Load {
         return Ok(None);
@@ -227,6 +232,12 @@ pub fn setup_debug(config: &Config, debugger: &mut impl Rcl) -> t32rcl::Result<(
     if rtos_enabled && config.rtos_show_tasks {
         debugger.cmd("TASK.List")?;
     }
+    if let Some(command) = config.awareness_command() {
+        debugger.cmm(
+            &command,
+            Some(Duration::from_secs(config.operation_timeout)),
+        )?;
+    }
 
     if !debugger.state_run()? {
         debugger.cmd("Go")?;
@@ -265,6 +276,8 @@ pub mod tests {
             rtos_config: String::new(),
             rtos_menu: String::new(),
             rtos_show_tasks: false,
+            awareness_script: String::new(),
+            awareness_args: Vec::new(),
             flash_chip: String::new(),
             flash_script: flash.to_string_lossy().into_owned(),
             flash_args: Vec::new(),
@@ -381,6 +394,36 @@ pub mod tests {
                 "print tracebridge: symbols loaded for demo".into(),
             ]
         );
+    }
+
+    #[test]
+    fn load_runs_the_awareness_script_before_go() {
+        let (_dir, mut config) = fixture();
+        config.extra_elf = vec![PathBuf::from("/g/guest 1.elf")];
+        config.awareness_script = "/s/setup.cmm".into();
+        let mut recorder = Recorder {
+            system_up: true,
+            ..Default::default()
+        };
+        run_sequence(&config, None, &mut recorder).unwrap();
+        let elf = config.elf.display();
+        assert_eq!(
+            recorder.calls[recorder.calls.len() - 4..],
+            [
+                format!("cmm \"/s/setup.cmm\" \"{elf}\" \"/g/guest 1.elf\" Some(1s)"),
+                "state_run".into(),
+                "cmd Go".into(),
+                "print tracebridge: symbols loaded for demo".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_awareness_script_is_an_error() {
+        let (dir, mut config) = fixture();
+        config.awareness_script = dir.path().join("none.cmm").to_string_lossy().into_owned();
+        let error = validate_target_action(&config, Action::Load, &no_env()).unwrap_err();
+        assert!(error.0.contains("awareness script"), "{error}");
     }
 
     // test_target.py: test_flash_waits_for_project_cmm_then_programs

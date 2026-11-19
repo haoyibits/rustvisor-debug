@@ -21,6 +21,9 @@
 //! cpu = "SR6P6"
 //! [trace32.flash]                      # trace32.toml's [flash]
 //! [trace32.rtos]                       # trace32.toml's [rtos]
+//! [trace32.awareness]                  # trace32.toml's [awareness]
+//! script = "debug/rustvisor-setup.cmm" # after flash, load and reset: DO it "<elf>" "<extra_elf>"... "<args>"...
+//! args = []
 //!
 //! [openocd]
 //! executable = "openocd-stellar"
@@ -266,6 +269,7 @@ pub const TRACE32_KEYS: &[&str] = &[
 pub const TARGET_KEYS: &[&str] = &["cpu", "cores", "mem_access", "jtag_clock", "dual_port"];
 pub const FLASH_KEYS: &[&str] = &["chip", "script", "args"];
 pub const RTOS_KEYS: &[&str] = &["config", "menu", "show_tasks"];
+pub const AWARENESS_KEYS: &[&str] = &["script", "args"];
 pub const RTT_KEYS: &[&str] = &["symbol", "control_block_address", "poll_interval"];
 pub const OPENOCD_KEYS: &[&str] = &[
     "executable",
@@ -389,13 +393,16 @@ fn trace32_document(document: &Table, project: &Table, program: &str) -> Result<
                 "rtos" => {
                     shaped.insert("rtos".into(), sub("rtos", RTOS_KEYS)?);
                 }
+                "awareness" => {
+                    shaped.insert("awareness".into(), sub("awareness", AWARENESS_KEYS)?);
+                }
                 other if TRACE32_KEYS.contains(&other) => {
                     powerview.insert(key.clone(), value.clone());
                 }
                 other => {
                     return Err(format!(
                         "unknown key trace32.{other} (expected {}, or the tables \
-                         [trace32.target], [trace32.flash], [trace32.rtos])",
+                         [trace32.target], [trace32.flash], [trace32.rtos], [trace32.awareness])",
                         TRACE32_KEYS.join(", ")
                     ));
                 }
@@ -506,6 +513,9 @@ mod tests {
         cpu = "SR6P6"
         [trace32.flash]
         args = []
+        [trace32.awareness]
+        script = "debug/setup.cmm"
+        args = ["SPLIT"]
         [openocd]
         executable = "/opt/bin/openocd-stellar"
         config = ["board/sr6p6_evb.cfg"]
@@ -606,6 +616,9 @@ mod tests {
             cpu = "SR6P6"
             [flash]
             args = []
+            [awareness]
+            script = "debug/setup.cmm"
+            args = ["SPLIT"]
             [trace32]
             rcl_port = 20001
         "#

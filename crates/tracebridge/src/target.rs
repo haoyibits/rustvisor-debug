@@ -39,9 +39,13 @@ pub fn validate_target_action(
     for extra in &config.extra_elf {
         require_file(extra, "EXTRA_ELF", false)?;
     }
-    let script = &config.awareness_script;
-    if !script.is_empty() && !script.starts_with("~~") {
-        require_file(Path::new(script), "awareness script", false)?;
+    for (path, description) in [
+        (&config.awareness_script, "awareness script"),
+        (&config.awareness_menu, "awareness menu"),
+    ] {
+        if !path.is_empty() && !path.starts_with("~~") {
+            require_file(Path::new(path), description, false)?;
+        }
     }
     if action == Action::Load {
         return Ok(None);
@@ -232,12 +236,16 @@ pub fn setup_debug(config: &Config, debugger: &mut impl Rcl) -> t32rcl::Result<(
     if rtos_enabled && config.rtos_show_tasks {
         debugger.cmd("TASK.List")?;
     }
-    if let Some(command) = config.awareness_command() {
-        debugger.cmm(
-            &command,
-            Some(Duration::from_secs(config.operation_timeout)),
-        )?;
-    }
+    // A failing awareness script is ended and reported after the rest:
+    // the images are flashed and loaded either way, and the core runs.
+    let awareness = match config.awareness_command() {
+        Some(arguments) => debugger.run_script(
+            &ui::config_key("awareness.script"),
+            &format!("DO {arguments}"),
+            Duration::from_secs(config.operation_timeout),
+        ),
+        None => Ok(()),
+    };
 
     if !debugger.state_run()? {
         debugger.cmd("Go")?;
@@ -246,7 +254,8 @@ pub fn setup_debug(config: &Config, debugger: &mut impl Rcl) -> t32rcl::Result<(
         "{}: symbols loaded for {}",
         ui::program(),
         config.program
-    ))
+    ))?;
+    awareness
 }
 
 #[cfg(test)]
@@ -278,6 +287,7 @@ pub mod tests {
             rtos_show_tasks: false,
             awareness_script: String::new(),
             awareness_args: Vec::new(),
+            awareness_menu: String::new(),
             flash_chip: String::new(),
             flash_script: flash.to_string_lossy().into_owned(),
             flash_args: Vec::new(),
@@ -410,8 +420,34 @@ pub mod tests {
         assert_eq!(
             recorder.calls[recorder.calls.len() - 4..],
             [
-                format!("cmm \"/s/setup.cmm\" \"{elf}\" \"/g/guest 1.elf\" Some(1s)"),
+                format!("run_script DO \"/s/setup.cmm\" \"{elf}\" \"/g/guest 1.elf\" 1s"),
                 "state_run".into(),
+                "cmd Go".into(),
+                "print tracebridge: symbols loaded for demo".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failing_awareness_script_still_lets_the_core_run() {
+        let (_dir, mut config) = fixture();
+        config.awareness_script = "/s/setup.cmm".into();
+        let mut recorder = Recorder {
+            system_up: true,
+            fail_on: Some("DO ".into()),
+            ..Default::default()
+        };
+        let error = run_sequence(&config, None, &mut recorder).unwrap_err();
+        assert!(
+            error
+                .0
+                .starts_with("TRACE32 load failed: awareness.script stopped at an error"),
+            "{error}"
+        );
+        assert_eq!(
+            recorder.calls[recorder.calls.len() - 3..],
+            [
+                "state_run".to_string(),
                 "cmd Go".into(),
                 "print tracebridge: symbols loaded for demo".into(),
             ]

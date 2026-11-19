@@ -24,6 +24,7 @@
 //! [trace32.awareness]                  # trace32.toml's [awareness]
 //! script = "debug/rustvisor-setup.cmm" # after flash, load and reset: DO it "<elf>" "<extra_elf>"... "<args>"...
 //! args = []
+//! menu = "src/rustvisor.men"           # MENU.ReProgram with rvdbg's toolbar when it starts PowerView
 //!
 //! [openocd]
 //! executable = "openocd-stellar"
@@ -269,7 +270,7 @@ pub const TRACE32_KEYS: &[&str] = &[
 pub const TARGET_KEYS: &[&str] = &["cpu", "cores", "mem_access", "jtag_clock", "dual_port"];
 pub const FLASH_KEYS: &[&str] = &["chip", "script", "args"];
 pub const RTOS_KEYS: &[&str] = &["config", "menu", "show_tasks"];
-pub const AWARENESS_KEYS: &[&str] = &["script", "args"];
+pub const AWARENESS_KEYS: &[&str] = &["script", "args", "menu"];
 pub const RTT_KEYS: &[&str] = &["symbol", "control_block_address", "poll_interval"];
 pub const OPENOCD_KEYS: &[&str] = &[
     "executable",

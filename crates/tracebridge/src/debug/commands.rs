@@ -911,7 +911,7 @@ pub fn run_script(
 /// Start `command` (a `DO`) and wait until the PRACTICE stack is empty. A
 /// script that stops at an error is ended; one that waits in a dialog or at
 /// `STOP` is left for the user. `script` names it in the errors.
-fn do_and_wait(
+pub(crate) fn do_and_wait(
     probe: &mut dyn Probe,
     script: &str,
     command: &str,

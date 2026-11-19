@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::errors::{BridgeError, Result};
-use crate::remote::{CONNECT_TIMEOUT, connect_debugger};
+use crate::remote::{CONNECT_TIMEOUT, Rcl, connect_debugger};
 use crate::{bail, bridge_error, t32config, ui};
 
 const TOOLBAR_CMM: &str = include_str!("../assets/toolbar.cmm");
@@ -291,9 +291,19 @@ pub fn install_toolbar(config: &Config) -> Result<()> {
             last_error.map(|e| e.to_string()).unwrap_or_default()
         );
     };
-    debugger
-        .cmm(&command, Some(Duration::from_secs(10)))
+    install_menus(config, &command, &mut debugger)
         .map_err(|error| bridge_error!("could not install the PowerView toolbar: {error}"))
+}
+
+/// Run toolbar.cmm (`command`, the arguments of `DO`), then load the
+/// awareness menu file if there is one: everything tracebridge adds to the
+/// menus and the toolbar goes in at this one point.
+fn install_menus(config: &Config, command: &str, debugger: &mut impl Rcl) -> t32rcl::Result<()> {
+    debugger.cmm(command, Some(Duration::from_secs(10)))?;
+    if !config.awareness_menu.is_empty() {
+        debugger.cmd(&format!("MENU.ReProgram \"{}\"", config.awareness_menu))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -374,6 +384,25 @@ mod tests {
         }
         std::fs::write(&config.t32_config, "RCL=NETTCP\nPORT=20000\n").unwrap();
         (dir, config)
+    }
+
+    #[test]
+    fn the_awareness_menu_follows_the_toolbar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::target::tests::make_config(dir.path());
+        let mut recorder = crate::remote::tests::Recorder::default();
+        install_menus(&config, "\"t.cmm\"", &mut recorder).unwrap();
+        assert_eq!(recorder.calls, ["cmm \"t.cmm\" Some(10s)"]);
+        config.awareness_menu = "/s/rv.men".into();
+        let mut recorder = crate::remote::tests::Recorder::default();
+        install_menus(&config, "\"t.cmm\"", &mut recorder).unwrap();
+        assert_eq!(
+            recorder.calls,
+            [
+                "cmm \"t.cmm\" Some(10s)",
+                "cmd MENU.ReProgram \"/s/rv.men\""
+            ]
+        );
     }
 
     // test_powerview.py: test_toolbar_is_installed_through_rcl

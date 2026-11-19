@@ -21,6 +21,10 @@ pub trait Rcl {
     fn print(&mut self, text: &str) -> t32rcl::Result<()>;
     fn system_up(&mut self) -> t32rcl::Result<bool>;
     fn state_run(&mut self) -> t32rcl::Result<bool>;
+    /// Start `command` (a `DO`) and wait until it ends; a script that stops
+    /// at an error is ended and its error returned (`script` names it), as
+    /// `debug do` does.
+    fn run_script(&mut self, script: &str, command: &str, timeout: Duration) -> t32rcl::Result<()>;
 }
 
 impl Rcl for Debugger {
@@ -41,6 +45,15 @@ impl Rcl for Debugger {
     }
     fn state_run(&mut self) -> t32rcl::Result<bool> {
         Debugger::state_run(self)
+    }
+    fn run_script(&mut self, script: &str, command: &str, timeout: Duration) -> t32rcl::Result<()> {
+        crate::debug::commands::do_and_wait(self, script, command, timeout).map_err(|error| {
+            if error.lost {
+                t32rcl::Error::Connect(error.message)
+            } else {
+                t32rcl::Error::Protocol(error.message)
+            }
+        })
     }
 }
 
@@ -125,6 +138,20 @@ pub mod tests {
         fn state_run(&mut self) -> t32rcl::Result<bool> {
             self.calls.push("state_run".into());
             Ok(self.state_run)
+        }
+        fn run_script(
+            &mut self,
+            script: &str,
+            command: &str,
+            timeout: Duration,
+        ) -> t32rcl::Result<()> {
+            self.calls.push(format!("run_script {command} {timeout:?}"));
+            match &self.fail_on {
+                Some(prefix) if command.starts_with(prefix.as_str()) => Err(
+                    t32rcl::Error::Protocol(format!("{script} stopped at an error and was ended")),
+                ),
+                _ => Ok(()),
+            }
         }
     }
 

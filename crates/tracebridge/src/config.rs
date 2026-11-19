@@ -44,6 +44,10 @@ pub struct Config {
     /// TRACE32 paths (`~~...`) stay as they are; empty: no script.
     pub awareness_script: String,
     pub awareness_args: Vec<String>,
+    /// `[awareness] menu`: a menu file (`*.men`) for the awareness, loaded
+    /// with `MENU.ReProgram` when tracebridge starts PowerView, together
+    /// with its own Flash and Load buttons. Same path rules as the script.
+    pub awareness_menu: String,
     pub flash_chip: String,
     pub flash_script: String,
     pub flash_args: Vec<String>,
@@ -354,14 +358,18 @@ pub fn config_from_document(document: &Table, config_file: &Path, env: &Env) -> 
     let rtos_config = text(rtos, "config", "")?;
     let rtos_menu = text(rtos, "menu", "")?;
     let rtos_show_tasks = boolean(rtos, "show_tasks", false)?;
-    let awareness_script = text(awareness, "script", "")?;
-    let awareness_script = if awareness_script.is_empty() || awareness_script.starts_with("~~") {
-        awareness_script
-    } else {
-        resolve(Path::new(&expand_path(&awareness_script, env)), &config_dir)
-            .to_string_lossy()
-            .into_owned()
+    // TRACE32 paths (`~~...`) stay, other paths are resolved like the ELF.
+    let practice_path = |value: String| {
+        if value.is_empty() || value.starts_with("~~") {
+            value
+        } else {
+            resolve(Path::new(&expand_path(&value, env)), &config_dir)
+                .to_string_lossy()
+                .into_owned()
+        }
     };
+    let awareness_script = practice_path(text(awareness, "script", "")?);
+    let awareness_menu = practice_path(text(awareness, "menu", "")?);
     let awareness_args = string_list(awareness, "args")?;
     let flash_chip = env_text(env, "T32_FLASH_CHIP", text(flash, "chip", "")?);
     let flash_script = env_override(env, "T32_FLASH_SCRIPT", text(flash, "script", "")?);
@@ -431,6 +439,7 @@ pub fn config_from_document(document: &Table, config_file: &Path, env: &Env) -> 
         rtos_show_tasks,
         awareness_script,
         awareness_args,
+        awareness_menu,
         flash_chip,
         flash_script,
         flash_args,
@@ -515,6 +524,7 @@ impl Config {
             ("flash.args", self.flash_args.join(" ")),
             ("awareness.script", self.awareness_script.clone()),
             ("awareness.args", self.awareness_args.join(" ")),
+            ("awareness.menu", self.awareness_menu.clone()),
         ];
         for (name, value) in values {
             if value.contains(['"', '\n', '\r']) {
@@ -699,11 +709,15 @@ poll_interval = 0.05
     #[test]
     fn loads_optional_awareness_configuration() {
         let fixture = Fixture::new(&format!(
-            "{CONFIG}\n[awareness]\nscript = \"debug/setup.cmm\"\nargs = [\"SPLIT\"]\n"
+            "{CONFIG}\n[awareness]\nscript = \"debug/setup.cmm\"\nargs = [\"SPLIT\"]\nmenu = \"src/x.men\"\n"
         ));
         let config = fixture.load(&[]).unwrap();
         let script = fixture.root.join("debug/setup.cmm");
         assert_eq!(config.awareness_script, script.to_string_lossy());
+        assert_eq!(
+            config.awareness_menu,
+            fixture.root.join("src/x.men").to_string_lossy()
+        );
         assert_eq!(
             config.awareness_command().unwrap(),
             format!(

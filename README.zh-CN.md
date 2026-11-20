@@ -154,7 +154,7 @@ rvdbg [openocd halted]> quit
 | `[trace32.target]` | `cpu`、`cores`、`mem_access`、`jtag_clock`、`dual_port` |
 | `[trace32.flash]` | `chip` 或 `script`（见下文）、`args` |
 | `[trace32.rtos]` | `config`、`menu`、`show_tasks`（为空表示不启用 RTOS 感知） |
-| `[trace32.awareness]` | `script`、`args`：`flash`、`load`、`reset` 结束时执行的 PRACTICE 脚本，参数是 `"<elf>" "<extra_elf>"… "<args>"…`；用来重新设置会被调试器复位清掉的感知（machine spaces、扩展）。为空表示不执行。`menu`：菜单文件（`*.men`），rvdbg 启动 PowerView 时和它的 Flash、Load 按钮一起装上 |
+| `[trace32.awareness]` | `script`、`args`：`flash`、`load`、`reset` 结束时执行的 PRACTICE 脚本，参数是 `"<elf>" "<extra_elf>"… "<args>"…`；用来重新设置会被调试器复位清掉的感知（machine spaces、扩展）。为空表示不执行。`menu`：菜单文件（`*.men`），rvdbg 启动 PowerView 时和它的 Flash、Load 按钮一起装上。有这一节时，没写的键在装了的情况下默认用 `~/.config/rvdbg/awareness/rustvisor-setup.cmm` 或 `rustvisor.men`；把这一节注释掉就不用（`rvdbg init` 生成的文件里有说明） |
 | `[openocd]` | `executable`、`config`（板级脚本）、`search`、`commands`、`tcl_port`、`gdb_port`、`gdb_target`（GDB 调试的核）、`core`（查看类命令用的核，默认同 `gdb_target`）、`gdb`、`memory_ap`（读物理内存用）、`timeout`、`otp`（一次性写入区的地址范围） |
 
 环境变量可以临时覆盖 TRACE32 部分的设置，只对这一次运行有效。优先级：环境变量 > `rvdbg.toml` > 默认值。

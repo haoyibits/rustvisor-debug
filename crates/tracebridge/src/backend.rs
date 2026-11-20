@@ -22,9 +22,10 @@ pub const VERSION: &str = concat!(
     ")"
 );
 
+/// The process environment, as [`Project::from_document_with_env`] takes it.
+pub use crate::flash::config_dir;
 /// Target RAM through PowerView while the core runs (RTT, FDX).
 pub use crate::memory::RamMemory;
-/// The process environment, as [`Project::from_document_with_env`] takes it.
 pub use crate::pycompat::process_env;
 /// The RTT terminal loop, for any memory access that works while the core
 /// runs (another backend's).

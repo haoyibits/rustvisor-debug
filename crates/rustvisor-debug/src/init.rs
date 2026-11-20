@@ -134,6 +134,19 @@ pub fn render() -> String {
     text.push_str(&section(FLASH));
 
     text.push_str(
+        "\n# Hypervisor awareness (TRACE32): rvdbg runs script after flash, load and\n\
+         # reset with the images as arguments, and loads menu with its own toolbar\n\
+         # when it starts PowerView. Left out, they are the installed\n\
+         # ~/.config/rvdbg/awareness/rustvisor-setup.cmm and rustvisor.men\n\
+         # (lauterbach_edk: debug/install-awareness.sh); not installed, nothing\n\
+         # happens. Comment this section out to turn the awareness off.\n\
+         [trace32.awareness]\n\
+         args = []  # [\"SPLIT\"]: cluster 2 split (C2C1 a core of its own); default lockstep\n\
+         # script = \"~/.config/rvdbg/awareness/rustvisor-setup.cmm\"\n\
+         # menu = \"~/.config/rvdbg/awareness/rustvisor.men\"\n",
+    );
+
+    text.push_str(
         "\n# StellarLINK through OpenOCD: brew install haoyibits/tap/openocd-stellar, or\n\
          # curl -fsSL https://github.com/haoyibits/OpenOCD/releases/latest/download/install.sh | sh\n\
          [openocd]\n\
@@ -194,6 +207,10 @@ mod tests {
             assert_eq!(openocd.gdb_target.as_deref(), Some("sr6p6.k0c0.core"));
             assert_eq!(config.trace32["target"]["cpu"].as_str(), Some("SR6P6"));
             assert_eq!(config.trace32["clock"]["XOSC"].as_str(), Some("40MHz"));
+            assert_eq!(
+                config.trace32["awareness"]["args"].as_array().map(Vec::len),
+                Some(0)
+            );
         }
     }
 

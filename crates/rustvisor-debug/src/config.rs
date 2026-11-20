@@ -21,7 +21,9 @@
 //! cpu = "SR6P6"
 //! [trace32.flash]                      # trace32.toml's [flash]
 //! [trace32.rtos]                       # trace32.toml's [rtos]
-//! [trace32.awareness]                  # trace32.toml's [awareness]
+//! [trace32.awareness]                  # trace32.toml's [awareness]; a key left out takes
+//!                                      # ~/.config/rvdbg/awareness/rustvisor-setup.cmm or
+//!                                      # rustvisor.men when installed; no section, no awareness
 //! script = "debug/rustvisor-setup.cmm" # after flash, load and reset: DO it "<elf>" "<extra_elf>"... "<args>"...
 //! args = []
 //! menu = "src/rustvisor.men"           # MENU.ReProgram with rvdbg's toolbar when it starts PowerView
@@ -122,6 +124,26 @@ impl Config {
         Ok(self)
     }
 
+    /// With a `[trace32.awareness]` section, the keys it leaves out take
+    /// the installed awareness from `directory` (`~/.config/rvdbg/awareness`)
+    /// when its file is there. A key that is set, even to "", stays. Without
+    /// the section (commented out) there is no awareness.
+    pub fn with_default_awareness(mut self, directory: &Path) -> Config {
+        let Some(Value::Table(awareness)) = self.trace32.get_mut("awareness") else {
+            return self;
+        };
+        for (key, file) in AWARENESS_DEFAULTS {
+            let path = directory.join(file);
+            if !awareness.contains_key(key) && path.is_file() {
+                awareness.insert(
+                    key.into(),
+                    Value::String(path.to_string_lossy().into_owned()),
+                );
+            }
+        }
+        self
+    }
+
     /// The tracebridge project of the TRACE32 tables.
     pub fn trace32_project(&self) -> Result<tracebridge::backend::Project, String> {
         tracebridge::backend::Project::from_document(&self.trace32, &self.file)
@@ -187,10 +209,20 @@ pub fn load(path: &Path) -> Result<Config, String> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
+    let env = tracebridge::backend::process_env();
     parse(&text, path, &root)
-        .and_then(|config| config.with_environment(&tracebridge::backend::process_env()))
+        .map(|config| {
+            config.with_default_awareness(&tracebridge::backend::config_dir(&env).join("awareness"))
+        })
+        .and_then(|config| config.with_environment(&env))
         .map_err(|error| format!("{}: {error}", path.display()))
 }
+
+/// The rustvisor awareness that `install-awareness.sh` of the TRACE32
+/// extension (lauterbach_edk) puts into `~/.config/rvdbg/awareness`:
+/// `[trace32.awareness]` key and file name.
+pub const AWARENESS_DEFAULTS: [(&str, &str); 2] =
+    [("script", "rustvisor-setup.cmm"), ("menu", "rustvisor.men")];
 
 /// The variables that choose other images: `rustvisor images --env` sets them.
 const IMAGE_VARIABLES: [&str; 3] = ["ELF", "EXTRA_ELF", "PROJECT_ROOT"];
@@ -626,6 +658,40 @@ mod tests {
         .parse()
         .unwrap();
         assert_eq!(config.trace32, expected);
+    }
+
+    #[test]
+    fn installed_awareness_fills_the_keys_rvdbg_toml_leaves_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = |file: &str| dir.path().join(file).to_string_lossy().into_owned();
+        let awareness = |config: &Config| config.trace32.get("awareness").cloned();
+        let minimal = "[project]\nelf = \"a.elf\"\n";
+        let section = format!("{minimal}[trace32.awareness]\n");
+        // Nothing installed: the section stays empty, no awareness.
+        let config = parse_text(&section)
+            .unwrap()
+            .with_default_awareness(dir.path());
+        assert_eq!(awareness(&config), Some(Value::Table(Table::new())));
+        std::fs::write(dir.path().join("rustvisor-setup.cmm"), "").unwrap();
+        std::fs::write(dir.path().join("rustvisor.men"), "").unwrap();
+        // Installed, but no section (commented out): no awareness.
+        let config = parse_text(minimal)
+            .unwrap()
+            .with_default_awareness(dir.path());
+        assert_eq!(awareness(&config), None);
+        let config = parse_text(&section)
+            .unwrap()
+            .with_default_awareness(dir.path());
+        let expected: Table = toml::toml! { script = (installed("rustvisor-setup.cmm")) menu = (installed("rustvisor.men")) };
+        assert_eq!(awareness(&config), Some(Value::Table(expected)));
+        // Set keys win; "" turns the default off.
+        let config = parse_text(&format!(
+            "{minimal}[trace32.awareness]\nscript = \"own.cmm\"\nmenu = \"\"\nargs = [\"SPLIT\"]\n"
+        ))
+        .unwrap()
+        .with_default_awareness(dir.path());
+        let expected: Table = toml::toml! { script = "own.cmm" menu = "" args = ["SPLIT"] };
+        assert_eq!(awareness(&config), Some(Value::Table(expected)));
     }
 
     #[test]

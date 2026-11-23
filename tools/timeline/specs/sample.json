@@ -1,0 +1,119 @@
+{
+  "title": "VM State Timeline",
+  "lede": "What the page shows once guests and EL2 record the whole IPC notify path planned in the SDK (docs/26-el2-notify-plan.md). Rows by exception level: EL1 (code, ISR, IPC write, IPC read: the receiving ISR) on top, EL2 below (labelled by what it does, coloured by how it was entered). A message's link runs from the carrier tick to the receiver's EL2 entry; a timer's deadline is a ▼ on the EL2 row.",
+  "meta": [
+    {
+      "label": "Sample data",
+      "warn": true,
+      "text": "generated; EL2 dwell and ping latency follow the 2026-11-23 board runs, pending times (timer, carriers) are assumed, and the notify path is not implemented yet"
+    }
+  ],
+  "runs": [
+    {
+      "key": "sample",
+      "name": "Synthetic run",
+      "synthetic": {
+        "seed": 20261123,
+        "span_us": 300
+      },
+      "note": "VM1 pings VM2 (same cluster, carrier SGI 14) and VM3 (other cluster, carrier IBCM); VM4 takes CAN interrupts and forwards every second frame to VM3; one timer tick per VM. Once, VM3 is in EL2 for its timer when a notice arrives.",
+      "select": [
+        "VM1",
+        "VM2",
+        "VM3"
+      ],
+      "window": [
+        0,
+        160000
+      ],
+      "presets": [
+        {
+          "label": "IPC three-way",
+          "units": [
+            "VM1",
+            "VM2",
+            "VM3"
+          ]
+        },
+        {
+          "label": "CAN forwarding",
+          "units": [
+            "VM3",
+            "VM4"
+          ]
+        },
+        {
+          "label": "All",
+          "units": [
+            "VM1",
+            "VM2",
+            "VM3",
+            "VM4",
+            "VM5"
+          ]
+        }
+      ]
+    }
+  ],
+  "coverage": {
+    "title": "What real records this needs",
+    "head": [
+      "Shown",
+      "Records needed",
+      "Now"
+    ],
+    "rows": [
+      [
+        "EL1 / EL2 rows, entry reason and dwell",
+        "EL2_ENTRY / EL2_EXIT per core, EXIT with the reason",
+        {
+          "text": "recorded",
+          "ok": true
+        }
+      ],
+      [
+        "IPC links and send → receive latency",
+        "IPC_SEND / IPC_RECV, paired by direction and sequence, on the same counter as EL2",
+        {
+          "text": "recorded; one time axis checked on the board",
+          "ok": true
+        }
+      ],
+      [
+        "The notify path: notify send, notice → inject, IPC read",
+        "SDK docs/26-el2-notify-plan.md; block names from the hypercall number EL2_EXIT already holds",
+        {
+          "text": "planned, not implemented; the board pings poll",
+          "ok": false
+        }
+      ],
+      [
+        "Carrier tick; the link from it to the receiver's EL2 entry",
+        "when the sender's EL2 writes the carrier (the receiver's EL2_ENTRY is recorded)",
+        {
+          "text": "not recorded",
+          "ok": false
+        }
+      ],
+      [
+        "Timer ▼ and its line to the EL2 entry",
+        "the timer's deadline (CVAL) with the IRQ's EL2 records",
+        {
+          "text": "not recorded",
+          "ok": false
+        }
+      ],
+      [
+        "EL1 blocks: ISR, IPC write, IPC read",
+        "starts and IPC write's end come from records above (EL2_EXIT of the inject, IPC_SEND); missing: the end of each ISR and the start of IPC write",
+        {
+          "text": "not recorded",
+          "ok": false
+        }
+      ]
+    ]
+  },
+  "footnote": "Synthetic data from timeline.py (seed 20261123), drawn by the same template as the board runs.",
+  "resolution_ns": 50,
+  "boundary": "Block edges are where the records were taken, a little inside the real transitions. An EL2 block starts after the exception entry and the entry stub (which saves the guest's registers) and ends before the EL2_EXIT record is written, the exit stub runs and eret returns; those parts are drawn as EL1 and not measured separately. Writing one record in EL2 takes about 0.3–0.4 µs (ETR, 2026-11-23), so this is not negligible. The counter moves in 50 ns steps."
+}

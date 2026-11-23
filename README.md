@@ -132,7 +132,7 @@ Day to day:
 | `clock` | the clock tree with frequencies | also `--html` | yes |
 | `rtt` | SEGGER RTT terminal on channel 0 | yes | through the MEM-AP while the core runs |
 | `fdx` | the image's FDX link: one line per packet, `--send`/`--expect`, or `--close` | through `AD:` while the cores run | through the MEM-AP while the core runs |
-| `swtrace` | software trace records (`RUSTVISOR_TRACE`): drain, pair IPC sends with receives, latency per direction, `--csv` | through `AD:` while the cores run | through the MEM-AP while the core runs |
+| `swtrace` | software trace records (`RUSTVISOR_TRACE`): drain, pair IPC sends with receives, latency per direction, `--csv`, `--html` timeline; `--from` a CSV without a probe | through `AD:` while the cores run | through the MEM-AP while the core runs |
 | `reset` | reset and halt at the reset vector | yes | `reset halt` |
 | `attach` | connect without resetting | `SYStem.Mode Attach` | yes |
 | `run-until <symbol\|addr>` | run a halted core to a symbol or address | on-chip breakpoint | hardware breakpoint |
@@ -210,6 +210,7 @@ the SR6P6 defaults.
 | `[clock]` | frequencies only the board knows, for `clock` and check files: `XOSC = "40MHz"` |
 | `[rtt]` | `symbol`, `control_block_address`, `poll_interval` |
 | `[fdx]` | `symbol`: the images' FDX link (default `RUSTVISOR_FDX`) |
+| `[swtrace]` | `map`: which VM each trace channel is, for `swtrace --html` (`{ C0C0 = "VM1", guest0 = "VM1:C0C0" }`) |
 | `[trace32]` | `sys`, `host`, `executable`, `binary`, `config`, `debug_adapter`, `rcl_port`, `dap_port`, `dap_backend_port`, `dap_backend_timeout`, `operation_timeout` |
 | `[trace32.target]` | `cpu`, `cores`, `mem_access`, `jtag_clock`, `dual_port` |
 | `[trace32.flash]` | `chip` or `script` (see below), `args` |
@@ -456,8 +457,8 @@ the board runner or PowerView's own `FDX.*` windows.
 
 ### Software trace
 
-rustvisor-sdk's `rustvisor-trace` writes 16-byte records (its
-`trace/FORMAT.md`) into one FDX channel per writer: `RUSTVISOR_TRACE` in a
+rustvisor-sdk's `rustvisor-swtrace` writes 16-byte records (its
+`debug/swtrace/FORMAT.md`) into one FDX channel per writer: `RUSTVISOR_TRACE` in a
 Guest, `RUSTVISOR_TRACE_<suffix>` for further ones (one per core). `rvdbg
 swtrace` drains every such channel of the ELF and the extra images (or only
 `--guest n`, repeatable), counts the records and the losses (`DROPPED`
@@ -471,9 +472,26 @@ a second `swtrace` shows only what came since. A closed channel reads as
 "not traced". Times are on one axis only when every core's CNTVOFF is the
 same (0 on SR6P6).
 
+`--html FILE` also draws the records as a VM state timeline: a
+self-contained page (no network) with one panel per VM, EL1 and EL2 as rows
+(EL2 blocks by how EL2 was entered, from the `EL2_ENTRY`/`EL2_EXIT` pairs),
+the IPC messages linked from sender to receiver, and per-panel statistics;
+click a block or a link for its details. Times are nanoseconds from the
+first record (the frequency comes from `START`, which only a channel's first
+read has). The records say neither which VM a core runs nor which core an
+image is on: `[swtrace] map` in rvdbg.toml (or `--map KEY=VM[:CORE]`,
+repeatable, on top) does, `C0C0 = "VM1"` for the EL2 channel
+`RUSTVISOR_TRACE_C0C0` and `guest0 = "VM1:C0C0"` for an image's channel;
+without it each channel is a panel of its own. `--from FILE` reads the
+records from a file `--csv` wrote instead of the board, so an earlier run can
+be drawn again without a probe (rvdbg.toml only for the map). The page's data
+format, `rustvisor-timeline/3`, is in [docs/timeline-format.md](docs/timeline-format.md).
+
 ```sh
 rvdbg swtrace --json
 rvdbg swtrace --guest 0 --guest 1 --csv trace.csv
+rvdbg swtrace --csv run.csv --html run.html
+rvdbg swtrace --from run.csv --html run.html --map C0C0=VM1 --map guest0=VM1:C0C0
 ```
 
 ## Inspecting the target

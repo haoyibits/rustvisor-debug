@@ -1,0 +1,898 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VM State Timeline</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Roboto+Mono:wght@500;700&display=swap">
+<style>
+/* Template: timeline.py fills #timeline-data; without it the page fetches ?data=FILE (default timeline.json).
+   Rows by exception level: EL1 (what the guest runs: code, ISR, IPC write/read) on top, EL2 (by exit reason) below,
+   Pending (interrupt raised, EL2 not yet entered) under it when recorded. Style follows haoyichen.com: cream page, navy
+   outlines; orange for ISR and selection only; ochre only for small labels. */
+:root {
+  --bg: #F5F1E9; --surface: #FFFFFF; --ink: #012247; --muted: #5C6673; --label: #8F6114; --line: #D5CEC0; --track: #F5F1E9; --edge: #012247;
+  --sel: #D8471E; --step: #012247;
+  --el1: #2E7A5C; --el2: #012247; --el2-hvc: #4A7AB0; --isr: #D8471E; --ipc: #14707F; --hw: #7C8FA6;
+  --shadow: rgba(1, 34, 71, .18);
+  --font-body: "Plus Jakarta Sans", "PingFang SC", system-ui, sans-serif;
+  --font-mono: "Roboto Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0B1A2E; --surface: #11233A; --ink: #F5F1E9; --muted: #A3ABB5; --label: #D9AE62; --line: #2B3D55; --track: #182C45; --edge: #5A7192;
+    --sel: #F08A5D; --step: #F5F1E9;
+    --el1: #3F9A76; --el2: #5A86C4; --el2-hvc: #A3C4EA; --isr: #E5683F; --ipc: #2A9BAD; --hw: #8FA3BA;
+    --shadow: rgba(0, 0, 0, .45);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0B1A2E; --surface: #11233A; --ink: #F5F1E9; --muted: #A3ABB5; --label: #D9AE62; --line: #2B3D55; --track: #182C45; --edge: #5A7192;
+  --sel: #F08A5D; --step: #F5F1E9;
+  --el1: #3F9A76; --el2: #5A86C4; --el2-hvc: #A3C4EA; --isr: #E5683F; --ipc: #2A9BAD; --hw: #8FA3BA;
+  --shadow: rgba(0, 0, 0, .45);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-body); font-size: 14px; font-weight: 500; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 32px 56px; }
+main { max-width: 1120px; margin: 0 auto; display: grid; gap: 20px; }
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.15; }
+h2 { font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: var(--label); }
+p { margin: 0; max-width: 76ch; }
+.lede { color: var(--muted); }
+.top { display: grid; gap: 8px; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); max-width: none; }
+.meta > span { display: inline-flex; align-items: center; gap: 7px; }
+.label { display: inline-block; white-space: nowrap; flex: none; border: 1.5px solid var(--label); border-radius: 6px; padding: 0 6px; color: var(--label);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; line-height: 1.6; }
+.label.warn { border-color: var(--sel); color: var(--sel); }
+.panel { background: var(--surface); border: 2px solid var(--edge); border-radius: 16px; padding: 16px 18px; display: grid; gap: 12px; min-width: 0; }
+/* controls: one row per group, labels in a fixed column */
+.ctl { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px 14px; align-items: center; }
+.crow { display: contents; }
+.cv { display: grid; gap: 4px; min-width: 0; }
+.group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.lbl { color: var(--label); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.runnote { font-size: 13px; color: var(--muted); }
+button { font: inherit; font-size: 13px; font-weight: 700; padding: 4px 12px; border-radius: 10px; border: 2px solid var(--edge); background: transparent; color: var(--ink); cursor: pointer; }
+button:hover { background: var(--bg); }
+button[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+button:focus-visible, .chip:focus-within { outline: 2px solid var(--sel); outline-offset: 2px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1.5px solid var(--line); border-radius: 8px; cursor: pointer; user-select: none; font-size: 13px; font-weight: 600; }
+.chip.mono { font-family: var(--font-mono); font-weight: 500; }
+.chip input { margin: 0; accent-color: var(--ink); }
+.chip:has(input:checked) { border-color: var(--edge); }
+.hint { color: var(--muted); font-size: 12px; }
+.chart { position: relative; min-width: 0; }
+.chart canvas { display: block; width: 100%; }
+#main { cursor: grab; }
+#main.dragging { cursor: grabbing; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; font-weight: 600; color: var(--muted); padding-top: 10px; border-top: 1px solid var(--line); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 11px; height: 11px; border-radius: 3px; display: inline-block; flex: none; }
+.sw.outline { background: var(--surface) !important; box-shadow: inset 0 0 0 1.6px var(--ipc); }
+.sw.thin { height: 5px; }
+.donut { display: grid; justify-items: center; gap: 4px; }
+.dcap { font-size: 12px; font-weight: 700; color: var(--ink); white-space: nowrap; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 12px; }
+.card { border: 1.5px solid var(--line); border-radius: 12px; padding: 12px 14px; display: grid; grid-template-columns: auto 1fr; gap: 10px 14px; align-items: center; min-width: 0; }
+.card h3 { grid-column: 1 / -1; font-size: 15px; font-weight: 800; display: flex; align-items: center; gap: 8px; }
+.card h3 small { font-family: var(--font-mono); font-size: 11px; font-weight: 500; color: var(--muted); border: 1.5px solid var(--line); border-radius: 7px; padding: 0 6px; }
+.card .rows { grid-column: 2; display: grid; gap: 3px; font-size: 12px; min-width: 0; }
+.card.wide .rows { grid-column: 1 / -1; }
+.rows div { display: grid; grid-template-columns: 12px 1fr auto; gap: 6px; align-items: baseline; }
+.rows .muted { color: var(--muted); grid-template-columns: 1fr; }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.empty { color: var(--muted); font-size: 13px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--label); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; border-bottom: 2px solid var(--line); }
+.tablewrap { overflow-x: auto; }
+.yes { color: var(--el1); font-weight: 700; }
+.no { color: var(--sel); font-weight: 700; }
+#tip { position: fixed; z-index: 20; pointer-events: none; background: var(--surface); color: var(--ink); border: 2px solid var(--edge);
+  border-radius: 10px; padding: 7px 10px; font-size: 12px; line-height: 1.5; max-width: 280px; }
+/* floating details */
+#pop { position: fixed; z-index: 30; width: min(360px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto;
+  background: var(--surface); color: var(--ink); border: 2px solid var(--edge); border-top: 5px solid var(--sel); border-radius: 14px;
+  box-shadow: 0 10px 28px var(--shadow); padding: 0 14px 14px; }
+.pophead { display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: move; padding: 8px 0 6px; user-select: none; touch-action: none;
+  position: sticky; top: 0; background: var(--surface); }
+.pophead button { border: none; padding: 0 6px; font-size: 20px; line-height: 1; font-weight: 600; }
+#details dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; font-size: 13px; }
+#details dt { color: var(--label); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; padding-top: 2px; }
+#details dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+#details h4 { margin: 10px 0 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--label); }
+.stages { display: grid; grid-template-columns: 12px auto 1fr auto; gap: 3px 8px; font-size: 12.5px; align-items: baseline; }
+.stages .where { font-family: var(--font-mono); color: var(--muted); font-size: 11.5px; }
+.total { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+.note { margin-top: 8px; line-height: 1.45; }
+details.note summary { cursor: pointer; color: var(--label); font-weight: 700; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; }
+details.note[open] summary { margin-bottom: 4px; }
+@media (max-width: 600px) {
+  .ctl { grid-template-columns: 1fr; gap: 4px; }
+  .crow > .lbl { margin-top: 6px; }
+  #pop { left: 8px !important; right: 8px; top: auto !important; bottom: 8px; width: auto; max-height: 55vh; }
+}
+</style>
+
+<main>
+  <header class="top">
+    <h1 id="title">VM State Timeline</h1>
+    <p class="lede" id="lede"></p>
+    <p class="meta" id="meta"></p>
+  </header>
+
+  <div class="panel">
+    <div class="ctl">
+      <div class="crow"><span class="lbl">Recording</span><div class="cv"><div class="group" id="runs" role="group" aria-label="Recording"></div><p class="runnote" id="runNote"></p></div></div>
+      <div class="crow"><span class="lbl">Panels</span><div class="group" role="group" aria-label="Panels">
+        <button type="button" id="modeVm" aria-pressed="true">By VM</button>
+        <button type="button" id="modeCore" aria-pressed="false">By core</button></div></div>
+      <div class="crow"><span class="lbl">Show</span><div class="group" id="units" role="group" aria-label="Show"></div></div>
+      <div class="crow" id="presetRow"><span class="lbl">Presets</span><div class="group" id="presets" role="group" aria-label="Presets"></div></div>
+      <div class="crow"><span class="lbl">Time</span><div class="group">
+        <button type="button" id="zoomIn">Zoom in</button>
+        <button type="button" id="zoomOut">Zoom out</button>
+        <button type="button" id="nextBurst">Next burst</button>
+        <button type="button" id="fitRun">Whole run</button></div></div>
+      <div class="crow" id="optRow"><span class="lbl">Options</span><div class="group">
+        <label class="chip" id="linksChip"><input type="checkbox" id="links" checked>IPC links</label>
+        <label class="chip" id="pendChip"><input type="checkbox" id="pendRow">Pending row</label></div></div>
+    </div>
+    <p class="hint">Drag to pan · ⌘/ctrl/alt + wheel or pinch to zoom · click a block for details</p>
+    <div class="chart" id="ovBox"><canvas id="ov" aria-label="Whole recording; drag to choose the window"></canvas></div>
+    <div class="chart" id="mainBox"><canvas id="main" role="img" aria-label="State timeline of the selected VMs"></canvas></div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="panel"><h2 id="sumTitle">In the window</h2><div class="cards" id="cards"></div></div>
+
+  <div class="panel" id="about" hidden>
+    <h2 id="covTitle"></h2>
+    <div class="tablewrap" id="covBox"></div>
+    <p class="hint" id="footnote"></p>
+  </div>
+</main>
+<div id="tip" hidden></div>
+<div id="pop" role="dialog" aria-label="Details" hidden>
+  <div class="pophead" id="popHead"><span class="lbl">Details</span><button type="button" id="popClose" aria-label="Close details">×</button></div>
+  <div id="details"></div>
+</div>
+
+<script id="timeline-data" type="application/json">null</script>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let C = {};
+function readColors() {
+  C = {}; for (const k of ["bg", "surface", "ink", "muted", "label", "line", "track", "sel", "step", "el1", "el2", "el2-hvc", "isr", "ipc", "hw", "font-mono", "font-body"]) C[k] = css("--" + k);
+}
+// text on a filled block: navy on light fills, white on dark ones
+function textOn(col) {
+  const m = /^#([0-9a-f]{6})$/i.exec(col); if (!m) return "#FFFFFF";
+  const n = parseInt(m[1], 16), L = (0.2126 * (n >> 16 & 255) + 0.7152 * (n >> 8 & 255) + 0.0722 * (n & 255)) / 255;
+  return L > 0.5 ? "#012247" : "#FFFFFF";
+}
+const DIRNAME = d => "0x" + d.toString(16).padStart(2, "0").toUpperCase();
+function fmt(ns) {
+  const a = Math.abs(ns);
+  if (a < 1e3) return ns.toFixed(0) + " ns";
+  if (a < 1e6) return (ns / 1e3).toFixed(2) + " µs";
+  if (a < 1e9) return (ns / 1e6).toFixed(3) + " ms";
+  return (ns / 1e9).toFixed(6) + " s";
+}
+function median(a) { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y); return s[Math.floor((s.length - 1) / 2)]; }
+const sum = a => a.reduce((s, x) => s + x, 0);
+
+// ---------------- data (format rustvisor-timeline/3, see README.md) ----------------
+const FORMAT = "rustvisor-timeline/3";
+const ROWNAME = { el1: "EL1", el2: "EL2", pend: "PENDING" };
+const VIA = { hvc: "HVC", IRQ: "IRQ", SGI: "SGI request", notice: "notice" };
+const VIA_LONG = { hvc: "HVC", IRQ: "IRQ (physical interrupt)", SGI: "SGI request (the guest wrote ICC_SGI1R, trapped)", notice: "notice (FIQ from another core's EL2)" };
+let DOC = null, RUNS = {};
+function prepare(doc) {
+  for (const r of doc.runs) {
+    RUNS[r.key] = r;
+    r.byVm = {};
+    const kinds = new Set(), reasons = new Set();
+    let hasPend = false;
+    r.units.forEach(u => {
+      r.byVm[u.vm] = u;
+      u.segs = u.segs.map((g, i) => {
+        const x = g[4] || {}, lv = g[2];
+        if (lv === "el2") reasons.add(g[3]); else kinds.add(lv === "unknown" ? "unknown" : g[3]);
+        const parts = (x.parts || []).map(p => { kinds.add(p[2]); return { s: p[0], e: p[1], kind: p[2] }; });
+        return { s: g[0], e: g[1], lv, kind: g[3] || "", vec: x.vec, detail: x.detail || "", name: x.name || "", op: x.op || "", sent: x.sent, parts, msg: x.msg, id: u.vm + ":" + i, u: u.vm, row: lv === "el2" ? "el2" : "el1" };
+      });
+      u.pend = (u.pending || []).map((h, i) => { hasPend = true; const x = h[3] || {}; return { s: h[0], e: h[1], lv: "pend", kind: h[2], msg: x.msg, id: u.vm + ":p" + i, u: u.vm, row: "pend" }; });
+      // the part of a pending interval this core spent in EL2 (interrupts masked): the carrier waited for its eret
+      for (const p of u.pend) p.waits = u.segs.filter(g => g.lv === "el2" && g.e > p.s && g.s < p.e).map(g => ({ s: Math.max(g.s, p.s), e: Math.min(g.e, p.e) }));
+      u.events = [];
+    });
+    r.kinds = kinds;
+    r.hasWait = r.units.some(u => u.pend.some(p => p.waits.length));
+    r.spans = kinds.has("ipc-write") || kinds.has("ipc-read");   // IPC code recorded as blocks
+    r.reasons = [...reasons].sort((a, b) => (a === "hvc") - (b === "hvc") || a.localeCompare(b));
+    r.hasPend = hasPend;
+    r.baseRows = ["el1"].concat(reasons.size ? ["el2"] : []);
+    r.rows = rowsFor(r);
+    r.msgs = r.msgs.map((m, i) => ({ id: i, dir: m[0], seq: m[1], from: m[2], to: m[3], s: m[4], r: m[5], lat: m[5] - m[4] }));
+    for (const m of r.msgs) {
+      if (r.byVm[m.from]) r.byVm[m.from].events.push({ t: m.s, kind: "send", peer: m.to, msg: m });
+      if (r.byVm[m.to]) r.byVm[m.to].events.push({ t: m.r, kind: "recv", peer: m.from, msg: m });
+    }
+    // a message's chain: every block and pending interval that carries its index, in time order
+    r.chain = {};
+    for (const u of r.units) {
+      u.events.sort((a, b) => a.t - b.t);
+      for (const g of u.segs.concat(u.pend)) if (g.msg !== undefined) (r.chain[g.msg] = r.chain[g.msg] || []).push(g);
+    }
+    for (const k in r.chain) r.chain[k].sort((a, b) => a.s - b.s);
+    // bursts: groups of activity other than plain EL1 code, separated by more than 5 ms
+    const ts = [];
+    for (const u of r.units) {
+      for (const g of u.segs) if (!(g.lv === "el1" && g.kind === "app") && g.lv !== "unknown") ts.push([g.s, g.e]);
+      for (const ev of u.events) ts.push([ev.t, ev.t]);
+    }
+    ts.sort((a, b) => a[0] - b[0]);
+    r.bursts = [];
+    for (const [s, e] of ts) {
+      const last = r.bursts[r.bursts.length - 1];
+      if (last && s - last.e < 5e6) { last.e = Math.max(last.e, e); last.n++; } else r.bursts.push({ s, e, n: 1 });
+    }
+    if (!r.bursts.length) r.bursts.push({ s: 0, e: r.span, n: 0 });
+  }
+}
+// the Pending row only on request: by default pending shows as the links' horizontal part and timer markers
+function rowsFor(r) { return r.baseRows.concat(S.showPend && r.hasPend ? ["pend"] : []); }
+function defaultWindow(r) {
+  if (r.window) return r.window;
+  if (r.msgs.length) {
+    const m = r.msgs.find(m => m.seq === 10) || r.msgs[0];
+    return [m.s - 5000, m.s + 160000];
+  }
+  const b = r.bursts.reduce((x, y) => (y.n > x.n ? y : x));
+  const pad = Math.max(2e5, (b.e - b.s) * 0.05);
+  return [b.s - pad, b.e + pad];
+}
+
+// ---------------- state ----------------
+const S = { run: null, mode: "vm", sel: null, a: 0, b: 1, links: true, showPend: false, pick: null };
+const run = () => RUNS[S.run];
+const byMode = (x, y) => (S.mode === "vm" ? x.vm.localeCompare(y.vm) : x.core.localeCompare(y.core));
+function ordered() { return run().units.filter(u => S.sel.has(u.vm)).sort(byMode); }
+
+// ---------------- items ----------------
+function itemColor(g) {
+  if (g.lv === "el2") return g.kind === "hvc" ? C["el2-hvc"] : C.el2;
+  if (g.lv === "pend") return C.hw;
+  if (g.kind === "isr") return C.isr;
+  if (g.kind.startsWith("ipc")) return C.ipc;
+  return C.el1;
+}
+const outlined = g => g.kind === "ipc-read";
+// EL2 blocks say what EL2 does; the colour says how it was entered
+const el2Label = g => g.op || { hvc: "hypercall", IRQ: "IRQ", SGI: "SGI request", notice: "notice" }[g.kind] || g.kind;
+function itemLabel(g) {
+  if (g.lv === "el2") return el2Label(g);
+  if (g.lv === "pend") return g.kind;
+  if (g.lv === "unknown") return "no records";
+  if (g.kind === "isr") return g.name || "ISR";
+  if (g.kind === "ipc-write") return "IPC write";
+  if (g.kind === "ipc-read") return "IPC read";
+  return S.mode === "core" ? g.u : "";
+}
+function itemName(g) {
+  if (g.lv === "el2") return `EL2 · ${el2Label(g)}`;
+  if (g.lv === "pend") return `Pending · ${g.kind}`;
+  if (g.lv === "unknown") return "No records";
+  if (g.kind === "isr") return `EL1 · ISR${g.name ? " " + g.name : ""}`;
+  if (g.kind === "ipc-write") return "EL1 · IPC write (shared memory)";
+  if (g.kind === "ipc-read") return "EL1 · IPC read (its ISR: IAR, read shared memory, EOI)";
+  return "EL1 · code";
+}
+function picked(g) {
+  if (!S.pick) return false;
+  if (S.pick.msg !== undefined) return g.msg === S.pick.msg;
+  return S.pick.item === g.id;
+}
+function findItem(id) { const r = run(), u = r.byVm[id.split(":")[0]]; return u.segs.concat(u.pend).find(g => g.id === id); }
+
+// ---------------- layout ----------------
+const LW = 74, RP = 12, HEAD = 24, RH = 28, RG = 5, PGAP = 16, TOP = 6, AX = 34;
+const PH = () => HEAD + run().rows.length * (RH + RG) + PGAP;
+let W = 800;
+const X = t => LW + (t - S.a) / (S.b - S.a) * (W - LW - RP);
+const Tm = x => S.a + (x - LW) / (W - LW - RP) * (S.b - S.a);
+const rowTop = (p, r) => TOP + p * PH() + HEAD + r * (RH + RG);
+function niceStep(raw) { const p = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / p; return (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * p; }
+function unitOf(step) { return step < 1e3 ? [1, "ns"] : step < 1e6 ? [1e3, "µs"] : step < 1e9 ? [1e6, "ms"] : [1e9, "s"]; }
+function sizeCanvas(cv, h) {
+  const dpr = window.devicePixelRatio || 1, w = Math.max(320, cv.parentElement.clientWidth);
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); cv.style.height = h + "px";
+  const ctx = cv.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); return [ctx, w];
+}
+let hatch = null, stripes = null;
+function makeStripes(ctx) {
+  const c = document.createElement("canvas"); c.width = c.height = 6;
+  const g = c.getContext("2d"); g.fillStyle = C.hw; g.fillRect(0, 0, 6, 6);
+  g.strokeStyle = C.surface; g.lineWidth = 1.5; g.beginPath(); g.moveTo(-1, 7); g.lineTo(7, -1); g.stroke();
+  return ctx.createPattern(c, "repeat");
+}
+function makeHatch(ctx) {
+  const c = document.createElement("canvas"); c.width = c.height = 6;
+  const g = c.getContext("2d"); g.fillStyle = C.track; g.fillRect(0, 0, 6, 6);
+  g.strokeStyle = C.line; g.beginPath(); g.moveTo(0, 6); g.lineTo(6, 0); g.stroke();
+  return ctx.createPattern(c, "repeat");
+}
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2); ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+// ---------------- main chart ----------------
+let layoutInfo = null;
+function drawItem(ctx, g, y, minW) {
+  const col = itemColor(g), hw = g.lv === "pend";
+  const x0 = Math.max(LW - 4, X(g.s)), x1 = Math.min(W + 4, X(g.e)), w = Math.max(minW, x1 - x0);
+  const yy = hw ? y + 8 : y + 3, h = hw ? RH - 16 : RH - 6;
+  roundRect(ctx, x0, yy, w, h, hw ? 2 : 3);
+  if (g.lv === "unknown") { ctx.fillStyle = hatch; ctx.fill(); }
+  else if (outlined(g)) { ctx.fillStyle = C.surface; ctx.fill(); ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.stroke(); }
+  else { ctx.fillStyle = col; ctx.fill(); }
+  if (picked(g)) { roundRect(ctx, x0 - 1, yy - 1, w + 2, h + 2, 3); ctx.strokeStyle = col === C.isr ? C.ink : C.sel; ctx.lineWidth = 2.5; ctx.stroke(); }
+  ctx.lineWidth = 1;
+  // spans inside the block (an IPC read inside its ISR): a thinner bar
+  for (const q of g.parts || []) {
+    const qa = Math.max(x0, X(q.s)), qb = Math.min(x1, X(q.e)); if (qb <= qa) continue;
+    roundRect(ctx, qa, y + 8, Math.max(2, qb - qa), RH - 16, 2);
+    ctx.fillStyle = C.surface; ctx.fill(); ctx.strokeStyle = C.ipc; ctx.lineWidth = 1.4; ctx.stroke(); ctx.lineWidth = 1;
+  }
+  // pending while this core was in EL2: striped
+  if (hw) for (const q of g.waits || []) {
+    const qa = Math.max(x0, X(q.s)), qb = Math.min(x1, X(q.e)); if (qb <= qa) continue;
+    ctx.fillStyle = stripes; ctx.fillRect(qa, yy, qb - qa, h);
+  }
+  // the moment EL2 wrote the carrier: a tick inside the block
+  if (g.sent !== undefined && g.sent > S.a && g.sent < S.b) {
+    const xs = Math.round(X(g.sent)) + .5;
+    ctx.strokeStyle = textOn(col); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(xs, yy + 2); ctx.lineTo(xs, yy + h - 2); ctx.stroke(); ctx.lineWidth = 1;
+  }
+  const lab = hw ? "" : itemLabel(g), pw = (g.parts || []).length ? Math.max(0, X(g.parts[0].s) - Math.max(x0, LW)) : Infinity;
+  if (lab) {
+    ctx.font = `11px ${C["font-mono"]}`;
+    if (w > ctx.measureText(lab).width + 12 && pw > ctx.measureText(lab).width + 8) {
+      ctx.fillStyle = g.lv === "unknown" ? C.muted : outlined(g) ? col : textOn(col); ctx.textAlign = "left";
+      ctx.fillText(lab, Math.max(x0, LW) + 6, y + RH / 2 + 4);
+    }
+  }
+}
+function renderMain() {
+  const list = ordered(), r = run();
+  const H = TOP + Math.max(1, list.length) * PH() + AX + 30;
+  const [ctx, w] = sizeCanvas($("#main"), H); W = w; hatch = makeHatch(ctx); stripes = makeStripes(ctx);
+  ctx.clearRect(0, 0, W, H);
+  ctx.font = `12px ${C["font-mono"]}`;
+  if (!list.length) { ctx.fillStyle = C.muted; ctx.textAlign = "center"; ctx.fillText("Pick a VM or core above", W / 2, 40); layoutInfo = { list }; return; }
+  // axis: offsets from a round base so labels stay short
+  const step = niceStep((S.b - S.a) / Math.max(2, (W - LW - RP) / 90));
+  const [u, un] = unitOf(step), dig = Math.max(0, -Math.floor(Math.log10(step / u) + 1e-9));
+  const baseUnit = u * 1000, base = u < 1e9 && S.a >= baseUnit ? Math.floor(S.a / baseUnit) * baseUnit : 0;
+  const axY = TOP + list.length * PH();
+  ctx.strokeStyle = C.line; ctx.fillStyle = C.muted; ctx.textAlign = "center"; ctx.lineWidth = 1;
+  for (let t = Math.ceil(S.a / step) * step; t <= S.b; t += step) {
+    const x = Math.round(X(t)) + .5;
+    ctx.beginPath(); ctx.moveTo(x, TOP); ctx.lineTo(x, axY + 4); ctx.stroke();
+    ctx.fillText((base ? "+" : "") + ((t - base) / u).toFixed(dig), x, axY + 18);
+  }
+  ctx.textAlign = "left"; ctx.fillStyle = C.ink;
+  ctx.font = `600 12px ${C["font-body"]}`; ctx.fillText(base ? `time: ${fmt(base)} + offset in ${un}` : `time in ${un}`, LW, axY + 34);
+  const rowIdx = {}; r.rows.forEach((x, i) => rowIdx[x] = i);
+  list.forEach((pu, p) => {
+    const y0 = TOP + p * PH();
+    ctx.textAlign = "left"; ctx.fillStyle = C.ink; ctx.font = `800 14px ${C["font-body"]}`;
+    const head = S.mode === "vm" ? pu.vm : pu.core;
+    ctx.fillText(head, 0, y0 + 15);
+    const hw = ctx.measureText(head).width;
+    ctx.font = `12px ${C["font-mono"]}`; ctx.fillStyle = C.muted;
+    ctx.fillText(S.mode === "vm" ? `vCPU0 · ${pu.core} · ${pu.ring}` : `runs ${pu.vm} · ${pu.ring}`, hw + 10, y0 + 15);
+    r.rows.forEach((row, i) => {
+      ctx.fillStyle = C.track; roundRect(ctx, LW, rowTop(p, i), W - LW - RP, RH, 4); ctx.fill();
+      ctx.fillStyle = C.label; ctx.textAlign = "right"; ctx.font = `700 11px ${C["font-body"]}`;
+      ctx.fillText(ROWNAME[row], LW - 8, rowTop(p, i) + RH / 2 + 4);
+    });
+  });
+  ctx.save(); ctx.beginPath(); ctx.rect(LW, 0, W - LW - RP, axY); ctx.clip();
+  list.forEach((pu, p) => {
+    const vis = pu.segs.filter(g => g.e > S.a && g.s < S.b);
+    // step line: the exception level, under the blocks (not drawn over spans without records)
+    ctx.beginPath();
+    let open = false;
+    for (const g of vis) {
+      if (g.lv === "unknown") { open = false; continue; }
+      const yy = rowTop(p, rowIdx[g.row]) + RH / 2, xa = X(Math.max(g.s, S.a)), xb = X(Math.min(g.e, S.b));
+      if (!open) { ctx.moveTo(xa, yy); open = true; } else ctx.lineTo(xa, yy);
+      ctx.lineTo(xb, yy);
+    }
+    ctx.lineJoin = "round"; ctx.strokeStyle = C.step; ctx.lineWidth = 1.5; ctx.stroke(); ctx.lineWidth = 1;
+    // EL1 blocks, then EL2 on top with a 2 px minimum so short entries stay visible, then Pending
+    for (const g of vis) if (g.row === "el1") drawItem(ctx, g, rowTop(p, rowIdx.el1), g.kind === "app" || g.lv === "unknown" ? 1 : 2);
+    for (const g of vis) if (g.row === "el2") drawItem(ctx, g, rowTop(p, rowIdx.el2), 2);
+    if (rowIdx.pend !== undefined) {
+      for (const g of pu.pend) if (g.e > S.a && g.s < S.b) drawItem(ctx, g, rowTop(p, rowIdx.pend), 2);
+    } else if (rowIdx.el2 !== undefined) for (const g of pu.pend) {
+      // without the Pending row: a timer's deadline as a marker along the top of the EL2 row, a line to the EL2 entry
+      if (g.msg !== undefined || g.e < S.a || g.s > S.b) continue;
+      const y = rowTop(p, rowIdx.el2) + 4, xa = X(g.s), xb = X(g.e), col = picked(g) ? C.sel : C.hw;
+      ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(xa, y); ctx.lineTo(xb, y); ctx.stroke(); ctx.lineWidth = 1;
+      ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(xa - 4.5, y - 3); ctx.lineTo(xa + 4.5, y - 3); ctx.lineTo(xa, y + 4); ctx.closePath(); ctx.fill();
+    }
+    // IPC records as markers on the EL1 row when IPC code is not recorded as blocks
+    if (!r.spans && pu.events.length) {
+      const y = rowTop(p, rowIdx.el1);
+      for (const ev of pu.events) {
+        if (ev.t < S.a || ev.t > S.b) continue;
+        const x = X(ev.t), col = S.pick && S.pick.msg === ev.msg.id ? C.sel : C.ipc;
+        ctx.beginPath();
+        if (ev.kind === "send") { ctx.moveTo(x - 1, y + 5); ctx.lineTo(x + 6, y + RH / 2); ctx.lineTo(x - 1, y + RH - 5); }
+        else { ctx.moveTo(x + 1, y + 5); ctx.lineTo(x - 6, y + RH / 2); ctx.lineTo(x + 1, y + RH - 5); }
+        ctx.closePath();
+        ctx.lineJoin = "round"; ctx.strokeStyle = C.surface; ctx.lineWidth = 3; ctx.stroke();
+        if (ev.kind === "send") { ctx.fillStyle = col; ctx.fill(); }
+        else { ctx.fillStyle = C.surface; ctx.fill(); ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.stroke(); }
+        ctx.lineWidth = 1;
+      }
+    }
+  });
+  // links between panels: the hops of each message from one core to the other
+  let hint = "";
+  if (S.links && r.msgs.length) {
+    const pIdx = {}; list.forEach((u2, p) => pIdx[u2.vm] = p);
+    const yOf = (vm, row) => rowTop(pIdx[vm], rowIdx[row]) + RH / 2;
+    const cand = r.msgs.filter(m => m.from in pIdx && m.to in pIdx && (r.chain[m.id]
+      ? r.chain[m.id][r.chain[m.id].length - 1].e >= S.a && r.chain[m.id][0].s <= S.b : m.r >= S.a && m.s <= S.b));
+    const draw = cand.length <= 300 ? cand : cand.filter(m => S.pick && S.pick.msg === m.id);
+    if (cand.length > 300) hint = `${cand.length} messages in view: zoom in to see the links`;
+    ctx.setLineDash([4, 3]);
+    for (const m of draw) {
+      const hit = S.pick && S.pick.msg === m.id;
+      ctx.strokeStyle = hit ? C.sel : C.ipc; ctx.globalAlpha = hit ? 1 : .7; ctx.lineWidth = hit ? 2.2 : 1.2;
+      ctx.beginPath();
+      const ch = r.chain[m.id];
+      const waits = [];
+      if (ch) {
+        const items = ch.filter(g => rowIdx[g.row] !== undefined);
+        for (let i = 1; i < items.length; i++) {
+          const a = items[i - 1], b = items[i];
+          if (a.u === b.u) continue;
+          if (a.sent !== undefined && rowIdx.pend === undefined) {
+            // carrier written (the tick) → across to the receiver's EL2 row → along its edge to the EL2 entry:
+            // the horizontal part is the pending time
+            // along the top of the receiver's EL2 row, where timer markers run too
+            const down = pIdx[a.u] < pIdx[b.u], yb = rowTop(pIdx[b.u], rowIdx[b.row]) + 4;
+            const ya = rowTop(pIdx[a.u], rowIdx[a.row]) + (down ? RH - 3 : 3);
+            const xs = X(a.sent), xe = X(b.s);
+            ctx.moveTo(xs, ya); ctx.lineTo(xs, yb); ctx.lineTo(xe, yb);
+            const pe = ch.find(g => g.lv === "pend" && g.u === b.u);
+            if (pe) for (const q of pe.waits) waits.push([X(q.s), X(q.e), yb]);
+          } else {
+            const ta = a.sent !== undefined ? a.sent : Math.min(Math.max(b.s, a.s), a.e);
+            ctx.moveTo(X(ta), yOf(a.u, a.row)); ctx.lineTo(X(b.s), yOf(b.u, b.row));
+          }
+        }
+      } else { ctx.moveTo(X(m.s), yOf(m.from, "el1")); ctx.lineTo(X(m.r), yOf(m.to, "el1")); }
+      ctx.stroke();
+      // where the receiver was in EL2 (interrupts masked) and the carrier waited: solid and thick
+      if (waits.length) {
+        ctx.save(); ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.lineCap = "round"; ctx.beginPath();
+        for (const [xa, xb, y] of waits) { ctx.moveTo(xa, y); ctx.lineTo(xb, y); }
+        const col = ctx.strokeStyle;
+        ctx.strokeStyle = C.surface; ctx.lineWidth = 5.5; ctx.stroke();   // a halo so it shows on dark blocks
+        ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.stroke(); ctx.restore();
+      }
+    }
+    ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.lineWidth = 1;
+    const hidden = new Set(); for (const m of r.msgs) for (const v of [m.from, m.to]) if (!(v in pIdx)) hidden.add(v);
+    if (!hint && hidden.size && Object.keys(pIdx).length) hint = `Peers not shown: ${[...hidden].sort().join(", ")} (no links to them)`;
+  }
+  ctx.restore();
+  if (hint) { ctx.fillStyle = C.muted; ctx.font = `12px ${C["font-body"]}`; ctx.textAlign = "left"; ctx.fillText(hint, LW, H - 4); }
+  layoutInfo = { list, rowIdx };
+}
+
+// ---------------- overview ----------------
+function renderOverview() {
+  const list = ordered(), r = run(), rh = 7, H = 18 + Math.max(1, list.length) * (rh + 2) + 6;
+  const [ctx, w] = sizeCanvas($("#ov"), H);
+  ctx.clearRect(0, 0, w, H);
+  const ox = t => LW + t / r.span * (w - LW - RP);
+  ctx.font = `700 11px ${C["font-body"]}`; ctx.fillStyle = C.label; ctx.textAlign = "left";
+  ctx.fillText("WHOLE RUN · " + fmt(r.span), 0, 11);
+  list.forEach((u, i) => {
+    const y = 18 + i * (rh + 2);
+    ctx.fillStyle = C.track; ctx.fillRect(LW, y, w - LW - RP, rh);
+    for (const g of u.segs) if (g.lv !== "unknown" && g.kind !== "app") { ctx.fillStyle = itemColor(g); ctx.fillRect(ox(g.s), y, Math.max(1.5, ox(g.e) - ox(g.s)), rh); }
+    if (!r.spans) {
+      ctx.fillStyle = C.ipc; ctx.globalAlpha = .25;
+      for (const ev of u.events) ctx.fillRect(ox(ev.t), y, 1, rh);
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = C.muted; ctx.textAlign = "right"; ctx.font = `11px ${C["font-mono"]}`; ctx.fillText(S.mode === "vm" ? u.vm : u.core, LW - 8, y + 7);
+  });
+  const a = ox(S.a), b = ox(S.b);
+  ctx.fillStyle = C.sel; ctx.globalAlpha = .12; ctx.fillRect(a, 15, Math.max(2, b - a), H - 18); ctx.globalAlpha = 1;
+  ctx.strokeStyle = C.sel; ctx.lineWidth = 1.2; ctx.strokeRect(a, 15, Math.max(2, b - a), H - 18); ctx.lineWidth = 1;
+  $("#ov").dataset.w = w;
+}
+
+// ---------------- per-panel summary ----------------
+function donut(parts, total, centre) {
+  const svgNS = "http://www.w3.org/2000/svg", svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("viewBox", "0 0 84 84"); svg.setAttribute("width", 84); svg.setAttribute("height", 84);
+  let a = 0;
+  const minF = 0.012; // keep a sliver visible for tiny shares
+  const fs = parts.map(p => Math.max(p.v / total, p.v > 0 ? minF : 0)), tot = sum(fs);
+  parts.forEach((p, i) => {
+    if (!fs[i]) return;
+    const f = fs[i] / tot, a1 = a + f * 2 * Math.PI - (f > .999 ? 1e-4 : 0);
+    const P = t => [42 + 33 * Math.sin(t), 42 - 33 * Math.cos(t)];
+    const [x0, y0] = P(a), [x1, y1] = P(a1);
+    const path = document.createElementNS(svgNS, "path");
+    path.setAttribute("d", `M${x0},${y0} A33,33 0 ${a1 - a > Math.PI ? 1 : 0} 1 ${x1},${y1}`);
+    path.setAttribute("fill", "none"); path.setAttribute("stroke", p.c); path.setAttribute("stroke-width", 12);
+    svg.appendChild(path); a = a1;
+  });
+  // the figure goes under the ring, not inside it
+  const box = document.createElement("div"); box.className = "donut";
+  const cap = document.createElement("div"); cap.className = "dcap num"; cap.textContent = centre;
+  box.append(svg, cap);
+  return box;
+}
+const pct = (v, of, d) => (of ? (100 * v / of).toFixed(d) + "%" : "–");
+const sw = (v, cls) => `<i class="sw${cls ? " " + cls : ""}" style="background:var(${v})"></i>`;
+const line = (swatch, text, num) => `<div>${swatch}<span>${text}</span><span class="num">${num}</span></div>`;
+const med = xs => (xs.length ? fmt(median(xs)) : "–");
+function renderCards() {
+  const r = run(), box = $("#cards"); box.innerHTML = "";
+  $("#sumTitle").innerHTML = `In the window <span class="num" style="text-transform:none;font-weight:500;color:var(--ink)">${fmt(S.b - S.a)}</span>`;
+  const hasEl2 = r.rows.includes("el2"), hasIsr = r.kinds.has("isr"), hasPend = r.hasPend;
+  const hasStates = hasEl2 || hasIsr || r.spans;
+  for (const u of ordered()) {
+    const card = document.createElement("div"); card.className = "card";
+    card.innerHTML = `<h3>${esc(S.mode === "vm" ? u.vm : u.core)} <small>${esc(S.mode === "vm" ? u.core : u.vm)}</small></h3>`;
+    const rows = document.createElement("div"); rows.className = "rows";
+    let html = "";
+    if (hasStates) {
+      let app = 0, none = 0; const isr = [], ipc = [], el2 = {};
+      for (const g of u.segs) {
+        const d = Math.max(0, Math.min(g.e, S.b) - Math.max(g.s, S.a)); if (!d) continue;
+        const x = { d, full: g.e - g.s };
+        if (g.lv === "unknown") none += d;
+        else if (g.lv === "el2") (el2[g.kind] = el2[g.kind] || []).push(x);
+        else if (g.kind === "isr") isr.push(x);
+        else if (g.kind.startsWith("ipc")) ipc.push(x);
+        else app += d;
+      }
+      const D = xs => sum(xs.map(x => x.d)), el2All = Object.values(el2).flat(), hvc = el2.hvc || [];
+      const rec = app + D(isr) + D(ipc) + D(el2All);
+      const share = rec ? 100 * D(el2All) / rec : 0;
+      card.appendChild(donut([{ v: app, c: C.el1 }, { v: D(isr), c: C.isr }, { v: D(ipc), c: C.ipc }, { v: D(el2All) - D(hvc), c: C.el2 }, { v: D(hvc), c: C["el2-hvc"] }],
+        rec || 1, hasEl2 ? `EL2 ${share && share < 1 ? share.toFixed(2) : share.toFixed(1)}%` : `EL1 code`));
+      html += line(sw("--el1"), "EL1 code", pct(app, rec, 2));
+      if (hasIsr) html += line(sw("--isr"), `EL1 ISR: ${isr.length}×, median ${med(isr.map(x => x.full))}`, pct(D(isr), rec, 3));
+      if (r.spans) html += line(sw("--ipc"), `EL1 IPC write / read: ${ipc.length}×`, pct(D(ipc), rec, 3));
+      for (const k of r.reasons) {
+        const xs = el2[k] || [];
+        html += line(sw(k === "hvc" ? "--el2-hvc" : "--el2"), `EL2 via ${esc(VIA[k] || k)}: ${xs.length}×, median ${med(xs.map(x => x.full))}`, pct(D(xs), rec, 3));
+      }
+      if (hasPend) {
+        const hs = u.pend.filter(h => h.e > S.a && h.s < S.b);
+        html += line(sw("--hw", "thin"), `Pending (raised → EL2): ${hs.length}×, median ${med(hs.map(h => h.e - h.s))}`, "");
+      }
+      if (none) html += `<div class="muted">${fmt(none)} of the window has no records (before this ring's START)</div>`;
+    } else card.classList.add("wide");
+    if (r.msgs.length) {
+      const peers = {};
+      for (const ev of u.events) {
+        if (ev.t < S.a || ev.t > S.b) continue;
+        const k = (ev.kind === "send" ? "→ " : "← ") + ev.peer;
+        (peers[k] = peers[k] || []).push(ev.msg.lat);
+      }
+      const keys = Object.keys(peers).sort((a, b) => a.slice(2).localeCompare(b.slice(2)) || a.localeCompare(b));
+      html += keys.length ? keys.map(k => line(sw("--ipc", k.startsWith("→") ? "" : "outline"), `${k.startsWith("→") ? "sent to" : "received from"} ${esc(k.slice(2))}: ${peers[k].length}`, "median " + med(peers[k]))).join("") +
+        `<div class="muted">Latency = sender's IPC_SEND to receiver's IPC_RECV.</div>`
+        : u.events.length ? `<div class="muted">No IPC records in the window.</div>` : `<div class="muted">No IPC records in this VM's ring.</div>`;
+    }
+    rows.innerHTML = html;
+    card.appendChild(rows); box.appendChild(card);
+  }
+  if (!box.children.length) box.innerHTML = `<p class="empty">No panel selected.</p>`;
+}
+
+// ---------------- floating details ----------------
+const pop = $("#pop");
+let popMoved = false;
+function renderDetails() {
+  const box = $("#details"), r = run();
+  if (!S.pick) { pop.hidden = true; popMoved = false; return; }
+  const where = v => r.byVm[v] ? `${esc(v)} (${esc(r.byVm[v].core)})` : esc(v);
+  let html = "";
+  if (S.pick.msg !== undefined) {
+    const m = r.msgs[S.pick.msg], ch = r.chain[m.id];
+    html = `<dl><dt>Message</dt><dd class="num">${DIRNAME(m.dir)} #${m.seq}</dd><dt>From → to</dt><dd>${where(m.from)} → ${where(m.to)}</dd></dl>`;
+    if (ch) {
+      const stage = (g, what, d) => `${swOf(g)}<span class="where">${esc(g.u)} ${g.row === "pend" ? "PEND" : ROWNAME[g.row]}</span><span>${what}</span><span class="num">${fmt(d)}</span>`;
+      html += `<h4>Path</h4><div class="stages">` + ch.map(g =>
+        g.sent !== undefined ? stage(g, `${esc(el2Label(g))}: entry → carrier written`, g.sent - g.s) + stage(g, "carrier written → exit", g.e - g.sent)
+        : g.lv === "pend" ? stage(g, `${esc(g.kind)} pending → EL2 entry`, g.e - g.s) +
+          (g.waits.length ? stage(g, "↳ of which this core was in EL2", sum(g.waits.map(q => q.e - q.s))) : "")
+        : stage(g, esc(itemName(g).replace(/^(EL1|EL2) · /, "")), g.e - g.s) +
+          (g.parts || []).map(q => stage({ ...g, kind: q.kind, lv: "el1" }, `↳ ${q.kind === "ipc-read" ? "IPC read (shared memory)" : esc(q.kind)}`, q.e - q.s)).join("")).join("") + `</div>`;
+    }
+    html += `<dl class="total"><dt>IPC_SEND</dt><dd class="num">${fmt(m.s)}</dd><dt>IPC_RECV</dt><dd class="num">${fmt(m.r)}</dd><dt>Send → receive</dt><dd class="num"><b>${fmt(m.lat)}</b></dd>` +
+      (ch ? `<dt>End to end</dt><dd class="num"><b>${fmt(ch[ch.length - 1].e - ch[0].s)}</b> <span class="hint">first block to last</span></dd>` : "") + `</dl>`;
+    if (ch && ch.some(g => g.lv === "el2")) html += boundaryNote();
+    const missing = [m.from, m.to].filter(v => r.byVm[v] && !S.sel.has(v));
+    if (missing.length) html += `<p style="margin-top:10px"><button type="button" id="addPeer">Show ${esc(missing.join(" and "))}</button></p>`;
+    box.innerHTML = html;
+    keepNote();
+    const b = $("#addPeer"); if (b) b.onclick = () => { missing.forEach(v => S.sel.add(v)); renderAll(); };
+  } else {
+    const g = findItem(S.pick.item), u = r.byVm[g.u];
+    html = `<dl><dt>Panel</dt><dd>${esc(u.vm)} · ${esc(u.core)}</dd><dt>State</dt><dd>${esc(itemName(g))}</dd>` +
+      (g.lv === "el2" ? `<dt>Entered via</dt><dd>${esc(VIA_LONG[g.kind] || g.kind)}${g.vec !== undefined ? `, vector <span class="num">${g.vec}</span>` : ""}${g.detail ? `, <span class="num">${esc(g.detail)}</span>` : ""}</dd>`
+        : g.vec !== undefined ? `<dt>Vector</dt><dd class="num">${g.vec}</dd>` : "") +
+      (g.sent !== undefined ? `<dt>Carrier written</dt><dd class="num">${fmt(g.sent)}, ${fmt(g.sent - g.s)} after entry</dd>` : "") +
+      `<dt>From</dt><dd class="num">${fmt(g.s)}</dd><dt>To</dt><dd class="num">${fmt(g.e)}</dd><dt>Duration</dt><dd class="num"><b>${fmt(g.e - g.s)}</b></dd></dl>`;
+    if (g.kind === "app" && g === u.segs[u.segs.length - 1] && g.e === r.span) html += `<p class="empty" style="margin-top:6px">Last span: ends at the last record of the run, not at a recorded exit.</p>`;
+    if (g.lv === "pend") {
+      const wt = sum((g.waits || []).map(q => q.e - q.s));
+      if (wt) html += `<p class="note"><b class="num">${fmt(wt)}</b> of it this core was in EL2 (interrupts masked), so the interrupt waited for that eret.</p>`;
+      html += `<p class="hint note">${g.kind === "timer" ? "From the timer's deadline (the counter reaching CVAL) to this core entering EL2." : `From the sender's EL2 writing the carrier (${esc(g.kind)}) to this core entering EL2: propagation plus any time this core could not take it. Includes this core's exception entry and entry stub.`}</p>`;
+    }
+    else if (g.lv === "el1" || g.lv === "el2") html += boundaryNote();
+    box.innerHTML = html;
+    keepNote();
+  }
+  pop.hidden = false;
+}
+const swOf = g => sw(g.lv === "pend" ? "--hw" : g.lv === "el2" ? (g.kind === "hvc" ? "--el2-hvc" : "--el2") : g.kind === "isr" ? "--isr" : g.kind === "app" ? "--el1" : "--ipc", outlined(g) ? "outline" : g.lv === "pend" ? "thin" : "");
+const BOUNDARY = () => DOC.boundary || `Block edges are where the records were taken, a little inside the real transitions: the exception entry and entry stub before an EL2 block, and the exit record, exit stub and eret after it, are drawn as EL1 and not measured separately${DOC.resolution_ns ? `. The counter moves in ${DOC.resolution_ns} ns steps` : ""}.`;
+let boundaryOpen = false;
+function keepNote() { const d = $("#bnote"); if (d) d.addEventListener("toggle", () => { boundaryOpen = d.open; }); }
+const boundaryNote = () => `<details class="note hint" id="bnote"${boundaryOpen ? " open" : ""}><summary>What the block edges leave out</summary>${esc(BOUNDARY())}</details>`;
+// screen box of what the pick highlights (the clicked block, or every block of the message in the shown panels)
+function pickRect() {
+  if (!layoutInfo || !layoutInfo.rowIdx) return null;
+  const r = run(), rc = $("#main").getBoundingClientRect(), { list, rowIdx } = layoutInfo, box = [Infinity, Infinity, -Infinity, -Infinity];
+  const add = (vm, row, s, e) => {
+    const p = list.findIndex(u => u.vm === vm); if (p < 0 || rowIdx[row] === undefined) return;
+    const y = rc.top + rowTop(p, rowIdx[row]);
+    box[0] = Math.min(box[0], rc.left + Math.max(LW, X(Math.max(s, S.a)))); box[2] = Math.max(box[2], rc.left + Math.min(W - RP, X(Math.min(e, S.b))));
+    box[1] = Math.min(box[1], y); box[3] = Math.max(box[3], y + RH);
+  };
+  if (S.pick.msg !== undefined) {
+    const m = r.msgs[S.pick.msg], ch = r.chain[m.id];
+    if (ch) ch.forEach(g => add(g.u, g.row, g.s, g.e)); else { add(m.from, "el1", m.s, m.s); add(m.to, "el1", m.r, m.r); }
+  } else { const g = findItem(S.pick.item); add(g.u, g.row, g.s, g.e); }
+  return box[0] === Infinity ? null : { l: box[0], t: box[1], r: box[2], b: box[3] };
+}
+// right of what is highlighted, else left, below, above; kept where the user dragged it
+function placePop(cx, cy) {
+  if (popMoved || matchMedia("(max-width: 600px)").matches) return;
+  const w = pop.offsetWidth, h = pop.offsetHeight, M = 8, G = 14;
+  const R = pickRect() || { l: cx, t: cy, r: cx, b: cy };
+  const fitsX = x => x >= M && x + w <= innerWidth - M, fitsY = y => y >= M && y + h <= innerHeight - M;
+  const clampX = x => Math.max(M, Math.min(innerWidth - w - M, x)), clampY = y => Math.max(M, Math.min(innerHeight - h - M, y));
+  const opts = [[R.r + G, clampY(R.t)], [R.l - G - w, clampY(R.t)], [clampX(cx - w / 2), R.b + G], [clampX(cx - w / 2), R.t - G - h]];
+  // nothing fits whole: the clamped place that covers the least of what is highlighted
+  const cover = ([x, y]) => Math.max(0, Math.min(x + w, R.r) - Math.max(x, R.l)) * Math.max(0, Math.min(y + h, R.b) - Math.max(y, R.t));
+  const fallback = () => opts.map(([x, y]) => [clampX(x), clampY(y)]).sort((a, b) => cover(a) - cover(b))[0];
+  const [left, top] = opts.find(([x, y]) => fitsX(x) && fitsY(y)) || fallback();
+  pop.style.left = left + "px"; pop.style.top = top + "px";
+}
+function closePop() { S.pick = null; renderDetails(); renderView(); }
+
+// ---------------- hit testing ----------------
+function hit(x, y) {
+  if (!layoutInfo || !layoutInfo.list.length || x < LW || x > W - RP) return null;
+  const p = Math.floor((y - TOP) / PH()); if (p < 0 || p >= layoutInfo.list.length) return null;
+  const u = layoutInfo.list[p], yy = y - TOP - p * PH() - HEAD, r = run();
+  const ri = Math.floor(yy / (RH + RG)); if (ri < 0 || ri >= r.rows.length || yy - ri * (RH + RG) > RH) return null;
+  const row = r.rows[ri], t = Tm(x), tol = 4 * (S.b - S.a) / (W - LW - RP), at = { p, ri };
+  if (row === "el1" && !r.spans) {
+    let best = null, bd = 7;
+    for (const ev of u.events) { if (ev.t < S.a - tol || ev.t > S.b + tol) continue; const d = Math.abs(X(ev.t) - x); if (d < bd) { bd = d; best = ev; } }
+    if (best) return { ev: best, ...at };
+  }
+  let cand = null;
+  for (const g of (row === "pend" ? u.pend : u.segs)) if (g.row === row && g.s - tol <= t && g.e + tol >= t && (!cand || g.e - g.s < cand.e - cand.s)) cand = g;
+  if (!cand && row === "el2" && r.rows.indexOf("pend") < 0)
+    cand = u.pend.find(g => g.msg === undefined && g.s - 2 * tol <= t && g.e >= t) || null;
+  return cand ? { item: cand, ...at } : null;
+}
+function tipHtml(h) {
+  if (h.ev) {
+    const m = h.ev.msg;
+    return `<b>${h.ev.kind === "send" ? "IPC_SEND to " : "IPC_RECV from "}${esc(h.ev.peer)}</b><br>${DIRNAME(m.dir)} #${m.seq} · latency <span class="num">${fmt(m.lat)}</span><br>at <span class="num">${fmt(h.ev.t)}</span>`;
+  }
+  const g = h.item, m = g.msg !== undefined ? run().msgs[g.msg] : null;
+  return `<b>${esc(itemName(g))}</b> on ${esc(g.u)}<br><span class="num">${fmt(g.e - g.s)}</span> from <span class="num">${fmt(g.s)}</span>${g.detail ? "<br>" + esc(g.detail) : ""}${m ? `<br>message ${esc(m.from)} → ${esc(m.to)}, latency <span class="num">${fmt(m.lat)}</span>` : ""}`;
+}
+
+// ---------------- interaction ----------------
+const tip = $("#tip");
+function showTip(ev, html) {
+  tip.innerHTML = html; tip.hidden = false;
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + w > innerWidth - 8) x = ev.clientX - w - 14;
+  if (y + h > innerHeight - 8) y = ev.clientY - h - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+function setView(a, b) {
+  const span = run().span, w = Math.min(span, Math.max(200, b - a));
+  let s = (a + b) / 2 - w / 2; s = Math.max(0, Math.min(span - w, s));
+  S.a = s; S.b = s + w; renderView();
+}
+let raf = 0;
+function renderView() { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; renderOverview(); renderMain(); renderCards(); }); }
+const sameSet = (a, b) => a.length === b.size && a.every(x => b.has(x));
+function renderChips() {
+  const r = run();
+  $("#units").innerHTML = [...r.units].sort(byMode).map(u =>
+    `<label class="chip mono"><input type="checkbox" data-u="${esc(u.vm)}" ${S.sel.has(u.vm) ? "checked" : ""}>${esc(S.mode === "vm" ? u.vm : u.core)}</label>`).join("");
+  const ps = r.presets || [];
+  $("#presetRow").hidden = !ps.length;
+  $("#presets").innerHTML = ps.map((p, i) => `<button type="button" data-preset="${i}" aria-pressed="${sameSet(p.units, S.sel)}">${esc(p.label)}</button>`).join("");
+  $("#runNote").textContent = `${r.name}${r.note ? ": " + r.note : ""} (${fmt(r.span)}).`;
+  $("#optRow").hidden = !r.msgs.length && !r.hasPend;
+  $("#linksChip").hidden = !r.msgs.length; $("#pendChip").hidden = !r.hasPend;
+  const other = r.reasons.filter(k => k !== "hvc");
+  const items = [[sw("--el1"), "EL1 code"]]
+    .concat(r.kinds.has("isr") ? [[sw("--isr"), "EL1 ISR"]] : [])
+    .concat(r.kinds.has("ipc-write") ? [[sw("--ipc"), "EL1 IPC write"]] : [])
+    .concat(r.kinds.has("ipc-read") ? [[sw("--ipc", "outline"), "EL1 IPC read"]] : [])
+    .concat(!r.spans && r.msgs.length ? [[sw("--ipc"), "IPC_SEND"], [sw("--ipc", "outline"), "IPC_RECV"]] : [])
+    .concat(other.length ? [[sw("--el2"), "EL2 entered via " + other.join(" / ")]] : [])
+    .concat(r.reasons.includes("hvc") ? [[sw("--el2-hvc"), "EL2 entered via HVC"]] : [])
+    .concat(r.units.some(u => u.segs.some(g => g.sent !== undefined)) ? [[`<i class="sw" style="background:linear-gradient(90deg,var(--el2-hvc) 0 4px,var(--surface) 4px 6px,var(--el2-hvc) 6px)"></i>`, "carrier written (tick)"]] : [])
+    .concat(r.rows.includes("pend") ? [[sw("--hw", "thin"), "Pending: raised → EL2 entry"]] : [])
+    .concat(r.rows.includes("pend") && r.hasWait ? [[`<i class="sw thin" style="background:repeating-linear-gradient(135deg,var(--hw) 0 3px,var(--surface) 3px 4.5px)"></i>`, "of which the core was in EL2"]] : [])
+    .concat(r.hasPend && !r.rows.includes("pend") && r.units.some(u => u.pend.some(g => g.msg === undefined)) ? [[`<b style="color:var(--hw);font-size:10px">▼</b>`, "timer deadline → EL2 entry"]] : [])
+    .concat(r.hasPend && !r.rows.includes("pend") && r.units.some(u => u.pend.some(g => g.msg !== undefined)) ? [[`<i class="sw" style="height:2px;background:repeating-linear-gradient(90deg,var(--ipc) 0 4px,transparent 4px 7px)"></i>`, "link: horizontal part = pending" + (r.hasWait ? ", solid where the receiver was in EL2" : "")]] : [])
+    .concat(r.kinds.has("unknown") ? [[`<i class="sw" style="background:repeating-linear-gradient(135deg,var(--track) 0 3px,var(--line) 3px 4px)"></i>`, "No records yet"]] : []);
+  $("#legend").innerHTML = items.map(([s, t]) => `<span>${s}${esc(t)}</span>`).join("") +
+    (r.rows.includes("el2") ? `<span><i class="sw" style="height:2px;background:var(--step)"></i>exception level</span>` : "");
+}
+function renderAll() { renderChips(); renderView(); renderDetails(); }
+function setRun(k) {
+  S.run = k; S.pick = null; S.sel = new Set(run().select || run().units.map(u => u.vm));
+  document.querySelectorAll("[data-run]").forEach(b => b.setAttribute("aria-pressed", b.dataset.run === k));
+  const [a, b] = defaultWindow(run()); S.a = Math.max(0, a); S.b = Math.min(run().span, b);
+  renderAll();
+}
+function renderPage() {
+  document.title = DOC.title || "VM State Timeline";
+  $("#title").textContent = DOC.title || "VM State Timeline";
+  $("#lede").textContent = DOC.lede || ""; $("#lede").hidden = !DOC.lede;
+  $("#meta").innerHTML = (DOC.meta || []).map(m => `<span><span class="label${m.warn ? " warn" : ""}">${esc(m.label)}</span>${esc(m.text)}</span>`).join("");
+  $("#runs").innerHTML = DOC.runs.map(r => `<button type="button" data-run="${esc(r.key)}" aria-pressed="false">${esc(r.name)}</button>`).join("");
+  $("#runs").hidden = DOC.runs.length < 2;
+  document.querySelectorAll("[data-run]").forEach(b => b.onclick = () => setRun(b.dataset.run));
+  const cov = DOC.coverage;
+  if (cov) {
+    $("#covTitle").textContent = cov.title || "What these records cover";
+    const cell = c => typeof c === "string" ? `<td>${esc(c)}</td>` :
+      `<td${c.ok === true ? ' class="yes"' : c.ok === false ? ' class="no"' : ""}${c.span ? ` colspan="${c.span}"` : ""}>${esc(c.text)}</td>`;
+    $("#covBox").innerHTML = `<table><thead><tr>${cov.head.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${cov.rows.map(row => `<tr>${row.map(cell).join("")}</tr>`).join("")}</tbody></table>`;
+  }
+  $("#covTitle").hidden = $("#covBox").hidden = !cov;
+  $("#footnote").textContent = DOC.footnote || ""; $("#footnote").hidden = !DOC.footnote;
+  $("#about").hidden = !cov && !DOC.footnote;
+}
+function setup() {
+  const main = $("#main");
+  let drag = null;
+  main.addEventListener("mousedown", ev => { drag = { x: ev.clientX, a: S.a, b: S.b, moved: false }; });
+  addEventListener("mousemove", ev => {
+    if (!DOC || pd) return;
+    if (drag) {
+      const dx = ev.clientX - drag.x;
+      if (Math.abs(dx) > 3) { drag.moved = true; main.classList.add("dragging"); tip.hidden = true; }
+      if (drag.moved) { const dt = dx / (W - LW - RP) * (drag.b - drag.a); setView(drag.a - dt, drag.b - dt); }
+      return;
+    }
+    if (ev.target !== main) { tip.hidden = true; return; }
+    const rc = main.getBoundingClientRect(), h = hit(ev.clientX - rc.left, ev.clientY - rc.top);
+    if (h) showTip(ev, tipHtml(h)); else tip.hidden = true;
+  });
+  addEventListener("mouseup", ev => {
+    if (!drag) return;
+    main.classList.remove("dragging");
+    if (!drag.moved && ev.target === main) {
+      const rc = main.getBoundingClientRect(), h = hit(ev.clientX - rc.left, ev.clientY - rc.top);
+      if (!h) closePop();
+      else {
+        S.pick = h.ev ? { msg: h.ev.msg.id } : h.item.msg !== undefined ? { msg: h.item.msg } : { item: h.item.id };
+        tip.hidden = true;
+        renderDetails(); renderView();
+        placePop(ev.clientX, ev.clientY);
+      }
+    }
+    drag = null;
+  });
+  main.addEventListener("wheel", ev => {
+    const zoom = ev.ctrlKey || ev.metaKey || ev.altKey, horiz = Math.abs(ev.deltaX) > Math.abs(ev.deltaY);
+    if (!zoom && !horiz) return;
+    ev.preventDefault();
+    if (!zoom) { const dt = ev.deltaX / (W - LW - RP) * (S.b - S.a); setView(S.a + dt, S.b + dt); return; }
+    const rc = main.getBoundingClientRect(), t = Tm(Math.max(LW, ev.clientX - rc.left)), k = Math.exp(ev.deltaY * (ev.ctrlKey ? 0.01 : 0.003));
+    setView(t - (t - S.a) * k, t + (S.b - t) * k);
+  }, { passive: false });
+  // details window: drag by its title bar, close with × or Esc
+  let pd = null;
+  const head = $("#popHead");
+  head.addEventListener("pointerdown", ev => {
+    if (ev.target.closest("button")) return;
+    const rc = pop.getBoundingClientRect(); pd = { dx: ev.clientX - rc.left, dy: ev.clientY - rc.top };
+    head.setPointerCapture(ev.pointerId); ev.preventDefault();
+  });
+  head.addEventListener("pointermove", ev => {
+    if (!pd) return;
+    const w = pop.offsetWidth, h = pop.offsetHeight;
+    pop.style.left = Math.max(0, Math.min(innerWidth - w, ev.clientX - pd.dx)) + "px";
+    pop.style.top = Math.max(0, Math.min(innerHeight - 40, ev.clientY - pd.dy)) + "px";
+    popMoved = true;
+  });
+  head.addEventListener("pointerup", () => { pd = null; });
+  $("#popClose").onclick = closePop;
+  addEventListener("keydown", ev => { if (ev.key === "Escape" && S.pick) closePop(); });
+  const ov = $("#ov"); let od = null;
+  const ovT = ev => { const rc = ov.getBoundingClientRect(), w = +ov.dataset.w; return Math.max(0, Math.min(run().span, (ev.clientX - rc.left - LW) / (w - LW - RP) * run().span)); };
+  ov.addEventListener("mousedown", ev => { od = { t: ovT(ev), x: ev.clientX }; ev.preventDefault(); });
+  addEventListener("mousemove", ev => { if (od && Math.abs(ev.clientX - od.x) > 3) { const t = ovT(ev); setView(Math.min(t, od.t), Math.max(t, od.t)); } });
+  addEventListener("mouseup", ev => { if (!od) return; if (Math.abs(ev.clientX - od.x) <= 3) { const w = S.b - S.a, t = ovT(ev); setView(t - w / 2, t + w / 2); } od = null; });
+  $("#units").addEventListener("change", ev => { const v = ev.target.dataset.u; ev.target.checked ? S.sel.add(v) : S.sel.delete(v); renderChips(); renderView(); renderDetails(); });
+  $("#presets").addEventListener("click", ev => { const i = ev.target.dataset.preset; if (i === undefined) return; S.sel = new Set(run().presets[i].units); renderAll(); });
+  const setMode = m => { S.mode = m; $("#modeVm").setAttribute("aria-pressed", m === "vm"); $("#modeCore").setAttribute("aria-pressed", m === "core"); renderAll(); };
+  $("#modeVm").onclick = () => setMode("vm"); $("#modeCore").onclick = () => setMode("core");
+  $("#zoomIn").onclick = () => { const c = (S.a + S.b) / 2, w = (S.b - S.a) / 4; setView(c - w, c + w); };
+  $("#zoomOut").onclick = () => { const c = (S.a + S.b) / 2, w = S.b - S.a; setView(c - w, c + w); };
+  $("#fitRun").onclick = () => setView(0, run().span);
+  $("#nextBurst").onclick = () => {
+    const bs = run().bursts, c = (S.a + S.b) / 2;
+    const b = bs.find(x => x.s > c) || bs[0];
+    const pad = Math.max(2e4, (b.e - b.s) * 0.05); setView(b.s - pad, b.e + pad);
+  };
+  $("#links").onchange = ev => { S.links = ev.target.checked; renderView(); };
+  $("#pendRow").onchange = ev => { S.showPend = ev.target.checked; for (const k in RUNS) RUNS[k].rows = rowsFor(RUNS[k]); renderAll(); };
+  let rt = 0; addEventListener("resize", () => { clearTimeout(rt); if (DOC) rt = setTimeout(renderView, 100); });
+  const re = () => { readColors(); if (DOC) renderAll(); };
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", re);
+  new MutationObserver(re).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+}
+function start(doc) {
+  if (!doc || doc.format !== FORMAT || !doc.runs || !doc.runs.length) throw new Error(`not a ${FORMAT} file with runs`);
+  DOC = doc; prepare(doc); renderPage(); setRun(doc.runs[0].key);
+}
+readColors();
+setup();
+if (document.fonts) document.fonts.ready.then(() => { if (DOC) renderAll(); });
+(() => {
+  const fail = (src, e) => { $("#cards").innerHTML = `<p class="empty">The data ${esc(src)} did not load (${esc(e.message)}).</p>`; };
+  const embedded = $("#timeline-data").textContent.trim();
+  if (embedded && embedded !== "null") { try { start(JSON.parse(embedded)); } catch (e) { fail("embedded in this page", e); } return; }
+  const src = new URLSearchParams(location.search).get("data") || "timeline.json";
+  $("#cards").innerHTML = `<p class="empty">Loading ${esc(src)}…</p>`;
+  fetch(src).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(start).catch(e => fail(src, e));
+})();
+</script>

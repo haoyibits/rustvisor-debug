@@ -6,7 +6,8 @@
 //! as an `rvdbg --json` pipe session.
 //! [`fdx`] is the FDX link of rustvisor's images, over any memory access.
 //! [`swtrace`] decodes and pairs the software trace records (rustvisor-sdk
-//! `trace/FORMAT.md`) that `rvdbg swtrace` reads.
+//! `debug/swtrace/FORMAT.md`) that `rvdbg swtrace` reads; [`timeline`] draws them
+//! as a VM state timeline page (`rvdbg swtrace --html`).
 //!
 //! ```no_run
 //! let config = rustvisor_debug::config::load("rvdbg.toml".as_ref())?;
@@ -18,3 +19,4 @@
 pub mod config;
 pub mod fdx;
 pub mod swtrace;
+pub mod timeline;

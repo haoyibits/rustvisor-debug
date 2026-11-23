@@ -257,7 +257,7 @@ enum Commands {
     },
     /// FDX link of an image while the core runs: each line typed is a packet to the target, each packet from it a line (Ctrl-C to stop)
     Fdx(FdxArgs),
-    /// Software trace records (rustvisor-trace) of the images while the cores run: drain each image's RUSTVISOR_TRACE channels, pair IPC sends with their receives, one-way latency per direction
+    /// Software trace records (rustvisor-swtrace) of the images while the cores run: drain each image's RUSTVISOR_TRACE channels, pair IPC sends with their receives, one-way latency per direction
     Swtrace(SwtraceArgs),
     /// Words of ordinary RAM in bulk while the cores run (TRACE32 AD:, the OpenOCD MEM-AP); never MMIO or coprocessor registers, use mem for those
     Ram {
@@ -311,8 +311,17 @@ struct SwtraceArgs {
     #[arg(long)]
     symbol: Option<String>,
     /// Also write every record, merged by time, to FILE as CSV
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", conflicts_with = "from")]
     csv: Option<PathBuf>,
+    /// Also draw the records as a VM state timeline page in FILE (self-contained HTML)
+    #[arg(long, value_name = "FILE")]
+    html: Option<PathBuf>,
+    /// Read the records from a CSV that --csv wrote instead of the board (no probe needed)
+    #[arg(long, value_name = "CSV", conflicts_with = "guest")]
+    from: Option<PathBuf>,
+    /// For --html: KEY=VM[:CORE], the VM a core's EL2 channel is (C0C0=VM1) and the VM and core of an image's channel (guest0=VM1:C0C0); repeatable, over swtrace.map
+    #[arg(long, value_name = "KEY=VM[:CORE]")]
+    map: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -371,6 +380,20 @@ fn run(cli: Cli) -> Result<u8, String> {
     }
     if let Commands::Skill { dir } = &command {
         return install_skill(dir.as_deref());
+    }
+    if let Commands::Swtrace(args) = &command
+        && args.from.is_some()
+    {
+        // From a file: no probe, and rvdbg.toml only for swtrace.map.
+        let config = match config::find(cli.config.as_deref(), &cwd) {
+            Ok(path) => Some(config::load(&path)?),
+            Err(_) if cli.config.is_none() => None,
+            Err(error) => return Err(error),
+        };
+        let Commands::Swtrace(args) = command else {
+            unreachable!()
+        };
+        return swtrace_from(config.as_ref(), cli.json, args);
     }
     let path = config::find(cli.config.as_deref(), &cwd)?;
     let config = config::load(&path)?;
@@ -939,6 +962,10 @@ fn swtrace(env: &mut Env, args: SwtraceArgs) -> Result<u8, String> {
     use rustvisor_debug::swtrace;
     let config = env.config;
     let json = env.json;
+    if args.from.is_some() {
+        return swtrace_from(Some(config), json, args);
+    }
+    let map = swtrace_map(Some(config), &args.map)?;
     let symbol = args.symbol.unwrap_or_else(|| swtrace::SYMBOL.to_string());
     let explicit = !args.guest.is_empty();
     let images: Vec<(String, PathBuf)> = if explicit {
@@ -1013,13 +1040,106 @@ fn swtrace(env: &mut Env, args: SwtraceArgs) -> Result<u8, String> {
             text.push_str(&format!("\nrecords written to {}", path.display()));
             json["csv"] = serde_json::Value::String(path.display().to_string());
         }
+        // The records are consumed: a page that cannot be drawn must not
+        // lose the report (or the CSV written above).
+        let mut code = 0;
+        if let Some(path) = &args.html {
+            let source = format!("{} channel(s) read from the board", found.len());
+            if let Err(error) = swtrace_html(
+                &found, &symbol, &map, path, "swtrace", &source, &mut text, &mut json,
+            ) {
+                text.push_str(&format!("\ntimeline not written: {error}"));
+                json["html_error"] = serde_json::Value::String(error);
+                code = 1;
+            }
+        }
+        Ok(inspect::Outcome { text, json, code })
+    });
+    inspect::emit("swtrace", json, result)
+}
+
+/// `rvdbg swtrace --from`: the report (and `--html`) of records a
+/// `--csv` file holds, without a probe.
+fn swtrace_from(
+    config: Option<&config::Config>,
+    json: bool,
+    args: SwtraceArgs,
+) -> Result<u8, String> {
+    use rustvisor_debug::swtrace;
+    let path = args.from.as_ref().expect("--from");
+    let symbol = args.symbol.unwrap_or_else(|| swtrace::SYMBOL.to_string());
+    let map = swtrace_map(config, &args.map)?;
+    let result = (|| {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        let found = swtrace::from_csv(&text, &symbol)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let (mut text, mut json) = swtrace::report(&found, &symbol);
+        text = format!(
+            "from {} (no channel addresses or FDX drop markers in a CSV)\n{text}",
+            path.display()
+        );
+        json["from"] = serde_json::Value::String(path.display().to_string());
+        if let Some(html) = &args.html {
+            let name = path
+                .file_stem()
+                .map_or("swtrace".into(), |stem| stem.to_string_lossy().into_owned());
+            let source = path
+                .file_name()
+                .map_or(String::new(), |name| name.to_string_lossy().into_owned());
+            swtrace_html(
+                &found, &symbol, &map, html, &name, &source, &mut text, &mut json,
+            )?;
+        }
         Ok(inspect::Outcome {
             text,
             json,
             code: 0,
         })
-    });
+    })();
     inspect::emit("swtrace", json, result)
+}
+
+/// `swtrace.map` with the `--map` items on top.
+fn swtrace_map(
+    config: Option<&config::Config>,
+    items: &[String],
+) -> Result<rustvisor_debug::timeline::Map, String> {
+    let extra = rustvisor_debug::timeline::Map::parse(items.iter().map(String::as_str))
+        .map_err(|error| format!("--map {error}"))?;
+    Ok(config
+        .map(|config| config.swtrace_map.clone())
+        .unwrap_or_default()
+        .merged(&extra))
+}
+
+/// Writes the timeline page of `found` to `path` and says so.
+#[allow(clippy::too_many_arguments)]
+fn swtrace_html(
+    found: &[rustvisor_debug::swtrace::Found],
+    symbol: &str,
+    map: &rustvisor_debug::timeline::Map,
+    path: &Path,
+    name: &str,
+    source: &str,
+    text: &mut String,
+    json: &mut serde_json::Value,
+) -> Result<(), String> {
+    use rustvisor_debug::timeline;
+    let texts = timeline::Texts {
+        name: name.to_string(),
+        source: source.to_string(),
+    };
+    let doc =
+        timeline::data(found, symbol, map, &texts).map_err(|error| format!("--html: {error}"))?;
+    std::fs::write(path, timeline::page(&doc))
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    text.push_str(&format!("\ntimeline written to {}", path.display()));
+    if map.is_empty() {
+        text.push_str(" (no swtrace.map: one panel per channel)");
+    }
+    json["html"] = serde_json::Value::String(path.display().to_string());
+    Ok(())
 }
 
 /// `rvdbg ram`: words of RAM in bulk while the cores run.

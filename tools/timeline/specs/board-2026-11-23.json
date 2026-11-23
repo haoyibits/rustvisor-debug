@@ -1,0 +1,128 @@
+{
+  "title": "VM State Timeline",
+  "lede": "One panel per VM (or core), rows by exception level: EL1 (the guest) on top, EL2 below; the step line follows the level. IPC records are marked on the EL1 row and linked across panels.",
+  "meta": [
+    {
+      "label": "Source",
+      "text": "rvdbg swtrace · FDX trace rings, ETM off"
+    },
+    {
+      "label": "Target",
+      "text": "SR6P6 board, 5 VMs · 2026-11-23"
+    }
+  ],
+  "runs": [
+    {
+      "key": "both",
+      "name": "EL2 + IPC run",
+      "csv": "../samples/el2-ping-traced.csv",
+      "note": "el2-trace hypervisor and ping-*-traced guests in one image: VM1 pings VM2 and VM3, 900 timed round trips each"
+    },
+    {
+      "key": "ipc",
+      "name": "IPC run",
+      "csv": "../samples/ping-traced-noetm.csv",
+      "note": "ping-*-traced: VM1 pings VM2 (same cluster) and VM3 (other cluster), 900 timed round trips each"
+    },
+    {
+      "key": "el2",
+      "name": "EL2 run",
+      "csv": "../samples/el2-timer-noetm.csv",
+      "note": "hypervisor with el2-trace, five guests running the timer scenario"
+    }
+  ],
+  "coverage": {
+    "title": "What these records cover",
+    "head": [
+      "Shown",
+      "From",
+      "EL2 + IPC run",
+      "IPC run",
+      "EL2 run"
+    ],
+    "rows": [
+      [
+        "EL1 / EL2 rows, EL2 by exit reason",
+        "EL2_ENTRY / EL2_EXIT per core (hypervisor feature el2-trace)",
+        {
+          "text": "recorded",
+          "ok": true
+        },
+        {
+          "text": "not in this image",
+          "ok": false
+        },
+        {
+          "text": "recorded",
+          "ok": true
+        }
+      ],
+      [
+        "IPC records with links and latency",
+        "IPC_SEND / IPC_RECV paired by direction and sequence",
+        {
+          "text": "recorded",
+          "ok": true
+        },
+        {
+          "text": "recorded",
+          "ok": true
+        },
+        {
+          "text": "no IPC",
+          "ok": false
+        }
+      ],
+      [
+        "EL1 and EL2 records on one time axis",
+        "the guests' virtual counter and EL2's physical counter",
+        {
+          "text": "consistent: each guest's last record is 2.0–2.15 µs before its core's final hvc, on all three cores",
+          "ok": true
+        },
+        {
+          "text": "one kind of ring only",
+          "span": 2
+        }
+      ],
+      [
+        "IPC notify path (HVC IPC_NOTIFY → notice → virtual interrupt)",
+        "SDK docs/26-el2-notify-plan.md",
+        {
+          "text": "planned, not implemented: these pings poll shared memory; no EL2 entry between the first and last hvc",
+          "ok": false,
+          "span": 3
+        }
+      ],
+      [
+        "ISR and IPC write/read as EL1 blocks",
+        "with the notify path, starts from EL2_EXIT of the inject and IPC write's end from IPC_SEND; missing: the end of each ISR and the start of IPC write",
+        {
+          "text": "not recorded; IPC has only the two points",
+          "ok": false,
+          "span": 3
+        }
+      ],
+      [
+        "Carrier tick and timer ▼ (raised → EL2 entry)",
+        "when the sender's EL2 writes the carrier; the timer's deadline (CVAL) with the IRQ's EL2 records",
+        {
+          "text": "not recorded",
+          "ok": false,
+          "span": 3
+        }
+      ],
+      [
+        "Cost of one record",
+        "PMU cycle counter around N records with ETM off; ETR with one core and an address filter, checked against an ETM-off run",
+        {
+          "text": "EL2: +1.0–1.3 µs per entry for two records (ETR); guest: not measured with ETM off",
+          "span": 3
+        }
+      ]
+    ]
+  },
+  "footnote": "VM/core mapping is the five-VM image's PLAN (VM k = guest k−1). Times are from each run's first record. Timestamps are Arm generic timer counts (EL2 reads the physical count, the guests the virtual count); the START record gives 1 GHz, so one count is 1 ns, and the recorded values move in steps of 50 ns.",
+  "resolution_ns": 50,
+  "boundary": "Block edges are where the records were taken, a little inside the real transitions. An EL2 block starts after the exception entry and the entry stub (which saves the guest's registers) and ends before the EL2_EXIT record is written, the exit stub runs and eret returns; those parts are drawn as EL1 and not measured separately. Writing one record in EL2 takes about 0.3–0.4 µs (ETR, 2026-11-23), so this is not negligible. The counter moves in 50 ns steps."
+}

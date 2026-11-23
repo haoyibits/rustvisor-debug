@@ -1,10 +1,10 @@
 //! Software trace of rustvisor images (`rvdbg swtrace`): the records that
-//! rustvisor-sdk's `rustvisor-trace` writes, one FDX channel per writer
+//! rustvisor-sdk's `rustvisor-swtrace` writes, one FDX channel per writer
 //! (the symbol `RUSTVISOR_TRACE` by default, a `t32_fdx::Outbox`), read
 //! through the debugger, merged by time, and guest-ipc sends paired with
 //! their receives.
 //!
-//! The record format is the sdk's `trace/FORMAT.md`, version 1: 16 bytes,
+//! The record format is the sdk's `debug/swtrace/FORMAT.md`, version 1: 16 bytes,
 //! little-endian, `time: u64, event: u16, source: u8, flags: u8, value:
 //! u32`. This module decodes it without linking the sdk (rvdbg links no
 //! crate of it); the tests pin the byte layout.
@@ -293,6 +293,96 @@ pub fn csv(records: &[(usize, Record)], names: &[String]) -> String {
     out
 }
 
+/// The records of a file [`csv`] wrote, one [`Found`] per image label in
+/// name order (`elf:<symbol>` is the ELF's channel `<symbol>`, a bare name
+/// an image's `main` channel). The file keeps neither the channels'
+/// addresses (0 here) nor the FDX drop markers (none).
+pub fn from_csv(text: &str, main: &str) -> Result<Vec<Found>, String> {
+    let mut lines = text.lines().enumerate();
+    match lines.next() {
+        Some((_, header)) if header.trim() == "time,image,source,event,flags,value" => {}
+        _ => {
+            return Err(
+                "not a CSV of rvdbg swtrace --csv (header time,image,source,event,flags,value)"
+                    .into(),
+            );
+        }
+    }
+    let mut by_label: BTreeMap<String, Vec<Record>> = BTreeMap::new();
+    for (index, line) in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let bad = |what: &str| format!("line {}: {what}: {line}", index + 1);
+        let fields: Vec<&str> = line.split(',').collect();
+        let [time, image, source, event, flags, value] = fields[..] else {
+            return Err(bad("expected 6 fields"));
+        };
+        let number = |text: &str| {
+            probecore::text::parse_int_auto(text)
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| bad(&format!("{text:?} is not a number")))
+        };
+        let record = Record {
+            time: number(time)?,
+            event: event_number(event).ok_or_else(|| bad("unknown event"))?,
+            source: source_number(source).ok_or_else(|| bad("unknown source"))?,
+            flags: u8::try_from(number(flags)?).map_err(|_| bad("flags above 0xFF"))?,
+            value: u32::try_from(number(value)?).map_err(|_| bad("value above 32 bits"))?,
+        };
+        by_label.entry(image.to_string()).or_default().push(record);
+    }
+    if by_label.is_empty() {
+        return Err("the CSV has no records".into());
+    }
+    Ok(by_label
+        .into_iter()
+        .map(|(label, records)| {
+            let (image, symbol) = match label.split_once(':') {
+                Some((image, symbol)) => (image.to_string(), symbol.to_string()),
+                None => (label, main.to_string()),
+            };
+            Found {
+                image,
+                symbol,
+                address: 0,
+                drained: Drained {
+                    open: true,
+                    records,
+                    ..Drained::default()
+                },
+            }
+        })
+        .collect())
+}
+
+/// The number of an event name [`Record::event_name`] gave.
+fn event_number(name: &str) -> Option<u16> {
+    Some(match name {
+        "START" => START,
+        "DROPPED" => DROPPED,
+        "IPC_SEND" => IPC_SEND,
+        "IPC_RECV" => IPC_RECV,
+        "IPC_FULL" => IPC_FULL,
+        "EL2_ENTRY" => EL2_ENTRY,
+        "EL2_EXIT" => EL2_EXIT,
+        other => u16::from_str_radix(other.strip_prefix("0x")?, 16).ok()?,
+    })
+}
+
+/// The byte of a source name [`Record::source_name`] gave.
+fn source_number(name: &str) -> Option<u8> {
+    let (el2, number) = match name.strip_prefix("el2.") {
+        Some(number) => (0x80, number),
+        None => (0, name.strip_prefix("vcpu")?),
+    };
+    number
+        .parse::<u8>()
+        .ok()
+        .filter(|n| *n < 0x80)
+        .map(|n| n | el2)
+}
+
 /// One channel as `rvdbg swtrace` found it.
 #[derive(Debug, Clone)]
 pub struct Found {
@@ -480,7 +570,7 @@ mod tests {
         }
     }
 
-    /// The bytes of FORMAT.md's layout, as rustvisor-trace's test writes
+    /// The bytes of FORMAT.md's layout, as rustvisor-swtrace's test writes
     /// them.
     #[test]
     fn decodes_the_format_byte_for_byte() {
@@ -569,6 +659,42 @@ mod tests {
             "time,image,source,event,flags,value\n\
              10,guest0,vcpu0,IPC_SEND,0x01,0\n\
              20,guest1,vcpu0,IPC_RECV,0x01,0\n"
+        );
+    }
+
+    #[test]
+    fn a_csv_reads_back_as_the_channels_it_came_from() {
+        let mut el2 = record(10, EL2_ENTRY, 0x14, 0);
+        el2.source = 0x81;
+        let records = vec![
+            (0, el2),
+            (1, record(20, IPC_RECV, 1, 3)),
+            (1, record(5, 0x8001, 0, 0xFFFF_FFFF)),
+        ];
+        let names = ["elf:RUSTVISOR_TRACE_C0C1".to_string(), "guest1".to_string()];
+        let found = from_csv(&csv(&records, &names), SYMBOL).unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(
+            (found[0].image.as_str(), found[0].symbol.as_str()),
+            ("elf", "RUSTVISOR_TRACE_C0C1")
+        );
+        assert_eq!(found[0].drained.records, [el2]);
+        assert_eq!(found[1].label(SYMBOL), "guest1");
+        assert_eq!(
+            found[1].drained.records,
+            [
+                record(5, 0x8001, 0, 0xFFFF_FFFF),
+                record(20, IPC_RECV, 1, 3)
+            ]
+        );
+        assert!(from_csv("a,b\n", SYMBOL).is_err());
+        assert!(
+            from_csv(
+                "time,image,source,event,flags,value\n1,g,vcpu0,NOPE,0x00,0\n",
+                SYMBOL
+            )
+            .unwrap_err()
+            .starts_with("line 2: unknown event")
         );
     }
 

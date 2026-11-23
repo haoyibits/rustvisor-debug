@@ -101,7 +101,7 @@ rvdbg vscode                 # 或：rvdbg rustrover（TRACE32）
 | `clock` | 带频率的时钟树 | 还有 `--html` | 支持 |
 | `rtt` | 通道 0 上的 SEGGER RTT 终端 | 支持 | 经 MEM-AP，核照常运行 |
 | `fdx` | 镜像的 FDX 链接：一行一个包，或用 `--send`/`--expect`、`--close` | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
-| `swtrace` | 软件 trace 记录（`RUSTVISOR_TRACE`）：读空、把 IPC 发送和接收配对、按方向统计延迟，可加 `--csv` | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
+| `swtrace` | 软件 trace 记录（`RUSTVISOR_TRACE`）：读空、把 IPC 发送和接收配对、按方向统计延迟，可加 `--csv`、`--html` 时间线；`--from` 读 CSV，不需要探头 | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
 | `reset` | 复位并停在复位向量 | 支持 | `reset halt` |
 | `attach` | 连上目标但不复位 | `SYStem.Mode Attach` | 支持 |
 | `run-until <符号\|地址>` | 让停着的核运行到某个符号或地址 | 片上断点 | 硬件断点 |
@@ -151,6 +151,7 @@ rvdbg [openocd halted]> quit
 | `[clock]` | 只有板子知道的频率，给 `clock` 和检查文件用：`XOSC = "40MHz"` |
 | `[rtt]` | `symbol`、`control_block_address`、`poll_interval` |
 | `[fdx]` | `symbol`：镜像里 FDX 链接的符号（默认 `RUSTVISOR_FDX`） |
+| `[swtrace]` | `map`：每个 trace 通道属于哪个 VM，供 `swtrace --html` 用（`{ C0C0 = "VM1", guest0 = "VM1:C0C0" }`） |
 | `[trace32]` | `sys`、`host`、`executable`、`binary`、`config`、`debug_adapter`、`rcl_port`、`dap_port`、`dap_backend_port`、`dap_backend_timeout`、`operation_timeout` |
 | `[trace32.target]` | `cpu`、`cores`、`mem_access`、`jtag_clock`、`dual_port` |
 | `[trace32.flash]` | `chip` 或 `script`（见下文）、`args` |
@@ -319,11 +320,15 @@ rvdbg fdx --send "boot single" --expect "ok boot" --json
 
 ### 软件 trace
 
-rustvisor-sdk 的 `rustvisor-trace` 把 16 字节的记录（格式见它的 `trace/FORMAT.md`）写进每个写入方自己的 FDX 通道：Guest 里是 `RUSTVISOR_TRACE`，其余的叫 `RUSTVISOR_TRACE_<后缀>`（每个核一个）。`rvdbg swtrace` 把 ELF 和额外镜像里所有这样的通道读空（或者只读 `--guest n`，可重复），统计记录数和丢失（`DROPPED` 记录、FDX 丢包标记），把每条 `IPC_SEND` 和另一个镜像里方向、序号相同的 `IPC_RECV` 配对，按方向打印单程延迟（条数、最小、中位数、p90、p99、最大、平均，单位 ns）；EL2 的通道（`EL2_ENTRY`/`EL2_EXIT` 记录）按进入的种类（hvc、irq、sgi、notice）给出每次在 EL2 停留的时间。`--csv 文件` 另外把所有记录按时间合并写出。读取会消耗记录：再运行一次 `swtrace` 只能看到之后新来的。关闭的通道显示为"未开 trace"。只有每个核的 CNTVOFF 相同时（SR6P6 上都是 0），各通道的时间才在同一条轴上。
+rustvisor-sdk 的 `rustvisor-swtrace` 把 16 字节的记录（格式见它的 `debug/swtrace/FORMAT.md`）写进每个写入方自己的 FDX 通道：Guest 里是 `RUSTVISOR_TRACE`，其余的叫 `RUSTVISOR_TRACE_<后缀>`（每个核一个）。`rvdbg swtrace` 把 ELF 和额外镜像里所有这样的通道读空（或者只读 `--guest n`，可重复），统计记录数和丢失（`DROPPED` 记录、FDX 丢包标记），把每条 `IPC_SEND` 和另一个镜像里方向、序号相同的 `IPC_RECV` 配对，按方向打印单程延迟（条数、最小、中位数、p90、p99、最大、平均，单位 ns）；EL2 的通道（`EL2_ENTRY`/`EL2_EXIT` 记录）按进入的种类（hvc、irq、sgi、notice）给出每次在 EL2 停留的时间。`--csv 文件` 另外把所有记录按时间合并写出。读取会消耗记录：再运行一次 `swtrace` 只能看到之后新来的。关闭的通道显示为"未开 trace"。只有每个核的 CNTVOFF 相同时（SR6P6 上都是 0），各通道的时间才在同一条轴上。
+
+`--html 文件` 另外把记录画成 VM 状态时间线：一个自包含的页面（不联网），每个 VM 一个面板，EL1 和 EL2 各一行（EL2 块来自 `EL2_ENTRY`/`EL2_EXIT` 配对，按进入 EL2 的方式区分），IPC 消息从发送方连到接收方，每个面板有统计；点击块或连线看详情。时间是从第一条记录起算的纳秒（频率来自 `START`，只有通道的第一次读取里有它）。记录里没有哪个核跑哪个 VM、哪个镜像在哪个核上：由 rvdbg.toml 的 `[swtrace] map`（或可重复的 `--map KEY=VM[:CORE]`，优先于配置）给出，`C0C0 = "VM1"` 对应 EL2 通道 `RUSTVISOR_TRACE_C0C0`，`guest0 = "VM1:C0C0"` 对应镜像的通道；没有它时每个通道各自一个面板。`--from 文件` 从 `--csv` 写出的文件读记录而不读板子，所以以前的运行不接探头也能再画（rvdbg.toml 只用来取 map）。页面的数据格式 `rustvisor-timeline/3` 见 [docs/timeline-format.md](docs/timeline-format.md)。
 
 ```sh
 rvdbg swtrace --json
 rvdbg swtrace --guest 0 --guest 1 --csv trace.csv
+rvdbg swtrace --csv run.csv --html run.html
+rvdbg swtrace --from run.csv --html run.html --map C0C0=VM1 --map guest0=VM1:C0C0
 ```
 
 ## 查看目标

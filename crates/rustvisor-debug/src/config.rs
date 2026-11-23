@@ -15,6 +15,9 @@
 //! [fdx]                                # the images' FDX link (rvdbg fdx)
 //! symbol = "RUSTVISOR_FDX"
 //!
+//! [swtrace]                            # rvdbg swtrace --html: which VM each trace channel is
+//! map = { C0C0 = "VM1", guest0 = "VM1:C0C0" }   # core's EL2 channel = VM; image = VM:core
+//!
 //! [trace32]                            # PowerView: the keys of trace32.toml's [trace32]
 //! rcl_port = 20000
 //! [trace32.target]                     # trace32.toml's [target]
@@ -103,6 +106,8 @@ pub struct Config {
     pub openocd: Option<OpenOcd>,
     /// `fdx.symbol`: the FDX link's symbol in the images.
     pub fdx_symbol: String,
+    /// `swtrace.map`: which VM (and core) each trace channel belongs to.
+    pub swtrace_map: crate::timeline::Map,
     /// The tables for tracebridge, in trace32.toml's shape.
     pub trace32: Table,
 }
@@ -458,11 +463,11 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
     for key in document.keys() {
         if !matches!(
             key.as_str(),
-            "project" | "clock" | "rtt" | "fdx" | "trace32" | "openocd"
+            "project" | "clock" | "rtt" | "fdx" | "swtrace" | "trace32" | "openocd"
         ) {
             return Err(format!(
-                "unknown section [{key}] (expected [project], [clock], [rtt], [fdx], [trace32], \
-                 [openocd])"
+                "unknown section [{key}] (expected [project], [clock], [rtt], [fdx], [swtrace], \
+                 [trace32], [openocd])"
             ));
         }
     }
@@ -512,6 +517,27 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
         None => None,
     }
     .unwrap_or_else(|| crate::fdx::SYMBOL.to_string());
+    let swtrace_map = match table(&document, "swtrace")? {
+        Some(swtrace) => {
+            check_keys(swtrace, "swtrace", &["map"])?;
+            match swtrace.get("map") {
+                None => crate::timeline::Map::default(),
+                Some(Value::Table(map)) => {
+                    let items = map
+                        .iter()
+                        .map(|(key, value)| match value {
+                            Value::String(text) => Ok(format!("{key}={text}")),
+                            _ => Err(format!("swtrace.map.{key} must be a string")),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    crate::timeline::Map::parse(items.iter().map(String::as_str))
+                        .map_err(|error| format!("swtrace.map: {error}"))?
+                }
+                Some(_) => return Err("swtrace.map must be a table".into()),
+            }
+        }
+        None => crate::timeline::Map::default(),
+    };
     let trace32 = trace32_document(&document, project, &program)?;
     Ok(Config {
         file: file.to_path_buf(),
@@ -522,6 +548,7 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
         extra_elf,
         openocd,
         fdx_symbol,
+        swtrace_map,
         trace32,
     })
 }
@@ -545,6 +572,8 @@ mod tests {
         symbol = "_SEGGER_RTT"
         [fdx]
         symbol = "APP_FDX"
+        [swtrace]
+        map = { C0C0 = "VM1", guest0 = "VM1:C0C0" }
         [trace32]
         rcl_port = 20001
         [trace32.target]
@@ -582,6 +611,7 @@ mod tests {
         );
         assert_eq!(config.run_dir(), PathBuf::from("/p/.rvdbg"));
         assert_eq!(config.fdx_symbol, "APP_FDX");
+        assert_eq!(config.swtrace_map.describe(), "C0C0=VM1, guest0=VM1:C0C0");
         let openocd = config.openocd.unwrap();
         assert_eq!(openocd.search, [PathBuf::from("/p/scripts")]);
         assert_eq!((openocd.tcl_port, openocd.gdb_port), (7777, 4444));
@@ -737,7 +767,7 @@ mod tests {
         let error = |text: &str| parse_text(text).unwrap_err();
         assert_eq!(
             error("[target]\n"),
-            "unknown section [target] (expected [project], [clock], [rtt], [fdx], [trace32], [openocd])"
+            "unknown section [target] (expected [project], [clock], [rtt], [fdx], [swtrace], [trace32], [openocd])"
         );
         assert_eq!(error("[openocd]\n"), "[project] is missing");
         assert_eq!(
@@ -787,6 +817,14 @@ mod tests {
             "unknown key fdx.link (expected symbol)"
         );
         assert_eq!(trace32("[fdx]\nsymbol = 1"), "fdx.symbol must be a string");
+        assert_eq!(
+            trace32("[swtrace]\nmap = { C0C0 = 1 }"),
+            "swtrace.map.C0C0 must be a string"
+        );
+        assert_eq!(
+            trace32("[swtrace]\nmap = []"),
+            "swtrace.map must be a table"
+        );
         assert!(
             error("[project]\nbackend = \"openocd\"\nelf = \"a\"\ntypo = 1")
                 .starts_with("unknown key project.typo")

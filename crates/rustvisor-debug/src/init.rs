@@ -122,6 +122,13 @@ pub fn render() -> String {
     text.push_str(&format!("symbol = \"{}\"\n", rustvisor_debug::fdx::SYMBOL));
 
     text.push_str(
+        "\n# Which VM each trace channel is, for 'rvdbg swtrace --html' (the records\n\
+         # do not say): a core's EL2 channel = VM, an image's channel = VM:core.\n\
+         # [swtrace]\n\
+         # map = { C0C0 = \"VM1\", guest0 = \"VM1:C0C0\" }\n",
+    );
+
+    text.push_str(
         "\n# TRACE32 (tracebridge). Empty paths are derived from sys (default ~/t32).\n[trace32]\n",
     );
     text.push_str(&section(TRACE32));

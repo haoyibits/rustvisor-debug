@@ -248,10 +248,63 @@ fn write_data(memory: &mut impl Memory, channel: u64, word: usize, bytes: &[u8])
 
 /// Takes the next packet from the channel from the target, if one is there.
 pub fn receive(memory: &mut impl Memory, channel: &Channel) -> Result<Option<Packet>> {
-    let size = channel.size;
     let image = Image::read(memory, channel)?;
-    let data = &image.data;
-    let mut host = image.header[HOSTINDEX] as usize;
+    match step(&image.data, image.header[HOSTINDEX] as usize)? {
+        Step::Empty => Ok(None),
+        Step::Moved(index) => {
+            image.release(memory, index)?;
+            Ok(None)
+        }
+        Step::Packet(packet, end) => {
+            image.release(memory, end)?;
+            Ok(Some(packet))
+        }
+    }
+}
+
+/// Takes every packet the channel from the target holds now: what
+/// [`receive`] returns one call at a time, from one read of the channel and
+/// one write of `hostindex`. Packets the target writes meanwhile wait for
+/// the next call.
+pub fn drain(memory: &mut impl Memory, channel: &Channel) -> Result<Vec<Packet>> {
+    let image = Image::read(memory, channel)?;
+    let start = image.header[HOSTINDEX] as usize;
+    let mut host = start;
+    let mut packets = Vec::new();
+    loop {
+        match step(&image.data, host)? {
+            Step::Empty => break,
+            Step::Moved(index) => host = index,
+            Step::Packet(packet, end) => {
+                packets.push(packet);
+                host = end;
+            }
+        }
+        // Every packet takes at least two bytes: more than a ring's worth
+        // means the ring is not one the target wrote.
+        if packets.len() > channel.size / 2 {
+            return Err(Error::Corrupt);
+        }
+    }
+    if host != start {
+        image.release(memory, host)?;
+    }
+    Ok(packets)
+}
+
+/// What the reader finds at `hostindex` in a channel's data as read.
+enum Step {
+    /// Nothing yet.
+    Empty,
+    /// The target wrapped and has not written the packet at the start yet:
+    /// `hostindex` moves there.
+    Moved(usize),
+    /// A packet, and `hostindex` after it.
+    Packet(Packet, usize),
+}
+
+fn step(data: &[u8], mut host: usize) -> Result<Step> {
+    let size = data.len();
     if host >= size {
         return Err(Error::Corrupt);
     }
@@ -261,12 +314,11 @@ pub fn receive(memory: &mut impl Memory, channel: &Channel) -> Result<Option<Pac
         mark = data[0];
         if mark == 0 {
             // The target wraps before it writes the packet at 0.
-            image.release(memory, 0)?;
-            return Ok(None);
+            return Ok(Step::Moved(0));
         }
     }
     if mark == 0 {
-        return Ok(None);
+        return Ok(Step::Empty);
     }
     let (len, head) = match mark {
         LONG if host + 2 < size => (data[host + 1] as usize | (data[host + 2] as usize) << 8, 3),
@@ -283,8 +335,7 @@ pub fn receive(memory: &mut impl Memory, channel: &Channel) -> Result<Option<Pac
     } else {
         Packet::Data(data[host + head..end].to_vec())
     };
-    image.release(memory, end)?;
-    Ok(Some(packet))
+    Ok(Step::Packet(packet, end))
 }
 
 #[cfg(test)]
@@ -390,6 +441,42 @@ mod tests {
             receive(&mut ram, &channel),
             Ok(Some(Packet::Data(b"x".to_vec())))
         );
+    }
+
+    #[test]
+    fn drain_takes_every_packet_across_a_wrap_in_one_read() {
+        let (mut ram, channel) = Ram::channel(32);
+        ram.word(HOSTINDEX, 20);
+        let data = ram.data();
+        data[20] = 2;
+        data[21..23].copy_from_slice(b"ab");
+        data[23] = DROPPED;
+        data[24] = WRAP;
+        data[0] = 1;
+        data[1] = b'c';
+        let packets = drain(&mut ram, &channel).unwrap();
+        assert_eq!(
+            packets,
+            [
+                Packet::Data(b"ab".to_vec()),
+                Packet::Dropped,
+                Packet::Data(b"c".to_vec())
+            ]
+        );
+        assert_eq!(ram.header(HOSTINDEX), 2);
+        // One header read, one hostindex write.
+        assert_eq!(ram.log, ["read_u32s 0x0 8", "write_u32 0x8"]);
+        assert_eq!(drain(&mut ram, &channel), Ok(Vec::new()));
+        assert_eq!(ram.log.len(), 3, "nothing to take writes nothing");
+    }
+
+    #[test]
+    fn drain_stops_where_the_target_wrapped_before_writing() {
+        let (mut ram, channel) = Ram::channel(32);
+        ram.word(HOSTINDEX, 20);
+        ram.data()[20] = WRAP;
+        assert_eq!(drain(&mut ram, &channel), Ok(Vec::new()));
+        assert_eq!(ram.header(HOSTINDEX), 0);
     }
 
     #[test]

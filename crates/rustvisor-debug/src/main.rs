@@ -257,6 +257,8 @@ enum Commands {
     },
     /// FDX link of an image while the core runs: each line typed is a packet to the target, each packet from it a line (Ctrl-C to stop)
     Fdx(FdxArgs),
+    /// Software trace records (rustvisor-trace) of the images while the cores run: drain each image's RUSTVISOR_TRACE channels, pair IPC sends with their receives, one-way latency per direction
+    Swtrace(SwtraceArgs),
     /// Words of ordinary RAM in bulk while the cores run (TRACE32 AD:, the OpenOCD MEM-AP); never MMIO or coprocessor registers, use mem for those
     Ram {
         /// An address, or a symbol of the images
@@ -297,6 +299,20 @@ struct FdxArgs {
     /// Mark the link closed and exit (while the board is held in reset: RAM keeps the last run's open link)
     #[arg(long, conflicts_with_all = ["send", "expect"])]
     close: bool,
+}
+
+/// The options of `rvdbg swtrace`.
+#[derive(Debug, clap::Args)]
+struct SwtraceArgs {
+    /// Only the n-th extra image (project.extra_elf, from 0); repeat for several (default: the ELF and every extra image that has the symbol)
+    #[arg(long, value_name = "N")]
+    guest: Vec<usize>,
+    /// Channel symbol; SYMBOL_<suffix> are channels too (default: RUSTVISOR_TRACE)
+    #[arg(long)]
+    symbol: Option<String>,
+    /// Also write every record, merged by time, to FILE as CSV
+    #[arg(long, value_name = "FILE")]
+    csv: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -658,6 +674,7 @@ fn execute(env: &mut Env, command: Commands) -> Result<u8, String> {
             }
         },
         Commands::Fdx(args) => fdx(env, args),
+        Commands::Swtrace(args) => swtrace(env, args),
         Commands::Ram {
             location,
             count,
@@ -914,6 +931,95 @@ fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
         }
         fdx_terminal::run(&mut memory, probe, &options, interrupted)
     })
+}
+
+/// `rvdbg swtrace`: every trace channel of the chosen images, drained in
+/// one go (reading consumes), then the report.
+fn swtrace(env: &mut Env, args: SwtraceArgs) -> Result<u8, String> {
+    use rustvisor_debug::swtrace;
+    let config = env.config;
+    let json = env.json;
+    let symbol = args.symbol.unwrap_or_else(|| swtrace::SYMBOL.to_string());
+    let explicit = !args.guest.is_empty();
+    let images: Vec<(String, PathBuf)> = if explicit {
+        args.guest
+            .iter()
+            .map(|&n| {
+                config
+                    .extra_elf
+                    .get(n)
+                    .map(|path| (format!("guest{n}"), path.clone()))
+                    .ok_or_else(|| {
+                        format!(
+                            "--guest {n}: project.extra_elf has {} image(s)",
+                            config.extra_elf.len()
+                        )
+                    })
+            })
+            .collect::<Result<_, _>>()?
+    } else {
+        std::iter::once(("elf".to_string(), config.elf.clone()))
+            .chain(
+                config
+                    .extra_elf
+                    .iter()
+                    .enumerate()
+                    .map(|(n, path)| (format!("guest{n}"), path.clone())),
+            )
+            .collect()
+    };
+    let mut channels = Vec::new();
+    for (image, path) in images {
+        let found = swtrace::channels(&path, &symbol)?;
+        if found.is_empty() && explicit {
+            return Err(format!(
+                "{symbol} is not in the symbol table of {}",
+                path.display()
+            ));
+        }
+        channels.extend(
+            found
+                .into_iter()
+                .map(|(name, address)| (image.clone(), name, address)),
+        );
+    }
+    if channels.is_empty() {
+        return Err(format!(
+            "no image has {symbol}: build the images with the trace channel"
+        ));
+    }
+    let result = env.with_ram(|mut memory, _| {
+        let mut found = Vec::new();
+        for (image, name, address) in channels {
+            let drained = swtrace::read(&mut memory, address)
+                .map_err(|error| format!("{image} {name} at 0x{address:08X}: {error}"))?;
+            found.push(swtrace::Found {
+                image,
+                symbol: name,
+                address,
+                drained,
+            });
+        }
+        let (mut text, mut json) = swtrace::report(&found, &symbol);
+        if let Some(path) = &args.csv {
+            let names: Vec<String> = found.iter().map(|f| f.label(&symbol)).collect();
+            let records: Vec<_> = found
+                .iter()
+                .enumerate()
+                .flat_map(|(i, f)| f.drained.records.iter().map(move |&r| (i, r)))
+                .collect();
+            std::fs::write(path, swtrace::csv(&records, &names))
+                .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+            text.push_str(&format!("\nrecords written to {}", path.display()));
+            json["csv"] = serde_json::Value::String(path.display().to_string());
+        }
+        Ok(inspect::Outcome {
+            text,
+            json,
+            code: 0,
+        })
+    });
+    inspect::emit("swtrace", json, result)
 }
 
 /// `rvdbg ram`: words of RAM in bulk while the cores run.

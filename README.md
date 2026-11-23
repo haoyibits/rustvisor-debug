@@ -132,6 +132,7 @@ Day to day:
 | `clock` | the clock tree with frequencies | also `--html` | yes |
 | `rtt` | SEGGER RTT terminal on channel 0 | yes | through the MEM-AP while the core runs |
 | `fdx` | the image's FDX link: one line per packet, `--send`/`--expect`, or `--close` | through `AD:` while the cores run | through the MEM-AP while the core runs |
+| `swtrace` | software trace records (`RUSTVISOR_TRACE`): drain, pair IPC sends with receives, latency per direction, `--csv` | through `AD:` while the cores run | through the MEM-AP while the core runs |
 | `reset` | reset and halt at the reset vector | yes | `reset halt` |
 | `attach` | connect without resetting | `SYStem.Mode Attach` | yes |
 | `run-until <symbol\|addr>` | run a halted core to a symbol or address | on-chip breakpoint | hardware breakpoint |
@@ -453,6 +454,28 @@ comes from the ELF's symbol table (`--symbol`, `fdx.symbol`), or `--address`.
 Only one program may drive a link at a time: not `rvdbg fdx` together with
 the board runner or PowerView's own `FDX.*` windows.
 
+### Software trace
+
+rustvisor-sdk's `rustvisor-trace` writes 16-byte records (its
+`trace/FORMAT.md`) into one FDX channel per writer: `RUSTVISOR_TRACE` in a
+Guest, `RUSTVISOR_TRACE_<suffix>` for further ones (one per core). `rvdbg
+swtrace` drains every such channel of the ELF and the extra images (or only
+`--guest n`, repeatable), counts the records and the losses (`DROPPED`
+records, FDX drop markers), pairs each `IPC_SEND` with the `IPC_RECV` of the
+same direction and sequence in another image and prints the one-way latency
+per direction (count, min, median, p90, p99, max, mean, in ns). For EL2's
+channels (`EL2_ENTRY`/`EL2_EXIT` records) it gives the time in EL2 per entry,
+by kind (hvc, irq, sgi, notice).
+`--csv FILE` also writes every record, merged by time. Reading consumes:
+a second `swtrace` shows only what came since. A closed channel reads as
+"not traced". Times are on one axis only when every core's CNTVOFF is the
+same (0 on SR6P6).
+
+```sh
+rvdbg swtrace --json
+rvdbg swtrace --guest 0 --guest 1 --csv trace.csv
+```
+
 ## Inspecting the target
 
 The inspect commands connect to what runs already: PowerView over the
@@ -732,7 +755,7 @@ asking. In the project's `.claude/settings.json`:
 
 `check` is allowed with **exact** command lines rather than a `:*` prefix: a
 prefix rule would also allow `check … --halt`, which stops the core.
-Everything else (`flash`, `load`, `open`, `rtt`, `fdx`, `ram` (it can write), `attach`, `reset`,
+Everything else (`flash`, `load`, `open`, `rtt`, `fdx`, `swtrace` (it consumes the records), `ram` (it can write), `attach`, `reset`,
 `down`, `halt`, `go`, `run-until`, `do`, `cmd`, `check --halt`) still asks. For these
 rules to match, run the commands inside the project (no `--config` or
 `--backend` before the command) and put `--json` after the command's

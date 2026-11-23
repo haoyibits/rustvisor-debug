@@ -82,7 +82,14 @@ const GROUPS: &[(&str, &[(&str, Need)])] = &[
         "program",
         &[("flash", Need::Probe), ("load", Need::Trace32)],
     ),
-    ("terminal", &[("rtt", Need::Probe), ("fdx", Need::Probe)]),
+    (
+        "terminal",
+        &[
+            ("rtt", Need::Probe),
+            ("fdx", Need::Probe),
+            ("swtrace", Need::Probe),
+        ],
+    ),
     (
         "project",
         &[
@@ -741,6 +748,7 @@ const SHARES_POWERVIEW: &[&str] = &[
     "do",
     "ram",
     "fdx",
+    "swtrace",
 ];
 
 /// The `end` line after a command in `--json` pipe mode.

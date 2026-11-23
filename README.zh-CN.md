@@ -101,6 +101,7 @@ rvdbg vscode                 # 或：rvdbg rustrover（TRACE32）
 | `clock` | 带频率的时钟树 | 还有 `--html` | 支持 |
 | `rtt` | 通道 0 上的 SEGGER RTT 终端 | 支持 | 经 MEM-AP，核照常运行 |
 | `fdx` | 镜像的 FDX 链接：一行一个包，或用 `--send`/`--expect`、`--close` | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
+| `swtrace` | 软件 trace 记录（`RUSTVISOR_TRACE`）：读空、把 IPC 发送和接收配对、按方向统计延迟，可加 `--csv` | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
 | `reset` | 复位并停在复位向量 | 支持 | `reset halt` |
 | `attach` | 连上目标但不复位 | `SYStem.Mode Attach` | 支持 |
 | `run-until <符号\|地址>` | 让停着的核运行到某个符号或地址 | 片上断点 | 硬件断点 |
@@ -316,6 +317,15 @@ rvdbg fdx --send "boot single" --expect "ok boot" --json
 
 交互模式下，目标发来的包一行一个打印出来，直到按 Ctrl-C（在终端里是 `< <包>`，要发的行在 `> ` 提示符后输入）；目标复位后重新打开链接，会自动跟上。`--close` 把链接标成关闭，在板子保持复位时用：RAM 里会一直留着上一次运行打开的链接，直到镜像重新打开它。用 `--send` 时按顺序发出这些包，然后依次等待每个 `--expect` 的包（每个最多等 `--timeout` 秒，默认 10）；有一个没等到就以退出码 3 结束。链接地址从 ELF 的符号表里查（`--symbol`、`fdx.symbol`），也可以用 `--address` 直接给。同一条链接同一时间只能有一个程序在用：`rvdbg fdx` 不要和板级 runner 或 PowerView 自己的 `FDX.*` 窗口同时用。
 
+### 软件 trace
+
+rustvisor-sdk 的 `rustvisor-trace` 把 16 字节的记录（格式见它的 `trace/FORMAT.md`）写进每个写入方自己的 FDX 通道：Guest 里是 `RUSTVISOR_TRACE`，其余的叫 `RUSTVISOR_TRACE_<后缀>`（每个核一个）。`rvdbg swtrace` 把 ELF 和额外镜像里所有这样的通道读空（或者只读 `--guest n`，可重复），统计记录数和丢失（`DROPPED` 记录、FDX 丢包标记），把每条 `IPC_SEND` 和另一个镜像里方向、序号相同的 `IPC_RECV` 配对，按方向打印单程延迟（条数、最小、中位数、p90、p99、最大、平均，单位 ns）；EL2 的通道（`EL2_ENTRY`/`EL2_EXIT` 记录）按进入的种类（hvc、irq、sgi、notice）给出每次在 EL2 停留的时间。`--csv 文件` 另外把所有记录按时间合并写出。读取会消耗记录：再运行一次 `swtrace` 只能看到之后新来的。关闭的通道显示为"未开 trace"。只有每个核的 CNTVOFF 相同时（SR6P6 上都是 0），各通道的时间才在同一条轴上。
+
+```sh
+rvdbg swtrace --json
+rvdbg swtrace --guest 0 --guest 1 --csv trace.csv
+```
+
 ## 查看目标
 
 查看类命令连接已经在运行的程序：通过 Remote API 连 PowerView，或通过 Tcl 端口连 OpenOCD。**只有 `reset`（以及 `flash`）会复位目标**：连接本身和其他命令都不复位；用 TRACE32 时也不会启动 PowerView（请先 `rvdbg open`、`flash` 或 `load`）。
@@ -503,7 +513,7 @@ claude mcp add-json -s user t32mcp '{"type":"stdio","command":"/path/to/t32mcp",
 }
 ```
 
-`check` 用的是**完整**命令行，而不是 `:*` 前缀：前缀规则也会放行 `check … --halt`，而它会停核。其余命令（`flash`、`load`、`open`、`rtt`、`fdx`、`ram`（它能写内存）、`attach`、`reset`、`down`、`halt`、`go`、`run-until`、`do`、`cmd`、`check --halt`）仍然要询问。要让这些规则匹配上，命令要在项目里运行（命令前面不要加 `--config` 或 `--backend`），`--json` 放在命令参数后面。
+`check` 用的是**完整**命令行，而不是 `:*` 前缀：前缀规则也会放行 `check … --halt`，而它会停核。其余命令（`flash`、`load`、`open`、`rtt`、`fdx`、`swtrace`（读取会消耗记录）、`ram`（它能写内存）、`attach`、`reset`、`down`、`halt`、`go`、`run-until`、`do`、`cmd`、`check --halt`）仍然要询问。要让这些规则匹配上，命令要在项目里运行（命令前面不要加 `--config` 或 `--backend`），`--json` 放在命令参数后面。
 
 ## 排障
 

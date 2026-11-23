@@ -42,6 +42,7 @@ asks for, despite t32mcp's advice not to drive the debugger by other means.
 | The project's PRACTICE script, waiting for its end (TRACE32) | `rvdbg do <script>` |
 | Target output over SEGGER RTT | `timeout 10 rvdbg rtt --output-only` |
 | Send packets over the image's FDX link and wait for the answers | `rvdbg fdx --send <packet> --expect <answer> --json` (`--guest <n>` for an extra image) |
+| Software trace records: drain them, IPC latency per direction | `rvdbg swtrace --json` (`--guest <n>`, `--csv <file>`) |
 
 With TRACE32, generic interactive debugging (single steps, breakpoints,
 source, locals, stack, any PRACTICE command) goes through t32mcp and the
@@ -83,3 +84,5 @@ runs OpenOCD's GDB server for GDB or VS Code.
   not start it yourself. What a packet makes the image do is the image's
   command protocol, so ask before sending one. Only one program may drive a
   link at a time: not while the board runner runs.
+- `swtrace` consumes the records it reads: run it once after the traced
+  run, with `--csv` if the records are wanted later.

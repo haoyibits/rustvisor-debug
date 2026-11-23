@@ -5,6 +5,8 @@
 //! link this crate: it drives an installed rvdbg (0.1.24 or later, or `RVDBG`)
 //! as an `rvdbg --json` pipe session.
 //! [`fdx`] is the FDX link of rustvisor's images, over any memory access.
+//! [`swtrace`] decodes and pairs the software trace records (rustvisor-sdk
+//! `trace/FORMAT.md`) that `rvdbg swtrace` reads.
 //!
 //! ```no_run
 //! let config = rustvisor_debug::config::load("rvdbg.toml".as_ref())?;
@@ -15,3 +17,4 @@
 
 pub mod config;
 pub mod fdx;
+pub mod swtrace;

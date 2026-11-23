@@ -22,11 +22,13 @@
 //! [trace32.flash]                      # trace32.toml's [flash]
 //! [trace32.rtos]                       # trace32.toml's [rtos]
 //! [trace32.awareness]                  # trace32.toml's [awareness]; a key left out takes
-//!                                      # ~/.config/rvdbg/awareness/rustvisor-setup.cmm or
-//!                                      # rustvisor.men when installed; no section, no awareness
+//!                                      # ~/.config/rvdbg/awareness/rustvisor-setup.cmm,
+//!                                      # rustvisor.men or rustvisor-cores.cmm when installed;
+//!                                      # no section, no awareness
 //! script = "debug/rustvisor-setup.cmm" # after flash, load and reset: DO it "<elf>" "<extra_elf>"... "<args>"...
 //! args = []
 //! menu = "src/rustvisor.men"           # MENU.ReProgram with rvdbg's toolbar when it starts PowerView
+//! after_go = "debug/rustvisor-cores.cmm" # after Go in flash and load: DO it (no arguments)
 //!
 //! [openocd]
 //! executable = "openocd-stellar"
@@ -221,8 +223,11 @@ pub fn load(path: &Path) -> Result<Config, String> {
 /// The rustvisor awareness that `install-awareness.sh` of the TRACE32
 /// extension (lauterbach_edk) puts into `~/.config/rvdbg/awareness`:
 /// `[trace32.awareness]` key and file name.
-pub const AWARENESS_DEFAULTS: [(&str, &str); 2] =
-    [("script", "rustvisor-setup.cmm"), ("menu", "rustvisor.men")];
+pub const AWARENESS_DEFAULTS: [(&str, &str); 3] = [
+    ("script", "rustvisor-setup.cmm"),
+    ("menu", "rustvisor.men"),
+    ("after_go", "rustvisor-cores.cmm"),
+];
 
 /// The variables that choose other images: `rustvisor images --env` sets them.
 const IMAGE_VARIABLES: [&str; 3] = ["ELF", "EXTRA_ELF", "PROJECT_ROOT"];
@@ -302,7 +307,7 @@ pub const TRACE32_KEYS: &[&str] = &[
 pub const TARGET_KEYS: &[&str] = &["cpu", "cores", "mem_access", "jtag_clock", "dual_port"];
 pub const FLASH_KEYS: &[&str] = &["chip", "script", "args"];
 pub const RTOS_KEYS: &[&str] = &["config", "menu", "show_tasks"];
-pub const AWARENESS_KEYS: &[&str] = &["script", "args", "menu"];
+pub const AWARENESS_KEYS: &[&str] = &["script", "args", "menu", "after_go"];
 pub const RTT_KEYS: &[&str] = &["symbol", "control_block_address", "poll_interval"];
 pub const OPENOCD_KEYS: &[&str] = &[
     "executable",
@@ -674,6 +679,7 @@ mod tests {
         assert_eq!(awareness(&config), Some(Value::Table(Table::new())));
         std::fs::write(dir.path().join("rustvisor-setup.cmm"), "").unwrap();
         std::fs::write(dir.path().join("rustvisor.men"), "").unwrap();
+        std::fs::write(dir.path().join("rustvisor-cores.cmm"), "").unwrap();
         // Installed, but no section (commented out): no awareness.
         let config = parse_text(minimal)
             .unwrap()
@@ -682,15 +688,20 @@ mod tests {
         let config = parse_text(&section)
             .unwrap()
             .with_default_awareness(dir.path());
-        let expected: Table = toml::toml! { script = (installed("rustvisor-setup.cmm")) menu = (installed("rustvisor.men")) };
+        let expected: Table = toml::toml! {
+            script = (installed("rustvisor-setup.cmm"))
+            menu = (installed("rustvisor.men"))
+            after_go = (installed("rustvisor-cores.cmm"))
+        };
         assert_eq!(awareness(&config), Some(Value::Table(expected)));
         // Set keys win; "" turns the default off.
         let config = parse_text(&format!(
-            "{minimal}[trace32.awareness]\nscript = \"own.cmm\"\nmenu = \"\"\nargs = [\"SPLIT\"]\n"
+            "{minimal}[trace32.awareness]\nscript = \"own.cmm\"\nmenu = \"\"\nafter_go = \"\"\nargs = [\"SPLIT\"]\n"
         ))
         .unwrap()
         .with_default_awareness(dir.path());
-        let expected: Table = toml::toml! { script = "own.cmm" menu = "" args = ["SPLIT"] };
+        let expected: Table =
+            toml::toml! { script = "own.cmm" menu = "" after_go = "" args = ["SPLIT"] };
         assert_eq!(awareness(&config), Some(Value::Table(expected)));
     }
 

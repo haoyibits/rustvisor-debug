@@ -42,6 +42,7 @@ pub fn validate_target_action(
     for (path, description) in [
         (&config.awareness_script, "awareness script"),
         (&config.awareness_menu, "awareness menu"),
+        (&config.awareness_after_go, "awareness after_go script"),
     ] {
         if !path.is_empty() && !path.starts_with("~~") {
             require_file(Path::new(path), description, false)?;
@@ -250,6 +251,16 @@ pub fn setup_debug(config: &Config, debugger: &mut impl Rcl) -> t32rcl::Result<(
     if !debugger.state_run()? {
         debugger.cmd("Go")?;
     }
+    // What needs the program running (the cores a hypervisor starts),
+    // only on top of a working setup.
+    let awareness = match (awareness, config.awareness_after_go_command()) {
+        (Ok(()), Some(arguments)) => debugger.run_script(
+            &ui::config_key("awareness.after_go"),
+            &format!("DO {arguments}"),
+            Duration::from_secs(config.operation_timeout),
+        ),
+        (result, _) => result,
+    };
     debugger.print(&format!(
         "{}: symbols loaded for {}",
         ui::program(),
@@ -288,6 +299,7 @@ pub mod tests {
             awareness_script: String::new(),
             awareness_args: Vec::new(),
             awareness_menu: String::new(),
+            awareness_after_go: String::new(),
             flash_chip: String::new(),
             flash_script: flash.to_string_lossy().into_owned(),
             flash_args: Vec::new(),
@@ -451,6 +463,61 @@ pub mod tests {
                 "cmd Go".into(),
                 "print tracebridge: symbols loaded for demo".into(),
             ]
+        );
+    }
+
+    #[test]
+    fn load_runs_the_after_go_script_after_go() {
+        let (_dir, mut config) = fixture();
+        config.awareness_script = "/s/setup.cmm".into();
+        config.awareness_after_go = "/s/cores.cmm".into();
+        let mut recorder = Recorder {
+            system_up: true,
+            ..Default::default()
+        };
+        run_sequence(&config, None, &mut recorder).unwrap();
+        let elf = config.elf.display();
+        assert_eq!(
+            recorder.calls[recorder.calls.len() - 5..],
+            [
+                format!("run_script DO \"/s/setup.cmm\" \"{elf}\" 1s"),
+                "state_run".into(),
+                "cmd Go".into(),
+                "run_script DO \"/s/cores.cmm\" 1s".into(),
+                "print tracebridge: symbols loaded for demo".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failing_setup_script_skips_the_after_go_script() {
+        let (_dir, mut config) = fixture();
+        config.awareness_script = "/s/setup.cmm".into();
+        config.awareness_after_go = "/s/cores.cmm".into();
+        let mut recorder = Recorder {
+            system_up: true,
+            fail_on: Some("DO \"/s/setup.cmm".into()),
+            ..Default::default()
+        };
+        let error = run_sequence(&config, None, &mut recorder).unwrap_err();
+        assert!(error.0.contains("awareness.script"), "{error}");
+        assert!(!recorder.calls.iter().any(|call| call.contains("cores.cmm")));
+    }
+
+    #[test]
+    fn a_failing_after_go_script_is_reported_after_the_load() {
+        let (_dir, mut config) = fixture();
+        config.awareness_after_go = "/s/cores.cmm".into();
+        let mut recorder = Recorder {
+            system_up: true,
+            fail_on: Some("DO \"/s/cores.cmm".into()),
+            ..Default::default()
+        };
+        let error = run_sequence(&config, None, &mut recorder).unwrap_err();
+        assert!(error.0.contains("awareness.after_go"), "{error}");
+        assert_eq!(
+            recorder.calls.last().unwrap(),
+            "print tracebridge: symbols loaded for demo"
         );
     }
 

@@ -135,15 +135,18 @@ pub fn render() -> String {
 
     text.push_str(
         "\n# Hypervisor awareness (TRACE32): rvdbg runs script after flash, load and\n\
-         # reset with the images as arguments, and loads menu with its own toolbar\n\
-         # when it starts PowerView. Left out, they are the installed\n\
-         # ~/.config/rvdbg/awareness/rustvisor-setup.cmm and rustvisor.men\n\
+         # reset with the images as arguments, after_go after Go in flash and load\n\
+         # (assigns the cores the hypervisor started), and loads menu with its own\n\
+         # toolbar when it starts PowerView. Left out, they are the installed\n\
+         # ~/.config/rvdbg/awareness/rustvisor-setup.cmm, rustvisor-cores.cmm and\n\
+         # rustvisor.men\n\
          # (lauterbach_edk: debug/install-awareness.sh); not installed, nothing\n\
          # happens. Comment this section out to turn the awareness off.\n\
          [trace32.awareness]\n\
          args = []  # [\"SPLIT\"]: cluster 2 split (C2C1 a core of its own); default lockstep\n\
          # script = \"~/.config/rvdbg/awareness/rustvisor-setup.cmm\"\n\
-         # menu = \"~/.config/rvdbg/awareness/rustvisor.men\"\n",
+         # menu = \"~/.config/rvdbg/awareness/rustvisor.men\"\n\
+         # after_go = \"~/.config/rvdbg/awareness/rustvisor-cores.cmm\"\n",
     );
 
     text.push_str(

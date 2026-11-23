@@ -48,6 +48,11 @@ pub struct Config {
     /// with `MENU.ReProgram` when tracebridge starts PowerView, together
     /// with its own Flash and Load buttons. Same path rules as the script.
     pub awareness_menu: String,
+    /// `[awareness] after_go`: a PRACTICE script that flash and load run
+    /// after `Go`, with no arguments, for what needs the program running
+    /// (the hypervisor awareness assigns the cores the hypervisor started).
+    /// Same path rules as the script; skipped when the script failed.
+    pub awareness_after_go: String,
     pub flash_chip: String,
     pub flash_script: String,
     pub flash_args: Vec<String>,
@@ -371,6 +376,7 @@ pub fn config_from_document(document: &Table, config_file: &Path, env: &Env) -> 
     let awareness_script = practice_path(text(awareness, "script", "")?);
     let awareness_menu = practice_path(text(awareness, "menu", "")?);
     let awareness_args = string_list(awareness, "args")?;
+    let awareness_after_go = practice_path(text(awareness, "after_go", "")?);
     let flash_chip = env_text(env, "T32_FLASH_CHIP", text(flash, "chip", "")?);
     let flash_script = env_override(env, "T32_FLASH_SCRIPT", text(flash, "script", "")?);
     let flash_args = env_arguments(env, "T32_FLASH_ARGS", string_list(flash, "args")?)?;
@@ -440,6 +446,7 @@ pub fn config_from_document(document: &Table, config_file: &Path, env: &Env) -> 
         awareness_script,
         awareness_args,
         awareness_menu,
+        awareness_after_go,
         flash_chip,
         flash_script,
         flash_args,
@@ -492,6 +499,12 @@ impl Config {
         Some(words.join(" "))
     }
 
+    /// The arguments of `DO` for the `after_go` script: the script in
+    /// double quotes. `None` without one.
+    pub fn awareness_after_go_command(&self) -> Option<String> {
+        (!self.awareness_after_go.is_empty()).then(|| format!("\"{}\"", self.awareness_after_go))
+    }
+
     /// `flash_script_exists`.
     pub fn flash_script_exists(&self) -> bool {
         let path = self.resolved_flash_script();
@@ -525,6 +538,7 @@ impl Config {
             ("awareness.script", self.awareness_script.clone()),
             ("awareness.args", self.awareness_args.join(" ")),
             ("awareness.menu", self.awareness_menu.clone()),
+            ("awareness.after_go", self.awareness_after_go.clone()),
         ];
         for (name, value) in values {
             if value.contains(['"', '\n', '\r']) {
@@ -709,7 +723,7 @@ poll_interval = 0.05
     #[test]
     fn loads_optional_awareness_configuration() {
         let fixture = Fixture::new(&format!(
-            "{CONFIG}\n[awareness]\nscript = \"debug/setup.cmm\"\nargs = [\"SPLIT\"]\nmenu = \"src/x.men\"\n"
+            "{CONFIG}\n[awareness]\nscript = \"debug/setup.cmm\"\nargs = [\"SPLIT\"]\nmenu = \"src/x.men\"\nafter_go = \"debug/cores.cmm\"\n"
         ));
         let config = fixture.load(&[]).unwrap();
         let script = fixture.root.join("debug/setup.cmm");
@@ -726,12 +740,20 @@ poll_interval = 0.05
                 config.elf.display()
             )
         );
+        assert_eq!(
+            config.awareness_after_go_command().unwrap(),
+            format!("\"{}\"", fixture.root.join("debug/cores.cmm").display())
+        );
     }
 
     #[test]
     fn awareness_is_off_by_default_and_keeps_trace32_paths() {
         let fixture = Fixture::new(CONFIG);
         assert_eq!(fixture.load(&[]).unwrap().awareness_command(), None);
+        assert_eq!(
+            fixture.load(&[]).unwrap().awareness_after_go_command(),
+            None
+        );
         let fixture = Fixture::new(&format!("{CONFIG}\n[awareness]\nscript = \"~~/x.cmm\"\n"));
         assert_eq!(fixture.load(&[]).unwrap().awareness_script, "~~/x.cmm");
     }

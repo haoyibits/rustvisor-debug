@@ -40,7 +40,7 @@ An explicit backend does not make a disconnected probe or unavailable server usa
 | `[trace32.target]` | `cpu`, `cores`, `mem_access`, `jtag_clock`, `dual_port` | Target and runtime access |
 | `[trace32.flash]` | `chip`, `script`, `args` | Flash script selection and arguments |
 | `[trace32.rtos]` | `config`, `menu`, `show_tasks` | Optional RTOS awareness |
-| `[trace32.awareness]` | `script`, `args`, `menu` | Script run after flash, load and reset; menu file installed with rvdbg's toolbar (e.g. hypervisor awareness) |
+| `[trace32.awareness]` | `script`, `args`, `menu`, `after_go` | Script run after flash, load and reset; menu file installed with rvdbg's toolbar (e.g. hypervisor awareness); script run after Go in flash and load |
 | `[openocd]` | `executable`, `config`, `search`, `commands` | OpenOCD and board initialization |
 | `[openocd]` | `tcl_port`, `gdb_port`, `gdb_target`, `core` | Control connection, GDB core and inspection core |
 | `[openocd]` | `memory_ap`, `timeout`, `otp` | Physical memory access, operation timeout, OTP ranges |

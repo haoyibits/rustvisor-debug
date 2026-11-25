@@ -11,8 +11,8 @@ Start with a deployed program. Confirm [local and target contents match](flashin
 | `rvdbg status` | Inspect state without automatically halting |
 | `rvdbg attach` | Connect without reset, preserving running/halted state |
 | `rvdbg halt` | Halt the selected core |
-| `rvdbg go` | Resume the selected core |
-| `rvdbg reset` | Reset the chip and halt at the reset vector |
+| `rvdbg go` | Resume the selected core; a running core is left alone (`already running`) |
+| `rvdbg reset` | Reset the chip and halt at the reset vector, then mark every image's FDX link closed (`--keep-links` leaves them) |
 | `rvdbg run-until <symbol-or-address>` | Run a halted core to a temporary hardware breakpoint |
 | `rvdbg down` | TRACE32 `SYStem.Down` |
 
@@ -89,7 +89,19 @@ rvdbg [...]> go
 rvdbg [...]> quit
 ```
 
-Use `help [command]`, Tab completion, `backend trace32|openocd`, `reconnect`, and `quit`/`exit`. Use `reconnect` after changing probes. History lives in `.rvdbg/history`. Ctrl-C interrupts waiting RTT/FDX/run-until commands without ending the session; command failures also leave it open.
+Use `help [command]`, Tab completion, `backend trace32|openocd`, `reconnect`, and `quit`/`exit`. Use `reconnect` after changing probes. History lives in `.rvdbg/history`. Ctrl-C interrupts waiting RTT/FDX/run-until commands without ending the session; command failures also leave it open. The prompt shows whether the core runs or is halted (`rvdbg [trace32 running]>`; for TRACE32 once the session has its connection).
+
+Several lines pasted at once run one after the other, each shown after the prompt, and stop at the first that fails (`error: line 3 failed; 2 line(s) not run`). A line ending in `\` continues on the next. `;` does not separate commands: it is a comment in `cmd`/`eval` PRACTICE text. `source <file>` runs a file's lines the same way, with `#` comments, and names the failing line as `file:line`:
+
+```text
+# lab-timer.rvdbg: illustrative; the packets are the SDK lab firmware's
+reset
+go
+fdx --send "lab five inject trace" --expect ready --expect "ok lab"
+fdx --guest 0 --send "run timer" --expect ready --expect "ok timer"
+```
+
+`images <dir>` switches the session to the images of a directory (see [configuration](configuration.md)). A line that starts with an option, such as `--close`, is refused with a hint (`fdx --close`).
 
 A StellarLINK session keeps one OpenOCD shared by commands and GDB. TRACE32 inspection, `ram` and `fdx` share a lazily established connection. Failure drops it; the next command reconnects, without replaying the failed command. `flash`, `load` and `open` manage connections separately.
 

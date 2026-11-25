@@ -4,7 +4,8 @@
 //! environment overrides as `rvdbg`. rustvisor-sdk's board runner does not
 //! link this crate: it drives an installed rvdbg (0.1.24 or later, or `RVDBG`)
 //! as an `rvdbg --json` pipe session.
-//! [`fdx`] is the FDX link of rustvisor's images, over any memory access.
+//! [`fdx`] is the FDX link of rustvisor's images, over any memory access;
+//! [`stop`] decodes the hypervisor's stop records.
 //! [`swtrace`] decodes and pairs the software trace records (rustvisor-sdk
 //! `debug/swtrace/FORMAT.md`) that `rvdbg swtrace` reads; [`timeline`] draws them
 //! as a VM state timeline page (`rvdbg swtrace --html`).
@@ -18,5 +19,6 @@
 
 pub mod config;
 pub mod fdx;
+pub mod stop;
 pub mod swtrace;
 pub mod timeline;

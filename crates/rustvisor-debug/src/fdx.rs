@@ -58,6 +58,38 @@ impl Link {
     pub fn receive(&self, memory: &mut impl Memory) -> Result<Option<Packet>> {
         fdx::receive(memory, &self.to_host)
     }
+
+    /// Whether a packet sent to the target is still unread.
+    pub fn unread(&self, memory: &mut impl Memory) -> Result<bool> {
+        fdx::unread(memory, &self.to_target)
+    }
+}
+
+/// The name of an image's link: `el2` for the ELF, `guest<n>` for the n-th
+/// extra image.
+pub fn image_name(extra: Option<usize>) -> String {
+    match extra {
+        None => "el2".to_string(),
+        Some(n) => format!("guest{n}"),
+    }
+}
+
+/// The image a name stands for: `el2` (the ELF, `None`), `guest<n>` or `<n>`
+/// (the n-th extra image); `extra` is how many extra images there are.
+pub fn parse_image(name: &str, extra: usize) -> std::result::Result<Option<usize>, String> {
+    if name == "el2" {
+        return Ok(None);
+    }
+    let number = name.strip_prefix("guest").unwrap_or(name);
+    match number.parse::<usize>() {
+        Ok(n) if n < extra => Ok(Some(n)),
+        Ok(n) => Err(format!(
+            "{name}: there is no extra image {n}; project.extra_elf has {extra} image(s)"
+        )),
+        Err(_) => Err(format!(
+            "{name}: an image is el2 (the ELF), guest<n> or <n> (the n-th extra image)"
+        )),
+    }
 }
 
 /// The address of `symbol` in the symbol table of the ELF at `path`.
@@ -124,5 +156,20 @@ mod tests {
         assert_eq!(link.send(&mut ram, b"plan single"), Ok(true));
         Link::close(&mut ram, BASE).unwrap();
         assert_eq!(Link::locate(&mut ram, BASE), Ok(None));
+    }
+
+    #[test]
+    fn images_are_named_el2_and_guest_n() {
+        assert_eq!(image_name(None), "el2");
+        assert_eq!(image_name(Some(3)), "guest3");
+        assert_eq!(parse_image("el2", 5), Ok(None));
+        assert_eq!(parse_image("guest4", 5), Ok(Some(4)));
+        assert_eq!(parse_image("2", 5), Ok(Some(2)));
+        assert!(
+            parse_image("guest5", 5)
+                .unwrap_err()
+                .contains("has 5 image(s)")
+        );
+        assert!(parse_image("g1", 5).is_err());
     }
 }

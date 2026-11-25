@@ -21,6 +21,14 @@ StellarLINK core/coprocessor reads require a halted core; Hyp registers addition
 
 After recording the result, decide whether to resume, reset or redeploy using [debugging commands](debugging.md).
 
+## Why did a core stop, without halting?
+
+```sh
+rvdbg cores
+```
+
+`cores` reads the hypervisor's stop records (`RUSTVISOR_STOP_RECORDS` of the primary image, one per core slot) and every image's FDX link from RAM while the cores run. A complete record names the core and the cause as rustvisor-sdk's offline decoder does, with the image symbol of a fault's PC, e.g. `C0C0 stopped: Fault: Guest Other fault, pc 0x28010020 (_start), …`. The other cores keep running; `halt` and `fault` give the exception registers when you need them. A record from before the image's startup ran is not read as a stop. `--json` gives each slot's fields.
+
 ## One value or a RAM buffer?
 
 | Command | Intended object | Units and restrictions |

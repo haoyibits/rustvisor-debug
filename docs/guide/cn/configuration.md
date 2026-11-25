@@ -101,6 +101,15 @@ ELF=build/el2.elf EXTRA_ELF="build/guest.elf" rvdbg config
 
 清空 `EXTRA_ELF` 会改变[烧录与验证](flashing.md)的镜像集合。尤其 TRACE32 的擦除范围由烧录脚本声明，不会因为列表缩短就自动保留其他镜像。
 
+## 一个目录的镜像：`--images`
+
+```sh
+rvdbg --images target/board-tests/latency/<运行>/00-inject-five flash
+rvdbg images
+```
+
+`--images <目录>` 用一个目录里的镜像，代替 `rvdbg.toml` 和 `ELF`/`EXTRA_ELF` 给的：`hypervisor`（或目录里唯一的另一个 ELF）是主镜像，`guest0.elf`、`guest1.elf`…… 按编号是额外镜像，符号程序名取主镜像的文件名。这正是 board-tests 用例目录的样子。它对这次调用的每条命令、两种后端都有效；交互会话里用 `images <目录>` 切换。`rvdbg images` 列出正在用的镜像、它们来自哪里，以及每个镜像的 FDX 链接（有探针时显示打开还是关闭）。
+
 ## 配置和日志放在哪里？
 
 | 路径 | 内容 |

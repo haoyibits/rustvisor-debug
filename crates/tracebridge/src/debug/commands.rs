@@ -792,6 +792,19 @@ fn after_change(ctx: &mut Context, done: &str, command: &str) -> DResult<Outcome
     ))
 }
 
+/// S: `Go`; a core that runs already is left alone (TRACE32 refuses `Go`
+/// then: "target running").
+pub fn go(ctx: &mut Context) -> DResult<Outcome> {
+    let state = DebuggerState::read(ctx.probe)?;
+    if state.is_up() && state.running == Some(true) {
+        return Ok(Outcome::ok(
+            format!("already running (now: {})", ctx.style.state(&state.label())),
+            json!({"command": null, "state": state.label(), "mode": state.mode, "running": state.running}),
+        ));
+    }
+    command(ctx, "Go", "running")
+}
+
 /// S: `SYStem.Mode Attach` without a reset; the core keeps its run state.
 pub fn attach(ctx: &mut Context) -> DResult<Outcome> {
     if probe::eval_bool(ctx.probe, "SYStem.Up()")? {
@@ -1738,6 +1751,23 @@ mod tests {
         ]);
         run(&mut probe, attach).unwrap();
         assert!(probe.commands().is_empty());
+    }
+
+    #[test]
+    fn go_leaves_a_running_core_alone() {
+        let mut probe = FakeProbe::with(&[
+            ("SYStem.Mode()", Value::Int(11)),
+            ("STATE.RUN()", Value::Bool(true)),
+        ]);
+        let outcome = run(&mut probe, go).unwrap();
+        assert!(probe.commands().is_empty());
+        assert_eq!(outcome.text, "already running (now: up, running)");
+        let mut probe = FakeProbe::with(&[
+            ("SYStem.Mode()", Value::Int(11)),
+            ("STATE.RUN()", Value::Bool(false)),
+        ]);
+        run(&mut probe, go).unwrap();
+        assert_eq!(probe.commands(), ["Go"]);
     }
 
     #[test]

@@ -339,6 +339,11 @@ impl Session {
         Ok(())
     }
 
+    /// Whether the core runs (`STATE.RUN()`), printing nothing.
+    pub fn running(&mut self) -> Result<bool> {
+        self.debugger.state_run().map_err(|e| bridge_error!("{e}"))
+    }
+
     pub fn command(&mut self, command: &str) -> Result<()> {
         self.per.invalidate();
         commands::command(&mut self.context(), command, "command executed")

@@ -43,9 +43,24 @@ rustvisor 使用 FDX BufferE 链接，默认符号是 `RUSTVISOR_FDX`。同一�
 ```sh
 rvdbg fdx
 rvdbg fdx --guest 0
+rvdbg fdx --all
 ```
 
-第一条默认选主 ELF；`--guest 0` 选 `project.extra_elf` 的第一个镜像，不是 VMID 0 或硬件核 0。交互终端把输入的每一行当作一个包，收到的包逐行显示。在终端里收到的包以 `< ` 开头，`> ` 提示符标出输入行；通过管道时每行就是包本身。目标复位后重新打开链接时终端会重新跟上。
+第一条默认选主 ELF，名字是 `el2`；`--guest 0`（或 `--guest guest0`）选 `project.extra_elf` 的第一个镜像，不是 VMID 0 或硬件核 0。`--all` 同时看所有镜像的链接。交互终端把输入的每一行当作一个包，收到的包逐行显示。在终端里输入行有历史记录和 Tab 补全（补全词来自目标对 `help` 的回复），收到的包以 `< ` 开头，打印在正在输入的那一行上方；通过管道时每行就是包本身。目标复位后重新打开链接时终端会重新跟上。
+
+用 `--all` 时，每个包前面带链接名（`[guest0] < ready`），提示符写着输入发往哪条链接（`el2> `）。`@guest1 run timer` 只把这一行发给另一条链接，`:to guest1` 切换。
+
+不当作包发送的输入：
+
+| 输入 | 作用 |
+| --- | --- |
+| `:q`、`exit`、`quit`、Ctrl-C | 回到 rvdbg |
+| `:last` | 本次会话在这条链接上收到过的包 |
+| `:help` | 列出这些命令 |
+| `::text` | 发送 `:text` |
+| `--…` | 不发送：看起来是 rvdbg 的选项 |
+
+终端还会说明它看到的情况：发出的包 1 秒还没被目标读走（目标可能已经不服务这条链接），被读走后 2 秒没有回复；同一会话里再次进入一条链接时，先列出之前收到的包，例如 `< ready (35 s ago); the target may be waiting for a command`。链接 3 秒还没打开时，不停核地读出诊断：其他链接的状态，以及 hypervisor 的停止记录（见 [`rvdbg cores`](inspection.md)）。
 
 `--symbol` 可选择其他符号；`--address` 直接给地址，跳过 ELF 符号查找。符号和镜像选择规则与[项目配置](configuration.md)一致，地址必须指向实际有效的 FDX 链接。
 
@@ -57,7 +72,7 @@ rvdbg fdx --guest 0
 rvdbg fdx --send "boot single" --expect "ok boot" --timeout 10 --json
 ```
 
-工具先按顺序发送全部 `--send` 包，再按顺序等待 `--expect` 包。重复选项可以发送或等待多个包。`--timeout` 分别约束等待链接打开、发送空间及每个期望包的等待，不能理解为整条命令的总时间上限。期望包没有按时到达时返回 3。
+工具先按顺序发送全部 `--send` 包，再按顺序等待 `--expect` 包。重复选项可以发送或等待多个包。链接打开前发出的包会留在 ring 里，所以 Guest 还在启动时，`rvdbg fdx --guest 0 --send "run timer" --expect ready --expect "ok timer"` 也能用。`--timeout` 分别约束等待链接打开、发送空间及每个期望包的等待，不能理解为整条命令的总时间上限。期望包没有按时到达时返回 3。链接在超时内没有打开时，错误信息里带上面那样的诊断。
 
 FDX 只提供传输，消息的含义由固件定义；一个字符串可能触发启动、测量或状态修改。`--json` 只改变输出形式，不改变这些作用。脚本怎样判断结果见[自动化](automation.md)。
 
@@ -65,4 +80,4 @@ FDX 只提供传输，消息的含义由固件定义；一个字符串可能触�
 
 同一 FDX 链接同一时刻只能由一个主机程序驱动。不要同时让板级 runner、`rvdbg fdx` 和 PowerView `FDX.*` 窗口使用它。RTT 也应避免多个读者竞争同一个通道的读偏移。
 
-`rvdbg fdx --close` 将链接标成关闭；它用于板子保持复位、RAM 还残留上次打开状态的特定场景，会修改 RAM，不是通用的“断开主机连接”按钮。不要在固件或 runner 正在使用链接时执行。
+`rvdbg reset` 复位后、芯片还停着时，把所有镜像的链接标成关闭，这样 `fdx` 等的是这次运行的链接，而不是读到上次运行留下的（`reset --keep-links` 保留它们）。`rvdbg fdx --close`（一条链接）和 `rvdbg fdx --close --all` 不复位、只做这件事：它们会修改 RAM，用于板子保持复位、RAM 还残留上次打开状态的场景，不是通用的“断开主机连接”按钮。不要在固件或 runner 正在使用链接时执行。

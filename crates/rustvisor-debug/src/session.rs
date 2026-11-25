@@ -13,6 +13,12 @@
 //! line first, then after each command's own output (one JSON line for the
 //! inspect commands) an `end` JSON line with its exit code and error.
 //!
+//! Several lines at once (a paste) run one after the other, each shown
+//! after the prompt, and stop at the first that fails; a line ending in `\`
+//! continues on the next. `source <file>` runs a file's lines the same way
+//! (`#` starts a comment). `images <dir>` switches the session to the images
+//! of a directory.
+//!
 //! Ctrl-C stops a waiting command (`rtt`, `fdx`, `run-until`), not the session;
 //! `quit`, `exit` or Ctrl-D end it.
 
@@ -35,6 +41,7 @@ use probecore::style::Style;
 use stellarbridge::core::{CoreTarget, RunState};
 
 use crate::config::{self, Backend, Config};
+use crate::fdx_terminal::History;
 use crate::{Cli, Commands, Env, SessionLink, execute, install_skill, probe};
 
 /// What a command needs to run.
@@ -57,6 +64,7 @@ const GROUPS: &[(&str, &[(&str, Need)])] = &[
             ("mem", Need::Probe),
             ("ram", Need::Probe),
             ("fault", Need::Probe),
+            ("cores", Need::Probe),
             ("verify", Need::Probe),
             ("check", Need::Probe),
             ("clock", Need::Probe),
@@ -94,6 +102,7 @@ const GROUPS: &[(&str, &[(&str, Need)])] = &[
         "project",
         &[
             ("config", Need::Nothing),
+            ("images", Need::Nothing),
             ("debug", Need::Probe),
             ("vscode", Need::Nothing),
             ("rustrover", Need::Nothing),
@@ -107,6 +116,7 @@ const GROUPS: &[(&str, &[(&str, Need)])] = &[
 /// The session's own commands, after the groups.
 const SESSION_WORDS: &[(&str, &str)] = &[
     ("help", "help [command]"),
+    ("source", "source <file>"),
     ("backend", "backend trace32|openocd"),
     ("reconnect", "reconnect"),
     ("quit", "quit"),
@@ -172,6 +182,10 @@ fn command_help(name: &str, style: Style) -> Result<String, String> {
     if let Some((_, usage)) = SESSION_WORDS.iter().find(|(word, _)| *word == name) {
         let what = match name {
             "help" => "the command list, or the help of one command",
+            "source" => {
+                "run the file's lines as if typed, each shown after the prompt; stops at the \
+                 first that fails; '#' starts a comment, a line ending in '\\' continues"
+            }
             "backend" => "use this backend from now on, whatever is connected",
             "reconnect" => "look for the probe again and connect to it (OpenOCD is restarted)",
             _ => "leave the session (also 'exit' or Ctrl-D)",
@@ -384,7 +398,55 @@ impl Highlighter for LineHelper {
     }
 }
 
-impl Validator for LineHelper {}
+impl Validator for LineHelper {
+    /// A line ending in `\` continues on the next.
+    fn validate(
+        &self,
+        ctx: &mut rustyline::validate::ValidationContext<'_>,
+    ) -> rustyline::Result<rustyline::validate::ValidationResult> {
+        Ok(if ctx.input().trim_end().ends_with('\\') {
+            rustyline::validate::ValidationResult::Incomplete
+        } else {
+            rustyline::validate::ValidationResult::Valid(None)
+        })
+    }
+}
+
+/// The commands of an input that may hold several lines, with their line
+/// numbers: a line ending in `\` continues on the next; blank lines and
+/// lines starting with `#` are skipped.
+pub fn logical_lines(input: &str) -> Vec<(usize, String)> {
+    let mut lines = Vec::new();
+    let mut pending: Option<(usize, String)> = None;
+    for (index, raw) in input.split('\n').enumerate() {
+        let line = raw.trim_end_matches('\r');
+        let (number, mut text) = pending.take().unwrap_or_else(|| (index + 1, String::new()));
+        // A continued line joins the one before with one space.
+        let line = if text.is_empty() {
+            line
+        } else {
+            text.push(' ');
+            line.trim_start()
+        };
+        if let Some(head) = line.trim_end().strip_suffix('\\') {
+            text.push_str(head.trim_end());
+            pending = Some((number, text));
+            continue;
+        }
+        text.push_str(line);
+        let command = text.trim();
+        if !command.is_empty() && !command.starts_with('#') {
+            lines.push((number, command.to_string()));
+        }
+    }
+    if let Some((number, text)) = pending {
+        let command = text.trim();
+        if !command.is_empty() && !command.starts_with('#') {
+            lines.push((number, command.to_string()));
+        }
+    }
+    lines
+}
 
 impl Helper for LineHelper {}
 
@@ -395,8 +457,8 @@ pub enum Flow {
 }
 
 /// The session's state, independent of the terminal so that tests drive it.
-pub struct Session<'a> {
-    config: &'a Config,
+pub struct Session {
+    config: Config,
     /// `--backend` on the command line.
     flag: Option<Backend>,
     json: bool,
@@ -413,10 +475,17 @@ pub struct Session<'a> {
     failure: Option<String>,
     /// Look for probes; tests replace it.
     detect: fn(&Config) -> Result<Vec<probe::Found>, String>,
+    /// What each FDX link sent in this session.
+    history: History,
+    /// `source` files being run, innermost last.
+    sourcing: Vec<PathBuf>,
 }
 
-impl<'a> Session<'a> {
-    fn new(config: &'a Config, flag: Option<Backend>, json: bool, style: Style) -> Session<'a> {
+/// How deep `source` files may nest.
+const SOURCE_DEPTH: usize = 8;
+
+impl Session {
+    fn new(config: Config, flag: Option<Backend>, json: bool, style: Style) -> Session {
         Session {
             config,
             flag,
@@ -430,6 +499,8 @@ impl<'a> Session<'a> {
             code: 0,
             failure: None,
             detect: probe::detect,
+            history: History::default(),
+            sourcing: Vec::new(),
         }
     }
 
@@ -452,11 +523,11 @@ impl<'a> Session<'a> {
         self.powerview = None;
         let fixed = match forced {
             Some(backend) => Some((backend, "the 'backend' command")),
-            None => crate::fixed(self.config, self.flag),
+            None => crate::fixed(&self.config, self.flag),
         };
         let found = match fixed {
             Some(_) => Vec::new(),
-            None => match (self.detect)(self.config) {
+            None => match (self.detect)(&self.config) {
                 Ok(found) => found,
                 Err(error) => {
                     self.backend = None;
@@ -495,7 +566,7 @@ impl<'a> Session<'a> {
             ));
             return Ok(());
         }
-        let log = crate::run_dir(self.config)?.join("openocd.log");
+        let log = crate::run_dir(&self.config)?.join("openocd.log");
         let mut server_config = crate::openocd::server_config(openocd, Some(log.clone()), true);
         server_config.own_process_group = true;
         self.note(&format!("starting {}", openocd.executable.display()));
@@ -520,13 +591,30 @@ impl<'a> Session<'a> {
             None => style.warn(&self.reason),
         };
         format!(
-            "{} {}  {}\n{}  {backend}\n\n{}\n",
+            "{} {}  {}\n{}  {backend}\n{}   {}\n\n{}\n",
             style.label("rvdbg"),
             env!("CARGO_PKG_VERSION"),
             style.dim(self.config.file.display()),
             style.label("backend"),
+            style.label("images"),
+            self.images_line(),
             help_text(style, self.backend)
         )
+    }
+
+    /// Where the images come from, and the ELF's directory when it is not
+    /// rvdbg.toml's.
+    fn images_line(&self) -> String {
+        match &self.config.images_from {
+            config::ImagesFrom::Environment => format!(
+                "ELF/EXTRA_ELF ({})",
+                self.config
+                    .elf
+                    .parent()
+                    .map_or_else(String::new, |dir| dir.display().to_string())
+            ),
+            from => from.to_string(),
+        }
     }
 
     /// `rvdbg [openocd running]> `, `rvdbg [trace32]> `, `rvdbg [no probe]> `.
@@ -534,10 +622,19 @@ impl<'a> Session<'a> {
         let inside = match self.backend {
             None => "no probe".to_string(),
             Some(Backend::Trace32) => {
-                if probe::listening(probe::rcl_port(self.config)) {
-                    "trace32".to_string()
-                } else {
+                if !probe::listening(probe::rcl_port(&self.config)) {
                     "trace32 no-PowerView".to_string()
+                } else {
+                    // Only on the connection the session already has.
+                    match self.powerview.as_mut().map(|session| session.running()) {
+                        Some(Ok(true)) => "trace32 running".to_string(),
+                        Some(Ok(false)) => "trace32 halted".to_string(),
+                        Some(Err(_)) => {
+                            self.powerview = None;
+                            "trace32".to_string()
+                        }
+                        None => "trace32".to_string(),
+                    }
                 }
             }
             Some(Backend::OpenOcd) => {
@@ -570,6 +667,105 @@ impl<'a> Session<'a> {
         format!("rvdbg [{inside}]> ")
     }
 
+    /// What was typed or pasted: one line, or several run in order until
+    /// one fails ([`logical_lines`]).
+    pub fn handle_input(&mut self, input: &str) -> Flow {
+        let lines = logical_lines(input);
+        match lines.as_slice() {
+            [] => {
+                self.code = 0;
+                self.failure = None;
+                Flow::Continue
+            }
+            [(_, line)] if !input.contains('\n') => self.handle_line(line),
+            _ => self.run_lines(&lines, None),
+        }
+    }
+
+    /// Lines one after the other, each shown after the prompt; the first that
+    /// fails (or Ctrl-C) stops the rest. `file` names them in the message.
+    fn run_lines(&mut self, lines: &[(usize, String)], file: Option<&Path>) -> Flow {
+        self.interrupted.store(false, Ordering::SeqCst);
+        for (index, (number, line)) in lines.iter().enumerate() {
+            if !self.json {
+                let prompt = self.prompt();
+                println!("{}{line}", color_prompt(self.style, &prompt));
+            }
+            if self.handle_line(line) == Flow::Quit {
+                return Flow::Quit;
+            }
+            let stopped = self.interrupted.load(Ordering::SeqCst);
+            if self.code != 0 || stopped {
+                let left = lines.len() - index - 1;
+                let at = match file {
+                    Some(file) => format!("{}:{number}", file.display()),
+                    None => format!("line {}", index + 1),
+                };
+                let why = if self.code != 0 {
+                    "failed"
+                } else {
+                    "was interrupted"
+                };
+                if left > 0 {
+                    eprintln!(
+                        "{} {at} {why}; {left} line(s) not run",
+                        self.style.bad("error:")
+                    );
+                }
+                if self.code == 0 {
+                    self.code = 1;
+                    self.failure = Some(format!("{at} {why}"));
+                }
+                return Flow::Continue;
+            }
+        }
+        Flow::Continue
+    }
+
+    /// `source <file>`: its lines as if typed.
+    fn source(&mut self, file: &str) -> Flow {
+        let path = std::env::current_dir()
+            .map(|cwd| cwd.join(file))
+            .unwrap_or_else(|_| PathBuf::from(file));
+        if self.sourcing.len() >= SOURCE_DEPTH {
+            self.error(&format!("source files nest more than {SOURCE_DEPTH} deep"));
+            return Flow::Continue;
+        }
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                self.error(&format!("cannot read {}: {error}", path.display()));
+                return Flow::Continue;
+            }
+        };
+        self.sourcing.push(path.clone());
+        let flow = self.run_lines(&logical_lines(&text), Some(&path));
+        self.sourcing.pop();
+        flow
+    }
+
+    /// `images <dir>`: the session's images from now on.
+    fn switch_images(&mut self, dir: &str) {
+        let path = std::env::current_dir()
+            .map(|cwd| cwd.join(dir))
+            .unwrap_or_else(|_| PathBuf::from(dir));
+        match self.config.clone().with_images(&path) {
+            Ok(config) => {
+                self.config = config;
+                // The connection and the links belong to the old images.
+                self.powerview = None;
+                self.history.clear();
+                self.note(&format!(
+                    "images from {}: {} and {} extra image(s)",
+                    path.display(),
+                    self.config.elf.display(),
+                    self.config.extra_elf.len()
+                ));
+            }
+            Err(error) => self.error(&error),
+        }
+    }
+
     pub fn handle_line(&mut self, line: &str) -> Flow {
         self.code = 0;
         self.failure = None;
@@ -583,8 +779,30 @@ impl<'a> Session<'a> {
         let Some(first) = args.first().cloned() else {
             return Flow::Continue;
         };
+        if first.starts_with('-') {
+            self.code = 2;
+            self.error(&format!(
+                "a line starts with a command, options come after it (e.g. 'fdx {first}'); \
+                 'help' lists the commands"
+            ));
+            return Flow::Continue;
+        }
         match first.as_str() {
             "quit" | "exit" => return Flow::Quit,
+            "source" => {
+                return match args.as_slice() {
+                    [_, file] => self.source(file),
+                    _ => {
+                        self.code = 2;
+                        self.error("source <file>");
+                        Flow::Continue
+                    }
+                };
+            }
+            "images" if args.len() == 2 && !args[1].starts_with('-') => {
+                self.switch_images(&args[1]);
+                return Flow::Continue;
+            }
             "help" => {
                 match args.get(1) {
                     None => println!("{}", help_text(self.style, self.backend)),
@@ -631,8 +849,8 @@ impl<'a> Session<'a> {
                 return Flow::Continue;
             }
             Err(error) => {
-                let _ = error.print();
                 self.code = u8::try_from(error.exit_code()).unwrap_or(2);
+                print_clap_error(&error, &first, self.style);
                 if self.code != 0 {
                     self.failure = Some(error.kind().to_string());
                 }
@@ -689,8 +907,12 @@ impl<'a> Session<'a> {
                 }
                 // Commands that need no probe (config, vscode, rustrover) also
                 // run without one.
+                if name == "flash" {
+                    // The images start again.
+                    self.history.clear();
+                }
                 let mut env = Env {
-                    config: self.config,
+                    config: &self.config,
                     flag: self.backend.or(self.flag),
                     json,
                     session: self.backend.map(|backend| SessionLink {
@@ -698,6 +920,7 @@ impl<'a> Session<'a> {
                         server: self.server.as_mut(),
                         interrupted: &self.interrupted,
                         powerview: Some(&mut self.powerview),
+                        history: Some(&mut self.history),
                     }),
                 };
                 let code = execute(&mut env, command)?;
@@ -751,6 +974,32 @@ const SHARES_POWERVIEW: &[&str] = &[
     "swtrace",
 ];
 
+/// A usage error the way a session shows it: clap's message, with the
+/// session's `help <command>` instead of `--help`.
+fn print_clap_error(error: &clap::Error, command: &str, style: Style) {
+    use clap::error::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    ) {
+        let _ = error.print();
+        return;
+    }
+    let rendered = error.render();
+    let text = if style.enabled() {
+        rendered.ansi().to_string()
+    } else {
+        rendered.to_string()
+    };
+    for line in text.trim_end().lines() {
+        if line.contains("For more information, try") {
+            eprintln!("'help {command}' explains the command");
+        } else {
+            eprintln!("{line}");
+        }
+    }
+}
+
 /// The `end` line after a command in `--json` pipe mode.
 fn end_line(line: &str, code: u8, error: Option<&str>) -> String {
     serde_json::json!({
@@ -795,6 +1044,7 @@ pub fn run(
     cwd: &Path,
     flag: Option<Backend>,
     json: bool,
+    images: Option<&Path>,
 ) -> Result<u8, String> {
     let style = Style::stdout();
     let path = match config::find(explicit, cwd) {
@@ -804,7 +1054,10 @@ pub fn run(
             return Err(error);
         }
     };
-    let config = config::load(&path)?;
+    let mut config = config::load(&path)?;
+    if let Some(dir) = images {
+        config = config.with_images(&cwd.join(dir))?;
+    }
 
     // Ctrl-C sets the flag instead of ending rvdbg; the line editor reads it
     // as a key while it waits for input.
@@ -815,7 +1068,7 @@ pub fn run(
 
     let machine = json && !std::io::stdin().is_terminal();
     let style = if machine { Style::PLAIN } else { style };
-    let mut session = Session::new(&config, flag, json, style);
+    let mut session = Session::new(config.clone(), flag, json, style);
     session.interrupted = interrupted;
     session.connect(None);
     if machine {
@@ -867,14 +1120,16 @@ pub fn run(
     loop {
         let prompt = session.prompt();
         match editor.readline(&prompt) {
-            Ok(line) => {
-                if !line.trim().is_empty() {
-                    let _ = editor.add_history_entry(line.as_str());
-                    if let Some(path) = &history {
-                        let _ = editor.append_history(path);
+            Ok(input) => {
+                for line in input.split('\n') {
+                    if !line.trim().is_empty() {
+                        let _ = editor.add_history_entry(line.trim_end());
+                        if let Some(path) = &history {
+                            let _ = editor.append_history(path);
+                        }
                     }
                 }
-                if session.handle_line(&line) == Flow::Quit {
+                if session.handle_input(&input) == Flow::Quit {
                     break;
                 }
             }
@@ -927,6 +1182,87 @@ mod tests {
     }
 
     #[test]
+    fn pasted_lines_split_continue_and_skip_comments() {
+        assert_eq!(
+            logical_lines(
+                "reset\r\n\n# a comment\n  go  \nfdx --send \\\n  \"lab five\" \\\n --expect x\n"
+            ),
+            [
+                (1, "reset".to_string()),
+                (4, "go".to_string()),
+                (5, "fdx --send \"lab five\" --expect x".to_string()),
+            ]
+        );
+        assert_eq!(logical_lines("status"), [(1, "status".to_string())]);
+        assert_eq!(logical_lines("a \\"), [(1, "a".to_string())]);
+        assert!(logical_lines(" \n# x").is_empty());
+    }
+
+    #[test]
+    fn several_lines_run_in_order_and_stop_at_the_first_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let mut session = Session::new(config.clone(), None, false, Style::PLAIN);
+        session.detect = nothing_found;
+        session.connect(None);
+        // vscode runs without a probe; status fails; rustrover is not run.
+        assert_eq!(
+            session.handle_input("vscode\nstatus\nrustrover"),
+            Flow::Continue
+        );
+        assert_eq!(session.code, 1);
+        assert!(dir.path().join(".vscode/launch.json").exists());
+        assert!(!dir.path().join(".run").exists());
+        // A source file the same way, with its own line numbers.
+        let file = dir.path().join("steps.rvdbg");
+        std::fs::write(&file, "# steps\nhelp\nstatus\nrustrover\n").unwrap();
+        assert_eq!(
+            session.handle_line(&format!("source '{}'", file.display())),
+            Flow::Continue
+        );
+        assert_eq!(session.code, 1);
+        assert!(!dir.path().join(".run").exists());
+        assert_eq!(session.handle_input("help\nquit\nstatus"), Flow::Quit);
+        session.handle_line("source");
+        assert_eq!(session.code, 2);
+    }
+
+    #[test]
+    fn an_option_without_a_command_and_images_of_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let mut session = Session::new(config.clone(), None, false, Style::PLAIN);
+        session.detect = nothing_found;
+        session.connect(None);
+        session.handle_line("--close");
+        assert_eq!(session.code, 2);
+        assert!(
+            session
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("'fdx --close'")
+        );
+        let images = dir.path().join("case");
+        std::fs::create_dir(&images).unwrap();
+        for name in ["hypervisor", "guest0.elf", "guest1.elf"] {
+            std::fs::write(images.join(name), b"\x7FELF....").unwrap();
+        }
+        std::fs::write(images.join("run.log"), b"log").unwrap();
+        session.handle_line(&format!("images '{}'", images.display()));
+        assert_eq!(session.code, 0, "{:?}", session.failure);
+        assert_eq!(session.config.elf, images.join("hypervisor"));
+        assert_eq!(
+            session.config.extra_elf,
+            [images.join("guest0.elf"), images.join("guest1.elf")]
+        );
+        assert_eq!(session.config.program, "hypervisor");
+        assert!(session.images_line().starts_with("--images"));
+        session.handle_line("images /nonexistent/dir");
+        assert_eq!(session.code, 1);
+    }
+
+    #[test]
     fn help_dims_what_the_backend_cannot_do() {
         let plain = Style::PLAIN;
         let text = help_text(plain, Some(Backend::OpenOcd));
@@ -975,7 +1311,7 @@ mod tests {
     fn without_a_probe_target_commands_are_refused_and_the_session_goes_on() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
-        let mut session = Session::new(&config, None, false, Style::PLAIN);
+        let mut session = Session::new(config.clone(), None, false, Style::PLAIN);
         session.detect = nothing_found;
         session.connect(None);
         assert_eq!(session.backend, None);
@@ -997,7 +1333,7 @@ mod tests {
     fn each_line_leaves_its_exit_code_and_error_for_the_end_line() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
-        let mut session = Session::new(&config, None, true, Style::PLAIN);
+        let mut session = Session::new(config.clone(), None, true, Style::PLAIN);
         session.detect = nothing_found;
         session.connect(None);
         session.handle_line("status");
@@ -1032,7 +1368,7 @@ mod tests {
     fn trace32_only_commands_are_refused_on_openocd() {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path());
-        let mut session = Session::new(&config, None, false, Style::PLAIN);
+        let mut session = Session::new(config.clone(), None, false, Style::PLAIN);
         // OpenOCD chosen but not started: the check happens before any use.
         session.backend = Some(Backend::OpenOcd);
         let cli = Cli::try_parse_from(["rvdbg", "reg", "HSR"]).unwrap();

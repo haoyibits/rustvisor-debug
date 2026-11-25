@@ -11,8 +11,8 @@
 | `rvdbg status` | 查看状态，不自动停核 |
 | `rvdbg attach` | 不复位地连接目标，保留原有运行/停止状态 |
 | `rvdbg halt` | 停下所选核 |
-| `rvdbg go` | 继续所选核 |
-| `rvdbg reset` | 复位芯片并停在复位向量 |
+| `rvdbg go` | 继续所选核；已经在运行的核不动（`already running`） |
+| `rvdbg reset` | 复位芯片并停在复位向量，然后把所有镜像的 FDX 链接标成关闭（`--keep-links` 保留） |
 | `rvdbg run-until <符号或地址>` | 从停核状态运行到临时硬件断点 |
 | `rvdbg down` | TRACE32：执行 `SYStem.Down` |
 
@@ -89,7 +89,19 @@ rvdbg [...]> go
 rvdbg [...]> quit
 ```
 
-会话提供 `help [命令]`、Tab 补全、`backend trace32|openocd`、`reconnect` 和 `quit`/`exit`。换探针后用 `reconnect` 重新检测。历史写入 `.rvdbg/history`。Ctrl-C 结束等待中的 RTT、FDX 或 run-until，保留会话；命令失败也不会直接退出。
+会话提供 `help [命令]`、Tab 补全、`backend trace32|openocd`、`reconnect` 和 `quit`/`exit`。换探针后用 `reconnect` 重新检测。历史写入 `.rvdbg/history`。Ctrl-C 结束等待中的 RTT、FDX 或 run-until，保留会话；命令失败也不会直接退出。提示符显示核在运行还是停着（`rvdbg [trace32 running]>`；TRACE32 要等会话建立了连接之后才显示）。
+
+一次粘贴多行时，按行依次执行，每行先跟在提示符后显示一遍；某一行失败就停下（`error: line 3 failed; 2 line(s) not run`）。以 `\` 结尾的行和下一行合成一条命令。`;` 不分隔命令：它在 `cmd`/`eval` 的 PRACTICE 文本里是注释。`source <文件>` 按同样的规则执行文件里的行，`#` 开头的是注释，失败时报 `文件:行号`：
+
+```text
+# lab-timer.rvdbg：示例；这些包是 SDK lab 固件的命令
+reset
+go
+fdx --send "lab five inject trace" --expect ready --expect "ok lab"
+fdx --guest 0 --send "run timer" --expect ready --expect "ok timer"
+```
+
+`images <目录>` 把会话换成一个目录里的镜像（见[项目配置](configuration.md)）。以选项开头的行（例如 `--close`）会被拒绝，并提示正确写法（`fdx --close`）。
 
 StellarLINK 会话保持一个 OpenOCD 供命令与 GDB 共用。TRACE32 的查看命令、`ram` 和 `fdx` 共用首次使用时建立的连接；失败后丢弃，下一条命令重新连接，失败命令不会自动重试。`flash`、`load`、`open` 等另行管理连接。
 

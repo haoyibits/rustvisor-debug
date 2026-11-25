@@ -308,7 +308,7 @@ pub fn execute(ctx: &mut Context, command: &DebugCommand) -> DResult<Outcome> {
         DebugCommand::Reset => commands::reset(ctx),
         DebugCommand::Down => commands::command(ctx, "SYStem.Down", "SYStem.Down done"),
         DebugCommand::Break => commands::command(ctx, "Break", "halted"),
-        DebugCommand::Go => commands::command(ctx, "Go", "running"),
+        DebugCommand::Go => commands::go(ctx),
         DebugCommand::RunUntil { timeout, target } => commands::run_until(
             ctx,
             target,

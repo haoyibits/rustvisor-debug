@@ -188,6 +188,15 @@ pub fn run(
             Ok(outcome)
         }
         Request::Go => {
+            if matches!(
+                target.run_state(),
+                Ok(stellarbridge::core::RunState::Running)
+            ) {
+                return Ok(Outcome::ok(
+                    style.good("already running"),
+                    json!({"state": "running", "already": true}),
+                ));
+            }
             target.resume().map_err(text)?;
             Ok(Outcome::ok(
                 style.good("running"),

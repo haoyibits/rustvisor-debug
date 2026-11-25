@@ -99,6 +99,15 @@ Apply the same prefix to the actual operation or export it in the shell. An over
 
 Clearing `EXTRA_ELF` changes the [flash/verification image set](flashing.md). TRACE32 erase ranges come from the script and do not shrink automatically with that list.
 
+## A directory of images: `--images`
+
+```sh
+rvdbg --images target/board-tests/latency/<run>/00-inject-five flash
+rvdbg images
+```
+
+`--images <dir>` takes the images of a directory instead of `rvdbg.toml`'s and `ELF`/`EXTRA_ELF`: `hypervisor` (or the directory's only other ELF) is the primary image, `guest0.elf`, `guest1.elf`, … the extra images in order, and the symbol program is the primary image's file name. That is the layout of a board-tests case directory. It applies to every command of that invocation, both backends; in an interactive session `images <dir>` switches. `rvdbg images` lists the images in use, where they come from, and each one's FDX link (open or closed when a probe answers).
+
 ## Local files
 
 | Location | Contents |

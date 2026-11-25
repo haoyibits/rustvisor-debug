@@ -92,7 +92,9 @@ rvdbg vscode                 # 或：rvdbg rustrover（TRACE32）
 | `debug` | 前台运行给 IDE 用的调试服务 | DAP 代理 | `gdb_target` 的 GDB server |
 | `vscode` | 把两个后端的调试配置写进 `.vscode/` | `TRACE32: Attach` | `StellarLINK: Attach`（Cortex-Debug） |
 | `rustrover` | 写 `.run/TRACE32 Attach.run.xml`（LSP4IJ） | 支持 | — |
-| `status`、`halt`、`go` | 运行状态（停着时还有 PC 和 CPSR）、停核、继续运行 | 支持 | 支持 |
+| `status`、`halt`、`go` | 运行状态（停着时还有 PC 和 CPSR）、停核、继续运行（核已经在跑时 `go` 会说明并正常返回） | 支持 | 支持 |
+| `cores` | 核运行时读出每个核的 stop record（`RUSTVISOR_STOP_RECORDS`）和每个镜像的 FDX 链接 | 经 `AD:` | 经 MEM-AP |
+| `images` | 镜像列表、来源、FDX 链接以及链接是否打开 | 支持 | 支持 |
 | `fault` | AArch32 Hyp 异常报告 | 还有 `--trace [N]` | 同样的报告；核必须停在 Hyp 模式 |
 | `mem <地址\|符号> [n]` | 读 32 位字 | 支持 | 经 MEM-AP，符号来自 ELF |
 | `ram <地址\|符号> [n]`、`ram … --write v…` | 核运行时批量读写普通 RAM（不能用于 MMIO） | 经 `AD:` | 经 MEM-AP |
@@ -100,9 +102,9 @@ rvdbg vscode                 # 或：rvdbg rustrover（TRACE32）
 | `check 文件` | 按检查文件比对期望值 | 所有读取方式 | `addr`、`core`、`clock` 读取 |
 | `clock` | 带频率的时钟树 | 还有 `--html` | 支持 |
 | `rtt` | 通道 0 上的 SEGGER RTT 终端 | 支持 | 经 MEM-AP，核照常运行 |
-| `fdx` | 镜像的 FDX 链接：一行一个包，或用 `--send`/`--expect`、`--close` | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
+| `fdx` | 镜像的 FDX 链接：一行一个包，或用 `--send`/`--expect`、`--close`；`--all` 在一个终端里用所有镜像的链接 | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
 | `swtrace` | 软件 trace 记录（`RUSTVISOR_TRACE`）：读空、把 IPC 发送和接收配对、按方向统计延迟，可加 `--csv`、`--html` 时间线；`--from` 读 CSV，不需要探头 | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
-| `reset` | 复位并停在复位向量 | 支持 | `reset halt` |
+| `reset` | 复位并停在复位向量；关闭每个镜像的 FDX 链接（`--keep-links` 保留） | 支持 | `reset halt` |
 | `attach` | 连上目标但不复位 | `SYStem.Mode Attach` | 支持 |
 | `run-until <符号\|地址>` | 让停着的核运行到某个符号或地址 | 片上断点 | 硬件断点 |
 | `open`、`chips`、`reg`、`eval`、`cmd`、`watch`、`trace`、`do`、`down` | PowerView、烧录脚本、PER 文件、PRACTICE、trace | 支持 | — |
@@ -138,6 +140,7 @@ rvdbg [openocd halted]> quit
 - 用 TRACE32 时，查看类命令、`ram` 和 `fdx` 共用一个 PowerView 连接：第一次用时建立，命令失败后丢弃（不会重试）；`flash`、`load`、`open` 等命令自己连接。
 - 会话自己的命令：`help [命令]`、`backend trace32|openocd`、`reconnect`（重新检测调试器，比如刚插上之后）、`quit` / `exit` / Ctrl-D。Ctrl-C 只停止正在等待的命令（`rtt`、`fdx`、`run-until`），不退出会话。命令出错也不会结束会话。
 - Tab 补全命令名，历史记录在 `.rvdbg/history`。
+- 粘贴的多行依次执行，遇到第一个失败就停下；行尾是 `\` 的行和下一行接起来。`source 文件` 用同样的方式执行一个命令文件（跳过 `#` 注释和空行）。`images <目录>` 让会话换用另一组镜像。
 - 从管道读入时不显示提示符，每行执行一条命令。
 - `rvdbg --json` 从管道读入时是给程序（板级 runner）用的：先输出一行 `{"ready": true, "backend": …}`，之后每条命令先输出它自己的内容（查看类命令、`ram` 和 `fdx --send/--expect` 是一行 JSON），再输出一行 `{"end": "<这一行>", "ok": …, "exit_code": …, "error": …}`。
 
@@ -257,6 +260,12 @@ EXTRA_ELF="build/guest.elf build/other.elf" rvdbg flash
 EXTRA_ELF= rvdbg flash      # 只烧 elf；用 TRACE32 时其他镜像所在的扇区会被擦掉
 ```
 
+`--images 目录` 从一个构建目录取镜像，不用 `rvdbg.toml` 里的：`hypervisor`（或目录里唯一的其他 ELF）作为 `elf`，再按顺序把 `guest0.elf`、`guest1.elf`…… 作为 `extra_elf`。`rvdbg images` 列出命令会用哪些镜像、它们从哪里来。
+
+```sh
+rvdbg --images target/board-tests/latency/<run>/00-inject-five flash
+```
+
 ## 在 IDE 或 GDB 里调试
 
 ### VS Code
@@ -312,11 +321,14 @@ rustvisor 的镜像通过 FDX（Lauterbach 的 Fast Data eXchange，BufferE 方�
 
 ```sh
 rvdbg fdx                                      # 输入的每一行是一个包
-rvdbg fdx --guest 0                            # 第一个额外镜像的链接
+rvdbg fdx --guest 0                            # 第一个额外镜像的链接（也可写 guest0）
+rvdbg fdx --all                                # 所有镜像的链接；@guest1 或 :to guest1 切换
 rvdbg fdx --send "boot single" --expect "ok boot" --json
 ```
 
 交互模式下，目标发来的包一行一个打印出来，直到按 Ctrl-C（在终端里是 `< <包>`，要发的行在 `> ` 提示符后输入）；目标复位后重新打开链接，会自动跟上。`--close` 把链接标成关闭，在板子保持复位时用：RAM 里会一直留着上一次运行打开的链接，直到镜像重新打开它。用 `--send` 时按顺序发出这些包，然后依次等待每个 `--expect` 的包（每个最多等 `--timeout` 秒，默认 10）；有一个没等到就以退出码 3 结束。链接地址从 ELF 的符号表里查（`--symbol`、`fdx.symbol`），也可以用 `--address` 直接给。同一条链接同一时间只能有一个程序在用：`rvdbg fdx` 不要和板级 runner 或 PowerView 自己的 `FDX.*` 窗口同时用。
+
+在终端里，提示符是链接名（`el2> `、`guest0> `）。链接还没打开时，输入的行会被拒绝，几秒后说明原因：哪些链接已经打开、哪个核有 stop record。镜像还没读走的包会提示出来；`:last` 显示最近收到的包（存在 `.rvdbg/fdx-history`），`:help` 列出本地命令，`::text` 发送 `:text`。`reset` 会清空这份历史。
 
 ### 软件 trace
 

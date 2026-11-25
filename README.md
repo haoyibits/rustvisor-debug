@@ -123,7 +123,9 @@ Day to day:
 | `debug` | the debug server for the IDE, in the foreground | DAP adapter | GDB server on `gdb_target` |
 | `vscode` | write both backends' debug configurations into `.vscode/` | `TRACE32: Attach` | `StellarLINK: Attach` (Cortex-Debug) |
 | `rustrover` | write `.run/TRACE32 Attach.run.xml` (LSP4IJ) | yes | — |
-| `status`, `halt`, `go` | run state; PC and CPSR when halted; stop; resume | yes | yes |
+| `status`, `halt`, `go` | run state; PC and CPSR when halted; stop; resume (`go` on a running core says so and succeeds) | yes | yes |
+| `cores` | each core's stop record (`RUSTVISOR_STOP_RECORDS`) and each image's FDX link, while the cores run | through `AD:` | through the MEM-AP |
+| `images` | the images, where they come from, their FDX link and whether it is open | yes | yes |
 | `fault` | AArch32 Hyp fault report | also `--trace [N]` | the same report; the core must be halted in Hyp mode |
 | `mem <addr\|symbol> [n]` | 32-bit words | yes | through the MEM-AP, symbols from the ELF |
 | `ram <addr\|symbol> [n]`, `ram … --write v…` | ordinary RAM in bulk while the cores run (never MMIO) | through `AD:` | through the MEM-AP |
@@ -131,9 +133,9 @@ Day to day:
 | `check FILE` | a check file of expected values | every read kind | `addr`, `core` and `clock` reads |
 | `clock` | the clock tree with frequencies | also `--html` | yes |
 | `rtt` | SEGGER RTT terminal on channel 0 | yes | through the MEM-AP while the core runs |
-| `fdx` | the image's FDX link: one line per packet, `--send`/`--expect`, or `--close` | through `AD:` while the cores run | through the MEM-AP while the core runs |
+| `fdx` | the image's FDX link: one line per packet, `--send`/`--expect`, or `--close`; `--all` for every image's link in one terminal | through `AD:` while the cores run | through the MEM-AP while the core runs |
 | `swtrace` | software trace records (`RUSTVISOR_TRACE`): drain, pair IPC sends with receives, latency per direction, `--csv`, `--html` timeline; `--from` a CSV without a probe | through `AD:` while the cores run | through the MEM-AP while the core runs |
-| `reset` | reset and halt at the reset vector | yes | `reset halt` |
+| `reset` | reset and halt at the reset vector; closes every image's FDX link (`--keep-links` leaves them) | yes | `reset halt` |
 | `attach` | connect without resetting | `SYStem.Mode Attach` | yes |
 | `run-until <symbol\|addr>` | run a halted core to a symbol or address | on-chip breakpoint | hardware breakpoint |
 | `open`, `chips`, `reg`, `eval`, `cmd`, `watch`, `trace`, `do`, `down` | PowerView, flash scripts, PER files, PRACTICE, trace | yes | — |
@@ -192,6 +194,10 @@ rvdbg [openocd halted]> quit
   `quit` / `exit` / Ctrl-D. Ctrl-C stops a waiting command (`rtt`,
   `fdx`, `run-until`), not the session. A failing command does not end it.
 - Tab completes command names. The history is kept in `.rvdbg/history`.
+- Pasted lines run one after another and stop at the first failure; a line
+  ending in `\` continues on the next. `source FILE` runs a file of commands
+  the same way (`#` comments, blank lines skipped). `images <dir>` switches
+  the session to another set of images.
 - Read from a pipe, the session runs one command per line without a prompt.
 - `rvdbg --json` reading from a pipe is for programs (the board runner): a
   `{"ready": true, "backend": …}` line first, then after each command's own
@@ -358,6 +364,15 @@ EXTRA_ELF="build/guest.elf build/other.elf" rvdbg flash
 EXTRA_ELF= rvdbg flash      # only elf; with TRACE32 the other images' sectors are erased
 ```
 
+`--images DIR` takes the images from a build directory instead of
+`rvdbg.toml`: `hypervisor` (or the only other ELF in it) as `elf`, then
+`guest0.elf`, `guest1.elf`, … in order as `extra_elf`. `rvdbg images` lists
+what a command would use and where it comes from.
+
+```sh
+rvdbg --images target/board-tests/latency/<run>/00-inject-five flash
+```
+
 ## Debugging from an IDE or GDB
 
 ### VS Code
@@ -440,7 +455,8 @@ StellarLINK too, since only memory access is needed.
 
 ```sh
 rvdbg fdx                                      # each line typed is one packet
-rvdbg fdx --guest 0                            # the link of the first extra image
+rvdbg fdx --guest 0                            # the link of the first extra image (also guest0)
+rvdbg fdx --all                                # every image's link; @guest1 or :to guest1 picks one
 rvdbg fdx --send "boot single" --expect "ok boot" --json
 ```
 
@@ -454,6 +470,13 @@ seconds each, default 10); exit 3 when one does not come. The link's address
 comes from the ELF's symbol table (`--symbol`, `fdx.symbol`), or `--address`.
 Only one program may drive a link at a time: not `rvdbg fdx` together with
 the board runner or PowerView's own `FDX.*` windows.
+
+On a terminal the link name is the prompt (`el2> `, `guest0> `). A link that
+has not opened yet refuses the line and, after a few seconds, says why: which
+links are open and which core has a stop record. A packet the image has not
+read is reported, `:last` shows the last packets received (kept in
+`.rvdbg/fdx-history`), `:help` lists the local commands, `::text` sends
+`:text`. `reset` clears the history.
 
 ### Software trace
 

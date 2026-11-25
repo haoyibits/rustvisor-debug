@@ -271,7 +271,6 @@ pub fn data(found: &[Found], main: &str, map: &Map, texts: &Texts) -> Result<Val
                  row and linked across panels.",
         "meta": [
             {"label": "Source", "text": format!("rvdbg swtrace · {}", texts.source)},
-            {"label": "Clock", "text": format!("{frequency} Hz")},
         ],
         "footnote": if map.is_empty() {
             "No VM map: each channel is its own panel. [swtrace] map in rvdbg.toml or --map \

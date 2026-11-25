@@ -110,6 +110,96 @@ pub struct Config {
     pub swtrace_map: crate::timeline::Map,
     /// The tables for tracebridge, in trace32.toml's shape.
     pub trace32: Table,
+    /// Where `elf` and `extra_elf` come from.
+    pub images_from: ImagesFrom,
+}
+
+/// Where a configuration's images come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImagesFrom {
+    /// `project.elf` and `project.extra_elf`.
+    Config,
+    /// `ELF`, `EXTRA_ELF` or `PROJECT_ROOT`.
+    Environment,
+    /// `--images` (or the session's `images`): a directory of images.
+    Directory(PathBuf),
+}
+
+impl std::fmt::Display for ImagesFrom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImagesFrom::Config => f.write_str("rvdbg.toml"),
+            ImagesFrom::Environment => f.write_str("ELF/EXTRA_ELF"),
+            ImagesFrom::Directory(dir) => write!(f, "--images {}", dir.display()),
+        }
+    }
+}
+
+/// The images of a directory such as a board-tests case's: the EL2 ELF
+/// (`hypervisor`, else the only ELF not named `guest<n>.elf`) and
+/// `guest0.elf`, `guest1.elf`, … in order, with no gap.
+pub fn images_in(dir: &Path) -> Result<(PathBuf, Vec<PathBuf>), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+    let mut guests = BTreeMap::new();
+    let mut others = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("cannot read {}: {error}", dir.display()))?
+            .path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(number) = name
+            .strip_prefix("guest")
+            .and_then(|rest| rest.strip_suffix(".elf"))
+            .and_then(|number| number.parse::<usize>().ok())
+        {
+            guests.insert(number, path);
+        } else if is_elf(&path) {
+            others.push(path);
+        }
+    }
+    let elf = match others
+        .iter()
+        .find(|path| path.file_name().is_some_and(|name| name == "hypervisor"))
+    {
+        Some(path) => path.clone(),
+        None => match others.as_slice() {
+            [only] => only.clone(),
+            [] => return Err(format!("{} has no EL2 ELF (hypervisor)", dir.display())),
+            _ => {
+                return Err(format!(
+                    "{} has several ELFs and none is named hypervisor",
+                    dir.display()
+                ));
+            }
+        },
+    };
+    let mut extra = Vec::new();
+    for (expected, (number, path)) in guests.into_iter().enumerate() {
+        if number != expected {
+            return Err(format!(
+                "{}: guest{expected}.elf is missing (guest{number}.elf is there)",
+                dir.display()
+            ));
+        }
+        extra.push(path);
+    }
+    Ok((elf, extra))
+}
+
+fn is_elf(path: &Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0; 4];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok()
+        && magic == *b"\x7FELF"
 }
 
 impl Config {
@@ -128,6 +218,21 @@ impl Config {
             self.elf = elf;
         }
         self.extra_elf = images.collect();
+        self.images_from = ImagesFrom::Environment;
+        Ok(self)
+    }
+
+    /// The images of `dir` ([`images_in`]) instead of any other, for both
+    /// backends; the symbol program is the ELF's file name.
+    pub fn with_images(mut self, dir: &Path) -> Result<Config, String> {
+        let (elf, extra) = images_in(dir)?;
+        self.program = elf
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.elf = elf;
+        self.extra_elf = extra;
+        self.images_from = ImagesFrom::Directory(dir.to_path_buf());
         Ok(self)
     }
 
@@ -151,10 +256,19 @@ impl Config {
         self
     }
 
-    /// The tracebridge project of the TRACE32 tables.
+    /// The tracebridge project of the TRACE32 tables, with the images of
+    /// `--images` when it was given.
     pub fn trace32_project(&self) -> Result<tracebridge::backend::Project, String> {
-        tracebridge::backend::Project::from_document(&self.trace32, &self.file)
-            .map_err(|error| error.to_string())
+        let mut project = tracebridge::backend::Project::from_document(&self.trace32, &self.file)
+            .map_err(|error| error.to_string())?;
+        if let ImagesFrom::Directory(_) = self.images_from {
+            project.images(
+                self.elf.clone(),
+                self.extra_elf.clone(),
+                self.program.clone(),
+            );
+        }
+        Ok(project)
     }
 
     /// `<project>/.rvdbg`, for logs.
@@ -550,6 +664,7 @@ pub fn parse(text: &str, file: &Path, root: &Path) -> Result<Config, String> {
         fdx_symbol,
         swtrace_map,
         trace32,
+        images_from: ImagesFrom::Config,
     })
 }
 

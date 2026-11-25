@@ -76,6 +76,8 @@ Drive the process as follows:
 
 Inspection, `ram` and single-shot FDX provide structured output. `flash` and `load` may still emit progress text. Preserve these lines as logs and recognize agreed JSON record types rather than assuming identical structure on every line. Continuous `rtt`/bare `fdx` are unsuitable as normal requests in this loop; use [bounded FDX operations](channels.md).
 
+`reset` still prints one JSON value; the FDX links it closes are reported on stderr. `go` on a running core succeeds (`"command": null`, state running) instead of failing.
+
 **A session can exit 0 on EOF even after a command failed.** Consume every end record. Failed commands do not stop the input loop. If failure should abort a sequence, wait for end before sending the next command rather than queueing destructive operations upfront.
 
 Apply deadlines to startup, commands and shutdown. Drain stderr continuously to avoid filling a log pipe. After connection loss inspect target state before replaying operations.

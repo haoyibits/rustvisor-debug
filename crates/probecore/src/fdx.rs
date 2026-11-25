@@ -140,6 +140,18 @@ pub fn close(memory: &mut impl Memory, address: u64) -> Result<()> {
     Ok(memory.write_u32(address + 4 * SIZE as u64, 0)?)
 }
 
+/// Whether the channel to the target holds a packet the target has not read
+/// yet. The target's `receive` sets `targetindex` to the index below the
+/// packet it took, which is the `hostindex` [`send`] left once the target
+/// has taken every packet (rustvisor-sdk `debug/t32-fdx`).
+pub fn unread(memory: &mut impl Memory, channel: &Channel) -> Result<bool> {
+    let header = memory.read_u32s(channel.address, HEADER / 4)?;
+    if header[SIZE] as usize != channel.size {
+        return Err(Error::Closed);
+    }
+    Ok(header[HOSTINDEX] != header[TARGETINDEX])
+}
+
 /// One channel as read: its header words and data bytes.
 struct Image {
     address: u64,
@@ -496,6 +508,12 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(writes, ["write_u32 0x3c", "write_u32 0x8"]);
+        // Unread until the target moves its index below the packet.
+        assert_eq!(unread(&mut ram, &channel), Ok(true));
+        ram.word(TARGETINDEX, 28);
+        assert_eq!(unread(&mut ram, &channel), Ok(false));
+        ram.word(SIZE, 64);
+        assert_eq!(unread(&mut ram, &channel), Err(Error::Closed));
     }
 
     #[test]

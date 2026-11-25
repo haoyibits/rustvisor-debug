@@ -21,6 +21,14 @@ StellarLINK 的核心及协处理器寄存器读取要求核停着，Hyp 寄存�
 
 记录结果后是否 `go`、`reset` 或重新部署，由当前诊断任务决定；这些操作见[调试](debugging.md)。
 
+## 不停核，看某个核为什么停了
+
+```sh
+rvdbg cores
+```
+
+`cores` 在各核运行时从 RAM 读出 hypervisor 的停止记录（主镜像的 `RUSTVISOR_STOP_RECORDS`，每个核槽一条）和所有镜像的 FDX 链接。完整的记录按 rustvisor-sdk 离线解码器的方式给出核和原因，故障的 PC 带镜像符号，例如 `C0C0 stopped: Fault: Guest Other fault, pc 0x28010020 (_start), …`。其他核继续运行；需要异常寄存器时再用 `halt` 和 `fault`。镜像启动代码运行之前的内容不会被当作停止记录。`--json` 给出每个槽的字段。
+
 ## 读一个值还是读一片 RAM？
 
 | 命令 | 适用对象 | 单位与限制 |

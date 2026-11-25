@@ -49,6 +49,10 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Use the images in this directory instead of rvdbg.toml's and ELF/EXTRA_ELF: `hypervisor` (or its only other ELF) and guest0.elf, guest1.elf, ... (a board-tests case directory)
+    #[arg(long, global = true, value_name = "DIR")]
+    images: Option<PathBuf>,
+
     /// Without a command, an interactive session starts
     #[command(subcommand)]
     command: Option<Commands>,
@@ -171,8 +175,16 @@ enum Commands {
     },
     /// Connect to the target without resetting it
     Attach,
-    /// Reset the chip and halt at the reset vector
-    Reset,
+    /// Reset the chip and halt at the reset vector, then mark every image's FDX link closed
+    Reset {
+        /// Leave the FDX links as they are (RAM keeps the last run's open links)
+        #[arg(long)]
+        keep_links: bool,
+    },
+    /// The hypervisor's stop records and the images' FDX links, read while the cores run
+    Cores,
+    /// The images in use, where they come from, and their FDX links (in a session, 'images <dir>' switches to a directory's images)
+    Images,
     /// TRACE32: SYStem.Down
     Down,
     /// Run a halted core until it reaches a symbol or address (hardware breakpoint)
@@ -255,7 +267,7 @@ enum Commands {
         #[arg(long)]
         port: Option<u16>,
     },
-    /// FDX link of an image while the core runs: each line typed is a packet to the target, each packet from it a line (Ctrl-C to stop)
+    /// FDX link of an image while the cores run: each line typed is a packet to the target, each packet from it a line; --all watches every image's link (Ctrl-C or :q to stop)
     Fdx(FdxArgs),
     /// Software trace records (rustvisor-swtrace) of the images while the cores run: drain each image's RUSTVISOR_TRACE channels, pair IPC sends with their receives, one-way latency per direction
     Swtrace(SwtraceArgs),
@@ -278,9 +290,12 @@ enum Commands {
 /// The options of `rvdbg fdx`.
 #[derive(Debug, clap::Args)]
 struct FdxArgs {
-    /// The n-th extra image (project.extra_elf, from 0) instead of the ELF
-    #[arg(long, value_name = "N")]
-    guest: Option<usize>,
+    /// The image whose link to use: el2 (the ELF, the default), guest<n> or <n> (the n-th extra image)
+    #[arg(long, value_name = "NAME|N")]
+    guest: Option<String>,
+    /// Every image's link at once (interactive), or with --close: close them all
+    #[arg(long, conflicts_with_all = ["guest", "address", "send", "expect"])]
+    all: bool,
     /// Link symbol (default: fdx.symbol, RUSTVISOR_FDX)
     #[arg(long)]
     symbol: Option<String>,
@@ -373,7 +388,13 @@ fn run(cli: Cli) -> Result<u8, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let flag = cli.backend.map(Backend::from);
     let Some(command) = cli.command else {
-        return session::run(cli.config.as_deref(), &cwd, flag, cli.json);
+        return session::run(
+            cli.config.as_deref(),
+            &cwd,
+            flag,
+            cli.json,
+            cli.images.as_deref(),
+        );
     };
     if let Commands::Init = command {
         return init_command(&cwd);
@@ -396,7 +417,10 @@ fn run(cli: Cli) -> Result<u8, String> {
         return swtrace_from(config.as_ref(), cli.json, args);
     }
     let path = config::find(cli.config.as_deref(), &cwd)?;
-    let config = config::load(&path)?;
+    let mut config = config::load(&path)?;
+    if let Some(dir) = &cli.images {
+        config = config.with_images(&cwd.join(dir))?;
+    }
     let mut env = Env {
         config: &config,
         flag,
@@ -431,6 +455,8 @@ pub struct SessionLink<'a> {
     /// The session's PowerView connection (TRACE32), made on first use and
     /// dropped after a command fails.
     pub powerview: Option<&'a mut Option<tracebridge::backend::Session>>,
+    /// What the session received on each FDX link.
+    pub history: Option<&'a mut fdx_terminal::History>,
 }
 
 impl Env<'_> {
@@ -697,6 +723,9 @@ fn execute(env: &mut Env, command: Commands) -> Result<u8, String> {
             }
         },
         Commands::Fdx(args) => fdx(env, args),
+        Commands::Reset { keep_links } => reset(env, keep_links),
+        Commands::Cores => cores(env),
+        Commands::Images => images(env),
         Commands::Swtrace(args) => swtrace(env, args),
         Commands::Ram {
             location,
@@ -763,7 +792,7 @@ fn plan(
         Commands::Halt => (Ok(inspect::Request::Halt), vec!["break".into()]),
         Commands::Go => (Ok(inspect::Request::Go), vec!["go".into()]),
         Commands::Attach => (Ok(inspect::Request::Attach), vec!["attach".into()]),
-        Commands::Reset => (Ok(inspect::Request::Reset), vec!["reset".into()]),
+        Commands::Reset { .. } => (Ok(inspect::Request::Reset), vec!["reset".into()]),
         Commands::Down => (Err(trace32_only("down")), vec!["down".into()]),
         Commands::Fault { trace } => {
             let mut args = vec!["fault".to_string()];
@@ -894,11 +923,32 @@ fn trace32_only(what: &str) -> String {
     format!("{what} is available with TRACE32 only (--backend trace32)")
 }
 
-/// `rvdbg fdx`: the link's address, then the terminal on the backend's
+/// Every image's FDX link: the images with `symbol`, as `el2`, `guest0`, …
+/// An image that is missing or has no such symbol has no link.
+fn link_targets(config: &Config, symbol: &str) -> Vec<fdx_terminal::Target> {
+    std::iter::once(None)
+        .chain((0..config.extra_elf.len()).map(Some))
+        .filter_map(|extra| {
+            let path = match extra {
+                None => &config.elf,
+                Some(n) => &config.extra_elf[n],
+            };
+            let address = rustvisor_debug::fdx::symbol_address(path, symbol).ok()?;
+            Some(fdx_terminal::Target {
+                name: rustvisor_debug::fdx::image_name(extra),
+                symbol: symbol.to_string(),
+                address,
+            })
+        })
+        .collect()
+}
+
+/// `rvdbg fdx`: the links' addresses, then the terminal on the backend's
 /// memory access.
 fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
     let FdxArgs {
         guest,
+        all,
         symbol,
         address,
         send,
@@ -910,28 +960,59 @@ fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
     if !(timeout > 0.0 && timeout.is_finite()) {
         return Err("--timeout must be positive".into());
     }
-    let image = match guest {
-        None => config.elf.clone(),
-        Some(n) => config.extra_elf.get(n).cloned().ok_or_else(|| {
-            format!(
-                "--guest {n}: project.extra_elf has {} image(s)",
-                config.extra_elf.len()
-            )
-        })?,
-    };
     let symbol = symbol.unwrap_or_else(|| config.fdx_symbol.clone());
-    let address = match address {
-        Some(address) => address,
-        None => rustvisor_debug::fdx::symbol_address(&image, &symbol)
-            .map_err(|error| format!("{error}; build the images, or pass --address 0x<address>"))?,
+    let every = link_targets(config, &symbol);
+    let targets = if all {
+        if every.is_empty() {
+            return Err(format!("no image has {symbol}; build the images"));
+        }
+        every.clone()
+    } else {
+        let image = match &guest {
+            None => None,
+            Some(name) => rustvisor_debug::fdx::parse_image(name, config.extra_elf.len())
+                .map_err(|error| format!("--guest {error}"))?,
+        };
+        let path = match image {
+            None => &config.elf,
+            Some(n) => &config.extra_elf[n],
+        };
+        let address = match address {
+            Some(address) => address,
+            None => rustvisor_debug::fdx::symbol_address(path, &symbol).map_err(|error| {
+                format!("{error}; build the images, or pass --address 0x<address>")
+            })?,
+        };
+        vec![fdx_terminal::Target {
+            name: rustvisor_debug::fdx::image_name(image),
+            symbol: symbol.clone(),
+            address,
+        }]
+    };
+    let peers = if all {
+        every
+    } else {
+        every
+            .into_iter()
+            .filter(|peer| peer.address != targets[0].address)
+            .collect()
     };
     let options = fdx_terminal::Options {
-        symbol,
-        address,
+        targets,
         send,
         expect,
         timeout: std::time::Duration::from_secs_f64(timeout),
         json: env.json,
+        diagnosis: fdx_terminal::Diagnosis {
+            peers,
+            stops: rustvisor_debug::stop::slots(&config.elf).ok().flatten(),
+            symbols: if close {
+                Default::default()
+            } else {
+                inspect::symbols(config)
+            },
+        },
+        history_file: run_dir(config).ok().map(|dir| dir.join("fdx-history")),
     };
     // Ctrl-C: the session's flag, else one for this command.
     let own = std::sync::Arc::new(AtomicBool::new(false));
@@ -944,16 +1025,256 @@ fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
             &own
         }
     };
+    let mut local = fdx_terminal::History::default();
+    let history = match env.session.as_mut().and_then(|link| link.history.take()) {
+        Some(history) => history,
+        None => &mut local,
+    };
     env.with_ram(|mut memory, probe| {
         if close {
-            rustvisor_debug::fdx::Link::close(&mut memory, address).map_err(text)?;
-            if !options.json {
-                println!("closed {} at 0x{address:08X}", options.symbol);
+            for target in &options.targets {
+                rustvisor_debug::fdx::Link::close(&mut memory, target.address).map_err(text)?;
+                history.forget(target.address);
+                if !options.json {
+                    println!("closed {} at 0x{:08X}", target.symbol, target.address);
+                }
             }
             return Ok(0);
         }
-        fdx_terminal::run(&mut memory, probe, &options, interrupted)
+        fdx_terminal::run(&mut memory, probe, &options, history, interrupted)
     })
+}
+
+/// `rvdbg reset`: the reset, then every image's FDX link marked closed while
+/// the chip is held, so that `fdx` waits for this run's links. Said on
+/// stderr, so that `--json` still prints one value.
+fn reset(env: &mut Env, keep_links: bool) -> Result<u8, String> {
+    let code = inspect_command(env, Commands::Reset { keep_links })?;
+    if code != 0 || keep_links {
+        return Ok(code);
+    }
+    let targets = link_targets(env.config, &env.config.fdx_symbol);
+    let mut local = fdx_terminal::History::default();
+    let history = match env.session.as_mut().and_then(|link| link.history.take()) {
+        Some(history) => history,
+        None => &mut local,
+    };
+    history.clear();
+    if targets.is_empty() {
+        return Ok(code);
+    }
+    let style = Style::stderr();
+    // Each link on its own: RAM a Guest has not set up since power-on may
+    // refuse the write (bus error) while the chip is held.
+    let outcome = env.with_ram(|mut memory, _| {
+        Ok(targets
+            .iter()
+            .map(|target| {
+                rustvisor_debug::fdx::Link::close(&mut memory, target.address)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Vec<_>>())
+    });
+    match outcome {
+        Ok(results) => {
+            let mut closed = Vec::new();
+            let mut failed = Vec::new();
+            for (target, result) in targets.iter().zip(&results) {
+                match result {
+                    Ok(()) => closed.push(target.name.as_str()),
+                    Err(error) => failed.push(format!("{} ({error})", target.name)),
+                }
+            }
+            let mut line = format!(
+                "{} closed {} FDX link(s): {}",
+                style.label("[rvdbg]"),
+                closed.len(),
+                closed.join(" ")
+            );
+            if !failed.is_empty() {
+                line.push_str(&format!(
+                    "; not closed: {} (RAM its image has not set up since power-on)",
+                    failed.join(", ")
+                ));
+            }
+            eprintln!("{line}");
+        }
+        Err(error) => eprintln!(
+            "{} FDX links not closed ({error}); 'fdx --close --all' tries again",
+            style.warn("[rvdbg]")
+        ),
+    }
+    Ok(code)
+}
+
+/// `rvdbg cores`: the stop records and the FDX links, read while the cores
+/// run.
+fn cores(env: &mut Env) -> Result<u8, String> {
+    use rustvisor_debug::stop;
+    let config = env.config;
+    let json = env.json;
+    let slots = stop::slots(&config.elf)?.ok_or_else(|| {
+        format!(
+            "{} has no {}: cores reads the hypervisor's stop records",
+            config.elf.display(),
+            stop::SYMBOL
+        )
+    })?;
+    let diagnosis = fdx_terminal::Diagnosis {
+        symbols: inspect::symbols(config),
+        ..Default::default()
+    };
+    let targets = link_targets(config, &config.fdx_symbol);
+    let mut local = fdx_terminal::History::default();
+    let history = match env.session.as_mut().and_then(|link| link.history.take()) {
+        Some(history) => history,
+        None => &mut local,
+    };
+    let style = Style::stdout();
+    let result = env.with_ram(|mut memory, _| {
+        let now = std::time::Instant::now();
+        let records = stop::read(&mut memory, slots)
+            .map_err(|error| format!("cannot read {}: {error}", stop::SYMBOL))?;
+        let mut lines = vec![style.label(format!(
+            "stop records  {} @ 0x{:08X}, {} slot(s)",
+            stop::SYMBOL,
+            slots.address,
+            slots.count
+        ))];
+        let mut stops = Vec::new();
+        for (slot, record) in records.iter().enumerate() {
+            let (line, value) = match record {
+                stop::Record::Empty => {
+                    (style.good("no stop"), serde_json::json!({"state": "empty"}))
+                }
+                stop::Record::Incomplete => (
+                    style.warn("a record is being written"),
+                    serde_json::json!({"state": "incomplete"}),
+                ),
+                stop::Record::Invalid(magic) => (
+                    style.dim(format!(
+                        "not a record (0x{magic:08X}); not initialised yet?"
+                    )),
+                    serde_json::json!({"state": "invalid", "magic": format!("0x{magic:08X}")}),
+                ),
+                stop::Record::Complete(stop) => {
+                    let mut value = stop.fields();
+                    value["state"] = "complete".into();
+                    (
+                        format!(
+                            "{} {}",
+                            style.bad(format!("{} stopped:", stop.core)),
+                            stop.summary(&|address| diagnosis.symbol(address))
+                        ),
+                        value,
+                    )
+                }
+            };
+            lines.push(format!("  slot {slot}  {line}"));
+            stops.push(value);
+        }
+        lines.push(style.label(format!("FDX links  {}", config.fdx_symbol)));
+        let mut links = Vec::new();
+        for target in &targets {
+            // RAM a Guest has not set up yet reads as anything.
+            let (open, state) =
+                match rustvisor_debug::fdx::Link::locate(&mut memory, target.address) {
+                    Ok(Some(_)) => (Some(true), style.good("open")),
+                    Ok(None) => (Some(false), style.dim("closed")),
+                    Err(error) => (None, style.dim(format!("not a link yet ({error})"))),
+                };
+            let last = history.last(target.address, 1).pop();
+            let mut line = format!("  {:<8} 0x{:08X}  {state}", target.name, target.address);
+            if let Some((at, packet)) = &last {
+                line.push_str(&format!(
+                    ", last packet {packet:?} ({} s ago)",
+                    now.saturating_duration_since(*at).as_secs()
+                ));
+            }
+            lines.push(line);
+            links.push(serde_json::json!({
+                "name": target.name,
+                "address": format!("0x{:08X}", target.address),
+                "open": open,
+                "last": last.map(|(_, packet)| packet),
+            }));
+        }
+        Ok(inspect::Outcome {
+            text: lines.join("\n"),
+            json: serde_json::json!({"stops": stops, "links": links}),
+            code: 0,
+        })
+    });
+    inspect::emit("cores", json, result)
+}
+
+/// `rvdbg images`: the images, where they come from, and their FDX links
+/// (open or closed when a probe answers).
+fn images(env: &mut Env) -> Result<u8, String> {
+    let config = env.config;
+    let json = env.json;
+    let style = Style::stdout();
+    let targets = link_targets(config, &config.fdx_symbol);
+    let open: Option<Vec<bool>> = env
+        .with_ram(|mut memory, _| {
+            Ok(targets
+                .iter()
+                .map(|target| {
+                    matches!(
+                        rustvisor_debug::fdx::Link::locate(&mut memory, target.address),
+                        Ok(Some(_))
+                    )
+                })
+                .collect())
+        })
+        .ok();
+    let mut lines = vec![format!(
+        "{} {}",
+        style.label("images from"),
+        config.images_from
+    )];
+    let mut list = Vec::new();
+    for (index, path) in config.images().iter().enumerate() {
+        let extra = index.checked_sub(1);
+        let name = rustvisor_debug::fdx::image_name(extra);
+        let target = targets.iter().position(|target| target.name == name);
+        let link = match target {
+            Some(i) => {
+                let state = match &open {
+                    Some(open) if open[i] => style.good("open"),
+                    Some(_) => style.dim("closed"),
+                    None => style.dim("-"),
+                };
+                format!("{} 0x{:08X} {state}", config.fdx_symbol, targets[i].address)
+            }
+            None => style.dim(format!("no {}", config.fdx_symbol)),
+        };
+        let exists = if path.is_file() {
+            String::new()
+        } else {
+            format!(" {}", style.bad("MISSING"))
+        };
+        lines.push(format!("  {name:<8} {}{exists}  {link}", path.display()));
+        list.push(serde_json::json!({
+            "name": name,
+            "path": path.display().to_string(),
+            "exists": path.is_file(),
+            "link": target.map(|i| format!("0x{:08X}", targets[i].address)),
+            "open": match (&open, target) {
+                (Some(open), Some(i)) => Some(open[i]),
+                _ => None,
+            },
+        }));
+    }
+    inspect::emit(
+        "images",
+        json,
+        Ok(inspect::Outcome {
+            text: lines.join("\n"),
+            json: serde_json::json!({"from": config.images_from.to_string(), "images": list}),
+            code: 0,
+        }),
+    )
 }
 
 /// `rvdbg swtrace`: every trace channel of the chosen images, drained in

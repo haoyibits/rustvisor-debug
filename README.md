@@ -501,7 +501,10 @@ self-contained page (no network) with one panel per VM, EL1 and EL2 as rows
 the IPC messages linked from sender to receiver, and per-panel statistics;
 click a block or a link for its details. Times are nanoseconds from the
 first record (the frequency comes from `START`, which only a channel's first
-read has). The records say neither which VM a core runs nor which core an
+read has). A stretch longer than 10 ms with no record on any channel (the
+wait for a manual command, say) is folded into a narrow break labelled with
+its length, on the time axis and the whole-run overview; the threshold, or
+off, is under Options. The records say neither which VM a core runs nor which core an
 image is on: `[swtrace] map` in rvdbg.toml (or `--map KEY=VM[:CORE]`,
 repeatable, on top) does, `C0C0 = "VM1"` for the EL2 channel
 `RUSTVISOR_TRACE_C0C0` and `guest0 = "VM1:C0C0"` for an image's channel;

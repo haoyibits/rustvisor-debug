@@ -9,6 +9,7 @@ What the timeline page (`crates/rustvisor-debug/assets/timeline.html`) reads. `r
 {
   "format": "rustvisor-timeline/3",
   "title": "…", "lede": "…", "meta": […], "coverage": {…}, "footnote": "…", "resolution_ns": 50, "boundary": "…",
+  "fold_ns": 10000000,
   "runs": [{
     "key": "both", "name": "…", "note": "…", "source": "el2-ping-traced.csv",
     "t0": 26843528498275, "span": 12563988050,
@@ -23,6 +24,11 @@ What the timeline page (`crates/rustvisor-debug/assets/timeline.html`) reads. `r
 }
 ```
 
+- `fold_ns` (optional, top level): the page folds every stretch longer than this with no record on any
+  unit (segment edges, `sent`, pending edges, IPC records; EL2, ISR and IPC blocks are never folded)
+  into a narrow break labelled with its length, on the time axis and the overview. Default 10 ms
+  (`10000000`), `0` turns folding off; the viewer can change it under Options. Folded time is not
+  counted in the window's statistics (not as EL1, not as before START).
 - Times are ns from the run's first record (`t0` is that record's raw timestamp); `span` is the
   run's length. `resolution_ns` (optional): the step the counter values move in. `boundary`
   (optional): what the block edges leave out, shown in the details box (a generic text otherwise).

@@ -54,4 +54,8 @@ fn the_board_run_becomes_five_panels_and_every_message_pairs() {
         .count();
     assert_eq!(el2, 8);
     assert!(timeline::page(&doc).contains("\"rustvisor-timeline/3\""));
+    // The 12.5 s without records before the pings is folded by the page itself
+    // (its default threshold); the data does not set `fold_ns`.
+    assert!(doc.get("fold_ns").is_none());
+    assert!(timeline::page(&doc).contains("doc.fold_ns"));
 }

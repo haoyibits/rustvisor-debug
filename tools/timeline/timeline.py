@@ -252,7 +252,7 @@ def build_spec(path, map_args):
             if k in r:
                 run[k] = r[k]
         runs.append(run)
-    doc = {k: spec[k] for k in ("title", "lede", "meta", "coverage", "footnote", "resolution_ns", "boundary") if k in spec}
+    doc = {k: spec[k] for k in ("title", "lede", "meta", "coverage", "footnote", "resolution_ns", "boundary", "fold_ns") if k in spec}
     return {"format": FORMAT, **doc, "runs": runs}
 
 

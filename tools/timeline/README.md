@@ -50,7 +50,9 @@ python3 timeline.py specs/sample.json -o out/sample.html
 ```
 
 `csv` paths are relative to the spec. `select` (panels shown first), `window` (first view, ns) and
-`presets` (buttons that pick panels) are optional per run; they are copied into the data.
+`presets` (buttons that pick panels) are optional per run; they are copied into the data. A
+top-level `fold_ns` (default 10 ms, `0` off) says how long a stretch without records must be for the
+page to fold it.
 
 ## Data format
 

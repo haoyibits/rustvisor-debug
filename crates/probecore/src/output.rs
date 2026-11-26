@@ -13,20 +13,38 @@ pub enum Line<'a> {
 
 type Sink = Box<dyn Fn(Line<'_>)>;
 
+struct Capture {
+    sink: Sink,
+    color: bool,
+}
+
 thread_local! {
-    static SINK: RefCell<Option<Sink>> = RefCell::new(None);
+    static SINK: RefCell<Option<Capture>> = const { RefCell::new(None) };
 }
 
 /// Restore the previous sink even if the command unwinds.
 pub fn with_sink<T>(sink: impl Fn(Line<'_>) + 'static, run: impl FnOnce() -> T) -> T {
-    struct Restore(Option<Sink>);
+    with_colored_sink(false, sink, run)
+}
+
+/// Capture CLI output on this thread while controlling whether `probecore::style`
+/// emits ANSI color sequences into the sink.
+pub fn with_colored_sink<T>(
+    color: bool,
+    sink: impl Fn(Line<'_>) + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<Capture>);
     impl Drop for Restore {
         fn drop(&mut self) {
             SINK.replace(self.0.take());
         }
     }
 
-    let _restore = Restore(SINK.replace(Some(Box::new(sink))));
+    let _restore = Restore(SINK.replace(Some(Capture {
+        sink: Box::new(sink),
+        color,
+    })));
     run()
 }
 
@@ -34,11 +52,16 @@ pub fn captured() -> bool {
     SINK.with(|sink| sink.borrow().is_some())
 }
 
+/// Returns whether the active sink expects ANSI color sequences (`None` when not captured).
+pub fn colored() -> Option<bool> {
+    SINK.with(|sink| sink.borrow().as_ref().map(|capture| capture.color))
+}
+
 /// Returns whether the active sink consumed the output.
 pub fn send(line: Line<'_>) -> bool {
     SINK.with(|sink| {
-        if let Some(sink) = sink.borrow().as_ref() {
-            sink(line);
+        if let Some(capture) = sink.borrow().as_ref() {
+            (capture.sink)(line);
             true
         } else {
             false

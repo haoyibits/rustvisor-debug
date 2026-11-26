@@ -144,12 +144,15 @@ rvdbg [openocd halted]> quit
 - 从管道读入时不显示提示符，每行执行一条命令。
 - `rvdbg --json` 从管道读入时是给程序（板级 runner）用的：先输出一行 `{"ready": true, "backend": …}`，之后每条命令先输出它自己的内容（查看类命令、`ram` 和 `fdx --send/--expect` 是一行 JSON），再输出一行 `{"end": "<这一行>", "ok": …, "exit_code": …, "error": …}`。
 
-### 内联终端界面
+### 终端界面（TUI）
 
-在终端里运行 `rvdbg --tui`，它会查找当前项目的 `rvdbg.toml`。可以直接输入命令，也可以输入 `/` 打开菜单，用方向键选择、Tab 填入、Enter 提交。命令结果保留在终端滚动历史里。Ctrl+C 清除草稿或中断支持取消的操作，空输入时按 Ctrl+D 退出。
+在交互终端里直接运行裸 `rvdbg` 默认进入全屏无闪烁 TUI（如需内联滚动模式，使用 `rvdbg --inline`，或在会话中按 `Alt+F`、输入 `/inline` / `/fullscreen` 随时无损切换）。
 
-- `rtt` 打开双向 RTT 控制台，按键直接发给目标，Ctrl+C 返回主命令框。`rtt --output-only` 只读。内联界面按文本显示目标输出。独立的 `rvdbg rtt` 还支持目标输出的终端转义序列。
-- `fdx` 打开常驻面板。按 F6 在主命令框和面板间切换，面板继续接收数据。面板内按 Enter 发包，`:help` 查看链路命令，空闲时用 `:q` 或 Ctrl+C 关闭。`fdx --all` 显示每条链路的状态，支持 `:to <name>` 和 `@<name> <packet>`。执行 `run-until` 等命令时面板暂停，命令结束后恢复轮询。`reset` 后面板等待固件重新打开链路。
+- 直接输入命令即可获得行内暗色补全提示与 `Tab` 补全（命令名、子命令 `--flag`、`mem`/`ram`/`run-until` 的 ELF 符号及本地路径）；输入 `/` 打开模糊命令菜单与交互选择器（`/images`、`/backend`、`/fdx`、`/copy`、`/clear`、`/mouse`），无必填参数的斜杠命令按一次 `Enter` 即可执行。
+- 支持多行粘贴与 `Ctrl+J` / `Shift+Enter` 换行、`Ctrl+R` 历史检索、`Ctrl+C` 清空草稿或中断长命令；空行连按两次 `Ctrl+D`（或输入 `quit`）退出。
+- `rtt` 打开双向 RTT 控制台，按键直通目标，`Ctrl+C` 返回命令模式。
+- `fdx` / `fdx --all` 打开常驻 FDX 监控（全屏宽屏下位于右侧分栏，窄屏或内联模式下位于输入框上方，可用 `Ctrl+O` 折叠/展开）。按 `Shift+Tab`（或 `F6`）在 `rvdbg` 命令与 FDX 通道输入间切换；FDX 模式下可用 `!halt` 等 `!` 前缀直接执行单条调试命令。`run-until` 期间自动暂停轮询，`reset` 自动关闭已打开的链路并丢弃未发队列，固件重新打开链路后自动恢复。
+- 在管道、`rvdbg --json` 或 `TERM=dumb` 环境下自动走纯文本逐行流模式。
 
 ## 配置
 

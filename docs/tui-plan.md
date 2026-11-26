@@ -1,73 +1,24 @@
-# rvdbg 内联终端界面方案
+# rvdbg 终端界面（TUI）方案
 
-2026-11-25 · 已实现为 `rvdbg --tui`，实机验收待连接板卡后执行。
+2026-11-26 · 已完成重构并作为交互终端下裸 `rvdbg` 的默认界面（默认全屏 `Altscreen`，支持 `--inline` 与 `Alt+F` 无损互切），实机验收待连接 SR6P6 板卡后执行。
 
-建议用 Ratatui 的 inline viewport 和 Crossterm 实现 `rvdbg --tui`。终端保留可滚动、可复制的命令记录，当前输入、候选命令和运行状态占用记录下方的几行。首版以一次真实调试为目标：找到命令、查看目标、中断等待，然后在同一个会话里继续工作。
+## 架构与体验
 
-## 使用体验
+- **默认入口**：交互终端（`stdin`/`stdout` 均为 TTY 且 `TERM != dumb`，无 `--json` 与子命令）运行裸 `rvdbg` 直接进入全屏无闪烁 TUI；`rvdbg --inline`（或 `--tui=inline`）以动态高度内联模式启动；会话中按 `Alt+F` 或输入 `/inline`、`/fullscreen` 可在保留完整内存历史的情况下即时切换。管道、`rvdbg --json` 与 `TERM=dumb` 继续走 `session.rs` 的纯文本/机器流模式。
+- **One Dark 语义配色与结构化排版**：`probecore::output::with_colored_sink` 透传颜色开关，`tui/ansi.rs` 解析 One Dark SGR 序列为 Ratatui `Span`（遵守 `NO_COLOR`）；次要文字与暗色提示使用默认前景色叠加 `Modifier::DIM`（避免 One Dark 下 `DarkGray` 对比度过低）；每轮命令按 `❯ <cmd>` + 2 列缩进输出块展示并自动软折行重排。
+- **多行圆角 Composer 与全量补全**：支持 `Ctrl+J` / `Shift+Enter` 换行及多行粘贴（最多 8 行自适应增高）、按词移动/删除、`Ctrl+R` 历史模糊搜索、空行双击 `Ctrl+D` 安全退出，以及长命令运行期的待执行队列预输入；普通命令支持 Ghost text、`Tab` 补全命令名、Clap `--flag`、当前镜像的 ELF 符号及路径；`/` 菜单中无必填参数的命令按一次 `Enter` 直接执行，内置 `/images`、`/backend`、`/fdx` 交互选择器与 `/copy`（OSC 52）、`/clear`、`/mouse`。
+- **运行活动条与 FDX 多镜像融合**：命令运行期间在 Composer 上方展示动态 Spinner、阶段计时与 OpenOCD 烧录进度条；按 `Shift+Tab`（或 `F6`）在 `rvdbg ›`（Cyan 框）与 `fdx:* ›`（Magenta 框）间切换输入模式，FDX 模式下支持 `!cmd` 逃逸执行单条调试命令、`@guest` / `:to` / 目标 `help` 词条补全；全屏宽屏（$\ge 100$ 列）下 FDX 以右侧独立分栏展示，窄屏与内联模式下显示为上方可 `Ctrl+O` 折叠/展开的预览抽屉，不再向主滚屏重复刷 `[FDX]`。
 
-以下是用户输入 `/ru` 时的布局示意。界面用语沿用现有英文 CLI。
+## 模块划分
 
-```text
-rvdbg   rustvisor-sdk
+- `probecore::output` / `probecore::style`：捕获输出时保留彩色开关。
+- `crates/rustvisor-debug/src/tui/`：`mod.rs`（事件循环与工作线程桥接）、`surface.rs`（全屏 `Altscreen` 与无 CPR 竞态动态高度 `Inline` 同步差分渲染）、`ansi.rs`（SGR 解析与软折行）、`theme.rs`（One Dark 语义色令牌）、`transcript.rs`（结构化 Turn 历史与滚动）、`composer.rs`（多行编辑器与历史搜索）、`complete.rs`（Ghost text、ELF 符号缓存与 `/` 选择器）、`fdx_view.rs`（分栏/抽屉视图）。
 
-› halt
-  halted
+## 验收状态
 
-› status
-  halted   PC 0x60102480
-
-──────────────────────────────────────────────────────
-› /ru▏
-  run-until <target>    Run to a symbol or address
-──────────────────────────────────────────────────────
-StellarLINK · OpenOCD · halted        Tab complete
-```
-
-- 熟悉命令的用户可以直接输入 `mem _SEGGER_RTT 4`。输入 `/` 展开菜单，继续输入按名称过滤。方向键选择，Tab 填入命令，Esc 收起菜单。菜单中的 Enter 也会填入命令，可以补充参数后再按 Enter 提交。
-- 命令名、帮助和后端可用性取自现有 Clap 定义、会话分组和会话专用命令。没有探头时可以查看帮助、使用项目命令和运行 `reconnect`。仅限 TRACE32 的命令在 OpenOCD 会话中显示原因。
-- 上下键浏览项目历史，沿用 `.rvdbg/history` 的格式。多行粘贴先进入编辑区，提交后沿用 `handle_input` 的续行、按序执行和遇错停止规则。保留 `cmd` 和 `eval` 原有引号语义。
-- 等待目标时，输入区显示当前命令、耗时及适用的中断键。运行期间一次只执行一条命令。状态栏显示后端最近一次确认的核状态，断连时清除旧状态。
-
-## 接入方式
-
-| 入口 | 首版行为 |
-| --- | --- |
-| 交互终端中的 `rvdbg --tui` | 启用内联界面，使用已有的配置查找、探头选择和镜像覆盖逻辑 |
-| 裸 `rvdbg`、一次性子命令 | 继续走现有入口，实机验证后再决定裸命令的默认界面 |
-| 管道及 `rvdbg --json` 会话 | 使用现有文本或机器协议；板级 runner 继续读取 `ready`、命令输出和 `end` |
-| 显式 `--tui` 与子命令、全局 `--json` 或重定向输入输出组合 | 在连接硬件前报告用法错误。会话内的 `status --json` 仍可作为普通文本结果展示 |
-
-## 执行与绘制
-
-1. **UI 线程持有终端。** 一个事件循环处理键盘、粘贴、窗口大小和执行结果。用 Ratatui 的 `insert_before` 将已完成的输出写入原生终端历史。活动区域只重绘输入、候选项和进度。终端守卫负责正常退出、初始化失败和异常退出时恢复光标及终端模式。[Ratatui inline 示例](https://ratatui.rs/examples/apps/inline/)
-2. **一个工作线程持有一个会话。** 在线程内创建 `Session`，按序处理提交的输入，复用 `handle_input → handle_line → run_command → execute` 以及现有的 OpenOCD、PowerView 连接生命周期。连接和状态查询也在这里执行。现有 `prompt()` 可能访问目标，因此把状态采样和字符串格式化拆开；绘制只读上次返回的快照。[会话实现](../crates/rustvisor-debug/src/session.rs)
-3. **命令通过事件输出。** 首先为会话提示、错误和查看类命令增加可注入的输出接口。普通 CLI 仍写原来的 stdout/stderr，TUI 将文本、进度和结束结果发给 UI。TRACE32 分支要接到 tracebridge 实际输出的位置，保留后端生成的报告和退出码。流式输出分批消费，用有界缓冲控制积压。现有命令通过线程内的输出接口发出文本，OpenOCD 烧录进度通过独立的进度事件更新。[命令分发](../crates/rustvisor-debug/src/main.rs) · [TRACE32 调试命令](../crates/tracebridge/src/debug/mod.rs)
-4. **FDX 作为常驻面板。** F6 在主命令框和 FDX 面板间切换。会话工作线程在命令之间执行单次 FDX 轮询，面板通过事件显示每条链路的状态和收发记录。运行 `run-until` 等长命令期间显示暂停，完成后恢复。`reset`、`flash`、`images`、`backend` 和 `reconnect` 等会让面板重新检查链路，同时丢弃尚未发送的输入。常规 `reset` 会关闭面板已确认打开的链接，包括用 `--address` 指定的链接。旧收发记录保留在滚动历史。脚本式 `fdx --send/--expect` 仍按命令执行。 [FDX 终端](../crates/rustvisor-debug/src/fdx_terminal.rs)
-
-### Ctrl+C 的具体语义
-
-主命令框空闲编辑时按 Ctrl+C 清空草稿。FDX 面板获得焦点且主命令空闲时，Ctrl+C 关闭面板。运行可中断命令时，UI 直接设置当前命令的取消标志，显示“正在中断”；执行线程返回后才恢复输入。取消请求应能在执行线程阻塞时送达。每次提交独立管理标志，覆盖刚提交就按键和上一条结束时按键的竞态。
-
-两个后端的 `run-until` 需要分别处理：
-
-- **OpenOCD** 已周期检查取消标志，中断等待时尝试移除硬件断点。沿用后端返回的断点清理结果，重新采样核状态。[OpenOCD 轮询](../crates/stellarbridge/src/core.rs)
-- **TRACE32** 当前轮询核状态和超时，循环未读取会话取消标志。为这条等待路径接入取消回调。首版取消语义沿用现有超时行为。结束主机侧等待，提示临时断点仍可能生效，并显示重新读取的核状态。保留用户显式执行 `halt` 的控制权。[TRACE32 轮询](../crates/tracebridge/src/debug/commands.rs)
-
-`flash` 按已有后端进度显示真实阶段，只对具备取消语义的操作显示中断提示。退出、重连和切换后端须等待当前操作释放会话。
-
-## 实施与验收
-
-| 步骤 | 交付内容 | 验收方式 |
-| --- | --- | --- |
-| 1 · 终端交互 | 显式入口、输入编辑、历史、菜单、帮助、终端恢复 | 用伪终端在无探头配置下选命令、提交多行、缩放、退出；检查普通管道和 JSON 输出 |
-| 2 · 接入硬件命令 | 接入两个后端的 `status`、`halt`、`mem`、`fault`、`run-until`，完成输出和取消路径 | 用现有假后端补测完成、中断、超时、断连。验证重绘不发硬件请求，失败后仍能运行下一条命令 |
-| 3 · 长操作与实机 | RTT 双向收发、FDX 常驻面板、烧录进度，检查其余命令的输出归属 | 两种探头分别跑下述操作链，验证集成终端和普通终端下的输出回看、输入与恢复 |
-
-**实机操作链。** 选择当前 ELF 可解析的符号或地址，执行 `halt → mem → run-until → Ctrl+C → status`。中断用例选一个在观察窗口内不会命中的有效地址。记录两种后端各自报告的核状态和断点结果。另测命中目标正常返回，以及进入交互式 FDX、收包、退出后执行 `status`。操作记录应留在可复制的终端历史中。
-
-**兼容性。** Cargo 按工作区声明的 Rust 1.85 选择新增依赖版本。发布构建使用工作区 CI 的 stable 工具链，覆盖 macOS arm64 和 Linux musl。执行工作区格式检查、Clippy、测试和伪终端用例。最后用现有 SDK runner 跑一次 JSON 会话回归，核对每条命令的结束记录和退出码。主机测试与两种探头的实机结果分别记录。
-
-**主机结果。** 工作区测试、格式检查、Clippy 均通过。伪终端使用模拟 TRACE32 和 OpenOCD 验证命令菜单、多行粘贴、缩放、`run-until` 命中、超时和中断、RTT 和 FDX 双向收发、退出恢复，以及 `--json` 管道的 `ready`、结果和 `end`。模拟管道检查使用 `rvdbg` 的实际二进制，SDK runner 的实机流程仍在上板验收范围内。
-
-**面板回归。** 用两套模拟探头验证 F6 切换、面板开启时执行 `reset`、丢弃尚未发送的包、`go` 后接收新包，以及 `run-until` 期间暂停 FDX 轮询并在中断后恢复。
+- **主机自动验收**：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all`（含模拟 TRACE32 / OpenOCD 的 PTY 端到端回归，覆盖默认全屏、One Dark ANSI 颜色与 `NO_COLOR`、`/` 单次回车执行、普通 `Tab` 补全、多行粘贴、`run-until` 中断/命中/超时、RTT 双向收发、`Shift+Tab` FDX 分栏与 `!cmd` 逃逸、`Ctrl+O` 折叠、`Alt+F` 全屏/内联互切、双击 `Ctrl+D`、`SIGTERM` 恢复、`TERM=dumb` 回退及 `--json` 管道兼容）。
+- **上板手工验收清单（待连接 SR6P6 板卡）**：
+  1. TRACE32 与 StellarLINK 分别运行裸 `rvdbg` 验证默认全屏启动、One Dark 色彩显示与缩放重排；
+  2. 执行 `/images` 切到 `lab` 多镜像目录，`flash` 观察动态 Spinner、烧录进度条与运行期预输入队列；
+  3. 执行 `fdx --all` 与 `Shift+Tab` / `Ctrl+O`，给 `el2` 和各 `guest` 发包，用 `!cores` 检查状态，验证 `reset` 关闭链路后 `go` 自动重连；
+  4. 执行 `run-until` 后 `Ctrl+C` 中断，确认断点清理与 FDX 轮询恢复；测试 `Alt+F` 切内联模式与 `/copy` 剪贴板复制。

@@ -1,4 +1,4 @@
-"""Exercise rvdbg's actual terminal UI against TCP test doubles, without a board."""
+"""Exercise rvdbg's terminal UI (Fullscreen default + Inline mode) against TCP test doubles, without a board."""
 import errno
 import fcntl
 import json
@@ -93,7 +93,6 @@ class Target:
             length, address = struct.unpack_from("<H2xQ", payload)
             if opt == 0x35:
                 return ok + self.read(address, length)
-            # The buffer starts after the (variable length) address fields.
             head = payload.index(b"XX", 12) + 2
             self.write(address, payload[head:head + length])
             return ok
@@ -165,16 +164,122 @@ class Probe(socketserver.ThreadingTCPServer):
 
 
 class Tui:
-    def __init__(self, directory, backend):
+    def __init__(self, directory, backend, extra_args=(), color=False, width=112, height=30):
         self.out = bytearray()
+        self.width = width
+        self.height = height
+        self.grid = [[" "] * width for _ in range(height)]
+        self.row = 0
+        self.col = 0
+        self.vt_buf = ""
+        self.seen_frames = []
         self.pid, self.pty = pty.fork()
         if self.pid == 0:
             os.chdir(directory)
-            self.resize(100, 28, fd=0)
-            os.execve(BIN, [BIN, "--tui", "--backend", backend], {"TERM": "xterm-256color", "NO_COLOR": "1", "HOME": directory})
+            self.resize(width, height, fd=0)
+            env = {"TERM": "xterm-256color", "HOME": directory}
+            if not color:
+                env["NO_COLOR"] = "1"
+            argv = [BIN, *extra_args, "--backend", backend]
+            os.execve(BIN, argv, env)
 
     def resize(self, width, height, fd=None):
+        self.width = width
+        self.height = height
+        self.grid = [[" "] * width for _ in range(height)]
+        self.row = 0
+        self.col = 0
         fcntl.ioctl(self.pty if fd is None else fd, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
+
+    def _feed_vt(self, text):
+        s = self.vt_buf + text
+        self.vt_buf = ""
+        i = 0
+        n = len(s)
+        while i < n:
+            ch = s[i]
+            if ch == "\x1b":
+                if i + 1 >= n:
+                    self.vt_buf = s[i:]
+                    break
+                nxt = s[i + 1]
+                if nxt == "[":
+                    j = i + 2
+                    while j < n and not (0x40 <= ord(s[j]) <= 0x7E):
+                        j += 1
+                    if j >= n:
+                        self.vt_buf = s[i:]
+                        break
+                    params = s[i + 2:j]
+                    final = s[j]
+                    i = j + 1
+                    self._csi(params, final)
+                    continue
+                if nxt == "]":
+                    end_bel = s.find("\x07", i + 2)
+                    end_st = s.find("\x1b\\", i + 2)
+                    if end_bel == -1 and end_st == -1:
+                        self.vt_buf = s[i:]
+                        break
+                    i = (end_bel + 1) if (end_bel != -1 and (end_st == -1 or end_bel < end_st)) else (end_st + 2)
+                    continue
+                i += 2
+                continue
+            i += 1
+            if ch == "\r":
+                self.col = 0
+            elif ch == "\n":
+                if self.row + 1 < self.height:
+                    self.row += 1
+                else:
+                    self.grid.pop(0)
+                    self.grid.append([" "] * self.width)
+            elif ord(ch) >= 32:
+                if 0 <= self.row < self.height and 0 <= self.col < self.width:
+                    self.grid[self.row][self.col] = ch
+                self.col = min(self.col + 1, self.width)
+
+    def _csi(self, params, final):
+        if params.startswith("?"):
+            if params in ("?1049", "?47") and final in ("h", "l"):
+                self.grid = [[" "] * self.width for _ in range(self.height)]
+                self.row = 0
+                self.col = 0
+            return
+        nums = [int(p) if p.isdigit() else 0 for p in params.split(";")] if params else []
+        if final in ("H", "f"):
+            r = (nums[0] if len(nums) >= 1 and nums[0] else 1) - 1
+            c = (nums[1] if len(nums) >= 2 and nums[1] else 1) - 1
+            self.row = max(0, min(r, self.height - 1))
+            self.col = max(0, min(c, self.width - 1))
+        elif final == "A":
+            self.row = max(0, self.row - (nums[0] if nums and nums[0] else 1))
+        elif final == "B":
+            self.row = min(self.height - 1, self.row + (nums[0] if nums and nums[0] else 1))
+        elif final == "C":
+            self.col = min(self.width - 1, self.col + (nums[0] if nums and nums[0] else 1))
+        elif final == "D":
+            self.col = max(0, self.col - (nums[0] if nums and nums[0] else 1))
+        elif final == "G":
+            c = (nums[0] if nums and nums[0] else 1) - 1
+            self.col = max(0, min(c, self.width - 1))
+        elif final == "J":
+            mode = nums[0] if nums else 0
+            if mode == 2:
+                self.grid = [[" "] * self.width for _ in range(self.height)]
+            elif mode == 0:
+                for c in range(self.col, self.width):
+                    self.grid[self.row][c] = " "
+                for r in range(self.row + 1, self.height):
+                    self.grid[r] = [" "] * self.width
+        elif final == "K":
+            mode = nums[0] if nums else 0
+            if mode == 0:
+                for c in range(self.col, self.width):
+                    self.grid[self.row][c] = " "
+
+    def screen_text(self):
+        return "\n".join("".join(row) for row in self.grid)
 
     def drain(self):
         if not select.select([self.pty], [], [], 0.025)[0]:
@@ -185,11 +290,9 @@ class Tui:
             if error.errno == errno.EIO:
                 return
             raise
-        # Answer Cursor Position Reports requested by the inline viewport.
-        old_size = len(self.out)
         self.out.extend(data)
-        for _ in re.finditer(rb"\x1b\[6n", self.out[max(0, old_size - 3):]):
-            os.write(self.pty, b"\x1b[1;1R")
+        self._feed_vt(data.decode(errors="replace"))
+        self.seen_frames.append((len(self.out), self.screen_text()))
 
     def until(self, condition):
         end = time.monotonic() + 5
@@ -197,9 +300,18 @@ class Tui:
             self.drain()
             if condition():
                 return
-        raise AssertionError(repr(self.out[-2400:].decode(errors="replace")))
+        raise AssertionError(
+            "SCREEN:\n" + self.screen_text() + "\nRAW:\n" + repr(self.out[-1600:].decode(errors="replace"))
+        )
 
     def expect(self, text, since=0):
+        def found():
+            if since == 0 and text in self.screen_text():
+                return True
+            return any(pos > since and text in snap for pos, snap in self.seen_frames)
+        self.until(found)
+
+    def expect_raw(self, text, since=0):
         self.until(lambda: text.encode() in self.out[since:])
 
     def send(self, key):
@@ -208,10 +320,12 @@ class Tui:
 
     def finish(self, sig=None):
         if sig is None:
+            idx = self.send(b"\x04")
+            self.expect("Press Ctrl+D again", idx)
             self.send(b"\x04")
         else:
             os.kill(self.pid, sig)
-        self.expect("\x1b[?2004l")
+        self.expect_raw("\x1b[?2004l")
         self.until(self.exited)
         assert self.code == (128 + sig if sig else 0)
         mode = termios.tcgetattr(self.pty)[3]
@@ -237,63 +351,97 @@ class Tui:
 def exercise(backend):
     with Probe(backend) as probe, tempfile.TemporaryDirectory() as directory:
         Path(directory, "rvdbg.toml").write_text(probe.config())
+        # Bare `rvdbg` defaults to Fullscreen (Altscreen) TUI with zero CPR queries.
         tty = Tui(directory, backend)
         try:
-            tty.expect("commands")
+            tty.expect_raw("\x1b[?1049h")
+            tty.expect("Tab complete")
+            assert b"\x1b[6n" not in tty.out
             modes = termios.tcgetattr(tty.pty)[3]
             assert not modes & termios.ICANON and not modes & termios.ECHO
+
+            # Slash menu executes zero-arg commands on a single Enter.
             idx = tty.send(b"/stat")
-            tty.expect("status", idx)
-            idx = tty.send(b"\t\r")
-            tty.expect("commands", idx)
-            tty.resize(72, 16)
-            tty.expect("commands", tty.send(b"\x1b[200~help halt\nhelp mem\x1b[201~\r"))
-            tty.until(lambda: b"Usage: mem" in tty.out)
-            # A repaint has no reason to query the debugger.
+            tty.expect("/status", idx)
+            idx = tty.send(b"\r")
+            tty.expect("halted", idx)
+
+            # Unknown slash command reports an error instead of swallowing Enter.
+            idx = tty.send(b"/nonexistent\r")
+            tty.expect("unknown command '/nonexistent'", idx)
+
+            # Normal Tab completion (without leading `/`) + inline ghost text works.
+            idx = tty.send(b"stat\t\r")
+            tty.expect("❯ status", idx)
+            tty.expect("4000", idx)
+
+            # Multiline paste + resize.
+            tty.resize(76, 20)
+            idx = tty.send(b"\x1b[200~help halt\nhelp mem\x1b[201~\r")
+            tty.expect("Usage: mem", idx)
+
+            # Idle repaint does not query the debugger.
             previous = len(probe.target.log)
             end = time.monotonic() + 0.18
             while time.monotonic() < end:
                 tty.drain()
             assert len(probe.target.log) == previous
+
+            # run-until interrupt, hit, and timeout.
             idx = tty.send(b"run-until 0x4000 --timeout 4\r")
-            tty.expect("stop", idx)
+            tty.expect("Ctrl+C stop", idx)
             tty.until(lambda: probe.target.running)
             idx = tty.send(b"\x03")
             tty.expect("interrupted", idx)
-            tty.expect("commands", idx)
+            tty.expect("/ menu", idx)
             assert probe.target.running
             if backend == "openocd":
                 assert "rbp 0x4000" in probe.target.log
-            tty.expect("commands", tty.send(b"halt\r"))
-            assert not probe.target.running
+
+            tty.expect("halted", tty.send(b"halt\r"))
+            tty.until(lambda: not probe.target.running)
             probe.target.hit = True
             idx = tty.send(b"run-until 0x4000 --timeout 4\r")
             tty.expect("reached", idx)
-            tty.expect("commands", idx)
+            tty.expect("/ menu", idx)
             probe.target.hit = False
             idx = tty.send(b"run-until 0x4000 --timeout 0\r")
             tty.expect("not reached", idx)
-            tty.expect("commands", idx)
+            tty.expect("/ menu", idx)
+
+            # RTT console passthrough.
             idx = tty.send(b"rtt --cb 0x1000\r")
             tty.expect("rtt-out", idx)
-            tty.expect("return", idx)
+            tty.expect("Ctrl+C return", idx)
             tty.send(b"xyz\r")
             tty.until(lambda: probe.target.read(0x2100, 4) == b"xyz\n")
-            tty.expect("commands", tty.send(b"\x03"))
+            tty.expect("/ menu", tty.send(b"\x03"))
+
+            # Persistent FDX split pane + Shift+Tab mode switch + Ctrl+O toggle + !cmd escape.
+            tty.resize(112, 30)
             idx = tty.send(b"fdx --address 0x3000\r")
-            tty.expect("el2>", idx)
-            tty.expect("< fdx-out", idx)
+            tty.expect("fdx:el2", idx)
+            tty.expect("fdx-out", idx)
             tty.send(b"hello\r")
             tty.until(lambda: probe.target.read(0x3008, 4) == struct.pack("<I", 57))
-            # The mock is not consuming "hello", so this packet stays queued.
-            tty.expect("el2> stale-packet", tty.send(b"stale-packet\r"))
-            tty.send(b"\x1b[17~")  # F6 to the main prompt.
+            # Mock does not consume "hello", so next packet stays queued.
+            tty.expect("stale-packet", tty.send(b"stale-packet\r"))
+            # Escape into an rvdbg command directly from FDX mode via `!`.
+            escape_at = tty.send(b"!status\r")
+            tty.expect("0x4000", escape_at)
+            # Ctrl+O collapses and expands FDX view.
+            collapse_at = tty.send(b"\x0f")
+            tty.expect("Ctrl+O expand", collapse_at)
+            expand_at = tty.send(b"\x0f")
+            tty.expect("Ctrl+O collapse", expand_at)
+            # Shift+Tab switches composer back to rvdbg command mode.
+            tty.expect("Tab complete", tty.send(b"\x1b[Z"))
             reset_at = tty.send(b"reset\r")
             tty.expect("closed 1 FDX link", reset_at)
             tty.until(lambda: probe.target.read(0x3004, 4) == bytes(4))
-            tty.expect("discarded 1 queued packet(s)", idx)
+            tty.expect("discarded 1 queued packet(s)", reset_at)
             tty.expect("waiting for the target to open the link", reset_at)
-            tty.expect("< fresh-boot", tty.send(b"go\r"))
+            tty.expect("fresh-boot", tty.send(b"go\r"))
             assert probe.target.read(0x3008, 4) == struct.pack("<I", 63)
 
             tty.expect("halted", tty.send(b"halt\r"))
@@ -308,13 +456,37 @@ def exercise(backend):
             assert probe.target.fdx_reads == reads
             tty.expect("interrupted", tty.send(b"\x03"))
             tty.until(lambda: probe.target.fdx_reads > reads)
-            tty.send(b"\x1b[17~")
-            tty.expect("commands", tty.send(b":q\r"))
-            tty.expect("commands", tty.send(b"status\r"))
+
+            # Switch back into FDX mode with Shift+Tab and close with :q.
+            tty.expect("fdx:el2", tty.send(b"\x1b[Z"))
+            tty.expect("Tab complete", tty.send(b":q\r"))
+
+            # Hot-switch Fullscreen -> Inline -> Fullscreen via Alt+F.
+            inline_at = tty.send(b"\x1bf")
+            tty.expect_raw("\x1b[?1049l", inline_at)
+            tty.expect("Alt+F full", inline_at)
+            full_at = tty.send(b"\x1bf")
+            tty.expect_raw("\x1b[?1049h", full_at)
+            tty.expect("Alt+F inline", full_at)
+
             tty.finish()
         finally:
             tty.close()
 
+        # Verify `--inline` startup mode and One Dark ANSI color output (no stray ␛).
+        inline = Tui(directory, backend, extra_args=("--inline",), color=True)
+        try:
+            inline.expect("Alt+F full")
+            idx = inline.send(b"status\r")
+            inline.expect("state" if backend == "trace32" else "core", idx)
+            inline.expect("running", idx)
+            assert b"\x1b[0;36m" in inline.out[idx:] and b"\x1b[0;32m" in inline.out[idx:]
+            assert "␛".encode() not in inline.out
+            inline.finish()
+        finally:
+            inline.close()
+
+        # Verify `--json` pipe session compatibility (SDK board-tests contract).
         pipe = subprocess.run([BIN, "--json", "--backend", backend], input="status\nquit\n",
                               cwd=directory, capture_output=True, text=True, timeout=5, check=True)
         frames = [json.loads(line) for line in pipe.stdout.splitlines()]
@@ -336,14 +508,33 @@ with tempfile.TemporaryDirectory() as directory, socket.socket() as port:
     )
     tty = Tui(directory, "trace32")
     try:
-        tty.expect("commands")
+        tty.expect("Tab complete")
         tty.expect("no PowerView", tty.send(b"status\r"))
-        tty.expect("commands")
+        tty.expect("Tab complete")
         tty.finish(signal.SIGTERM)
     finally:
         tty.close()
 
-    for args in (["--tui"], ["--tui", "--json"], ["--tui", "status"]):
+    # TERM=dumb falls back to the plain stream session without raw mode.
+    dumb = subprocess.run(
+        [BIN, "--backend", "trace32"],
+        cwd=directory,
+        input="help\nquit\n",
+        capture_output=True,
+        text=True,
+        env={"TERM": "dumb", "HOME": directory},
+        timeout=5,
+        check=True,
+    )
+    assert "inspect" in dumb.stdout, dumb.stdout
+
+    for args in (
+        ["--tui"],
+        ["--tui", "--json"],
+        ["--tui", "status"],
+        ["--inline"],
+        ["--inline", "status"],
+    ):
         run = subprocess.run([BIN, *args], cwd=directory, input="", capture_output=True,
                              text=True, timeout=5)
-        assert run.returncode != 0 and "--tui" in run.stderr and not run.stdout, run
+        assert run.returncode != 0 and ("--tui" in run.stderr or "--inline" in run.stderr) and not run.stdout, run

@@ -34,6 +34,24 @@ use config::{Backend, Config};
 /// differences (the same code as a failed check).
 const EXIT_FAILED: u8 = 3;
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TuiModeArg {
+    /// Flicker-free alternate screen (default)
+    #[value(alias = "alt", alias = "altscreen")]
+    Fullscreen,
+    /// Dynamic-height inline surface in terminal scrollback
+    Inline,
+}
+
+impl From<TuiModeArg> for tui::ScreenMode {
+    fn from(arg: TuiModeArg) -> Self {
+        match arg {
+            TuiModeArg::Fullscreen => tui::ScreenMode::Fullscreen,
+            TuiModeArg::Inline => tui::ScreenMode::Inline,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "rvdbg",
@@ -41,9 +59,20 @@ const EXIT_FAILED: u8 = 3;
     about = "Flash and debug rustvisor on its board (TRACE32 or StellarLINK)"
 )]
 struct Cli {
-    /// Start the inline interactive interface
-    #[arg(long, conflicts_with = "json")]
-    tui: bool,
+    /// Start the interactive terminal UI (`--tui`, `--tui=fullscreen`, or `--tui=inline`)
+    #[arg(
+        long,
+        value_name = "MODE",
+        num_args = 0..=1,
+        default_missing_value = "fullscreen",
+        require_equals = true,
+        conflicts_with = "json"
+    )]
+    tui: Option<TuiModeArg>,
+
+    /// Start the interactive session in inline scrollback mode instead of fullscreen
+    #[arg(long, conflicts_with_all = ["json", "tui"])]
+    inline: bool,
 
     /// Project configuration (default: the nearest rvdbg.toml)
     #[arg(long, global = true, value_name = "FILE")]
@@ -401,12 +430,21 @@ fn is_closed_stdout(payload: &(dyn std::any::Any + Send)) -> bool {
 fn run(cli: Cli) -> Result<u8, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let flag = cli.backend.map(Backend::from);
-    if cli.tui {
+    let explicit_tui = if cli.inline {
+        Some((tui::ScreenMode::Inline, "--inline"))
+    } else {
+        cli.tui.map(|mode| (mode.into(), "--tui"))
+    };
+    if let Some((mode, flag_name)) = explicit_tui {
         if cli.command.is_some() {
-            return Err("--tui starts a session and takes no subcommand".into());
+            return Err(format!(
+                "{flag_name} starts a session and takes no subcommand"
+            ));
         }
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-            return Err("--tui requires a terminal on stdin and stdout".into());
+            return Err(format!(
+                "{flag_name} requires a terminal on stdin and stdout"
+            ));
         }
         return tui::run(
             session::load_config(
@@ -415,9 +453,25 @@ fn run(cli: Cli) -> Result<u8, String> {
                 cli.images.as_deref(),
             )?,
             flag,
+            mode,
         );
     }
     let Some(command) = cli.command else {
+        let interactive_tty = !cli.json
+            && std::io::stdin().is_terminal()
+            && std::io::stdout().is_terminal()
+            && std::env::var("TERM").as_deref() != Ok("dumb");
+        if interactive_tty {
+            return tui::run(
+                session::load_config(
+                    &config::find(cli.config.as_deref(), &cwd)?,
+                    &cwd,
+                    cli.images.as_deref(),
+                )?,
+                flag,
+                tui::ScreenMode::Fullscreen,
+            );
+        }
         return session::run(
             cli.config.as_deref(),
             &cwd,

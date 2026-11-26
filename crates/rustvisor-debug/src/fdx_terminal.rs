@@ -547,7 +547,11 @@ impl Panel {
         ui: crate::tui::CommandUi,
     ) -> Result<Self, String> {
         let selected = options.targets[0].name.clone();
-        ui.fdx_open(selected.clone(), options.history_file.clone())?;
+        ui.fdx_open(
+            selected.clone(),
+            options.history_file.clone(),
+            selection.all || options.targets.len() > 1,
+        )?;
         let mut panel = Self {
             selection,
             terminal: None,
@@ -653,6 +657,15 @@ impl Panel {
     pub fn poll(&mut self, memory: &mut impl Memory, history: &mut History) -> Result<(), String> {
         if let Some(terminal) = &mut self.terminal {
             terminal.poll(memory, &self.diagnosis, history, Instant::now())?;
+            let words = terminal
+                .words
+                .lock()
+                .ok()
+                .and_then(|all| all.get(terminal.current).cloned())
+                .unwrap_or_default();
+            if !words.is_empty() {
+                self.ui.fdx_words(words);
+            }
             self.update_status();
         }
         Ok(())

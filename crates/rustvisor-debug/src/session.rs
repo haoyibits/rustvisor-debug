@@ -24,20 +24,12 @@
 
 use probecore::output::{eprintln, println};
 
-use std::borrow::Cow;
 use std::io::{BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{CommandFactory, Parser};
-use rustyline::completion::Completer;
-use rustyline::error::ReadlineError;
-use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
-use rustyline::history::DefaultHistory;
-use rustyline::validate::Validator;
-use rustyline::{Editor, Helper};
 
 use probecore::style::Style;
 use stellarbridge::core::{CoreTarget, RunState};
@@ -204,16 +196,6 @@ fn command_help(name: &str, style: Style) -> Result<String, String> {
     } else {
         help.to_string()
     })
-}
-
-/// Every name the completion offers.
-fn command_names() -> Vec<String> {
-    GROUPS
-        .iter()
-        .flat_map(|(_, commands)| commands.iter().map(|(name, _)| name.to_string()))
-        .chain(SESSION_WORDS.iter().map(|(word, _)| word.to_string()))
-        .chain(["exit".to_string()])
-        .collect()
 }
 
 pub(crate) struct MenuCommand {
@@ -391,76 +373,6 @@ fn color_prompt(style: Style, prompt: &str) -> String {
     )
 }
 
-struct LineHelper {
-    names: Vec<String>,
-    style: Style,
-}
-
-impl Completer for LineHelper {
-    type Candidate = String;
-
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        _ctx: &rustyline::Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<String>)> {
-        let before = &line[..pos];
-        let (start, word) = match before.rsplit_once(char::is_whitespace) {
-            Some((head, word)) if matches!(head.trim(), "help" | "rvdbg") => {
-                (pos - word.len(), word)
-            }
-            Some(_) => return Ok((pos, Vec::new())),
-            None => (
-                before.len() - before.trim_start().len(),
-                before.trim_start(),
-            ),
-        };
-        let mut matches: Vec<String> = self
-            .names
-            .iter()
-            .filter(|name| name.starts_with(word))
-            .cloned()
-            .collect();
-        matches.sort();
-        Ok((start, matches))
-    }
-}
-
-impl Hinter for LineHelper {
-    type Hint = String;
-}
-
-impl Highlighter for LineHelper {
-    /// The prompt stays plain text for the editor, which measures its width
-    /// without the colours.
-    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
-        &'s self,
-        prompt: &'p str,
-        _default: bool,
-    ) -> Cow<'b, str> {
-        if self.style.enabled() {
-            Cow::Owned(color_prompt(self.style, prompt))
-        } else {
-            Cow::Borrowed(prompt)
-        }
-    }
-}
-
-impl Validator for LineHelper {
-    /// A line ending in `\` continues on the next.
-    fn validate(
-        &self,
-        ctx: &mut rustyline::validate::ValidationContext<'_>,
-    ) -> rustyline::Result<rustyline::validate::ValidationResult> {
-        Ok(if ctx.input().trim_end().ends_with('\\') {
-            rustyline::validate::ValidationResult::Incomplete
-        } else {
-            rustyline::validate::ValidationResult::Valid(None)
-        })
-    }
-}
-
 /// The commands of an input that may hold several lines, with their line
 /// numbers: a line ending in `\` continues on the next; blank lines and
 /// lines starting with `#` are skipped.
@@ -496,8 +408,6 @@ pub fn logical_lines(input: &str) -> Vec<(usize, String)> {
     }
     lines
 }
-
-impl Helper for LineHelper {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
@@ -631,18 +541,38 @@ impl Session {
     }
 
     pub(crate) fn tui_status(&mut self) -> crate::tui::Status {
+        let port_summary = match self.backend {
+            Some(Backend::OpenOcd) => self
+                .config
+                .openocd
+                .as_ref()
+                .map(|oocd| format!("GDB :{}", oocd.gdb_port)),
+            Some(Backend::Trace32) => Some(format!("RCL :{}", probe::rcl_port(&self.config))),
+            None => None,
+        };
         crate::tui::Status {
             target: self.target_state(),
             backend: self.backend,
+            config_path: self.config.file.clone(),
+            images_summary: crate::tui::format_images_summary(&self.config),
+            image_paths: self.config.images(),
+            port_summary,
         }
     }
 
     pub(crate) fn tui_header(&self) -> String {
+        let style = self.style;
+        let backend = match self.backend {
+            Some(backend) => style.good(format!("{} ({})", backend.name(), self.reason)),
+            None => style.warn(&self.reason),
+        };
         format!(
-            "rvdbg {}  {}\n{}\nimages  {}",
+            "{} {}  {}\n{}  {backend}\n{}   {}",
+            style.label("rvdbg"),
             env!("CARGO_PKG_VERSION"),
-            self.config.file.display(),
-            self.reason,
+            style.dim(self.config.file.display()),
+            style.label("backend"),
+            style.label("images"),
             self.images_line()
         )
     }
@@ -1026,8 +956,8 @@ impl Session {
                 return Flow::Continue;
             }
         };
-        if cli.tui {
-            self.error("--tui is a session startup option");
+        if cli.tui.is_some() || cli.inline {
+            self.error("--tui and --inline are session startup options");
             return Flow::Continue;
         }
         if cli.config.is_some() || cli.backend.is_some() {
@@ -1324,56 +1254,21 @@ pub fn run(
         print!("{}", session.header());
     }
 
-    if !std::io::stdin().is_terminal() {
-        // Lines from a pipe or a file: no prompt, no line editor.
-        for line in std::io::stdin().lock().lines() {
-            let line = line.map_err(|error| format!("cannot read the input: {error}"))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let flow = session.handle_line(&line);
-            if machine {
-                println!(
-                    "{}",
-                    end_line(&line, session.code, session.failure.as_deref())
-                );
-            }
-            if flow == Flow::Quit {
-                break;
-            }
+    // Line-by-line stream mode (pipes, `rvdbg --json`, or `TERM=dumb`).
+    for line in std::io::stdin().lock().lines() {
+        let line = line.map_err(|error| format!("cannot read the input: {error}"))?;
+        if line.trim().is_empty() {
+            continue;
         }
-        return Ok(0);
-    }
-
-    let mut editor = Editor::<LineHelper, DefaultHistory>::new()
-        .map_err(|error| format!("cannot start the line editor: {error}"))?;
-    editor.set_helper(Some(LineHelper {
-        names: command_names(),
-        style,
-    }));
-    let history = history_path(&config);
-    if let Some(path) = &history {
-        let _ = editor.load_history(path);
-    }
-    loop {
-        let prompt = session.prompt();
-        match editor.readline(&prompt) {
-            Ok(input) => {
-                for line in input.split('\n') {
-                    if !line.trim().is_empty() {
-                        let _ = editor.add_history_entry(line.trim_end());
-                        if let Some(path) = &history {
-                            let _ = editor.append_history(path);
-                        }
-                    }
-                }
-                if session.handle_input(&input) == Flow::Quit {
-                    break;
-                }
-            }
-            Err(ReadlineError::Interrupted) => continue,
-            Err(ReadlineError::Eof) => break,
-            Err(error) => return Err(format!("terminal error: {error}")),
+        let flow = session.handle_line(&line);
+        if machine {
+            println!(
+                "{}",
+                end_line(&line, session.code, session.failure.as_deref())
+            );
+        }
+        if flow == Flow::Quit {
+            break;
         }
     }
     Ok(0)

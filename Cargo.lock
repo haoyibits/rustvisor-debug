@@ -715,7 +715,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rustvisor-debug"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "clap",
  "crossterm",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "t32rcl"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "thiserror",
 ]
@@ -1057,7 +1057,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tracebridge"
-version = "0.1.38"
+version = "0.1.39"
 dependencies = [
  "chrono",
  "clap",

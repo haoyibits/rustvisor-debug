@@ -204,12 +204,15 @@ rvdbg [openocd halted]> quit
   output (for the inspect commands, `ram` and `fdx --send/--expect` one JSON
   line) an `{"end": "<line>", "ok": …, "exit_code": …, "error": …}` line.
 
-### Inline terminal interface
+### Terminal interface
 
-Run `rvdbg --tui` from a terminal with an `rvdbg.toml`. Enter commands directly, or type `/` to browse them. Use the arrow keys to select a command, Tab to fill it in, and Enter to submit. Command results stay in the terminal's scrollback. Ctrl+C clears the draft or interrupts a supported operation. Ctrl+D on an empty line ends the session.
+Running bare `rvdbg` on an interactive terminal starts the fullscreen TUI by default (use `rvdbg --inline` for inline scrollback mode, or press `Alt+F` / run `/inline` and `/fullscreen` to switch at any time).
 
-- `rtt` opens the bidirectional RTT console. Keystrokes go to the target and Ctrl+C returns to the command prompt. Use `rtt --output-only` to read output only. The inline interface displays target output as text. The standalone `rvdbg rtt` also supports target-generated terminal escape sequences.
-- `fdx` opens a persistent packet pane. Press F6 to switch between the main prompt and FDX. Enter in the pane sends a packet, `:help` lists the link commands, and `:q` or Ctrl+C while the pane is focused closes it. `fdx --all` shows the state of each link and supports `:to <name>` and `@<name> <packet>`. The pane pauses during commands such as `run-until`, and resumes polling when the command returns. After `reset` it waits for the firmware to reopen its links.
+- Type commands directly with inline ghost hints and `Tab` completion (commands, `--flags`, ELF symbols for `mem`/`ram`/`run-until`, and local paths), or type `/` to open the fuzzy command and picker menu (`/images`, `/backend`, `/fdx`, `/copy`, `/clear`, `/mouse`). Zero-argument slash commands run on a single `Enter`.
+- Multiline paste and `Ctrl+J` / `Shift+Enter` grow the composer automatically; `Ctrl+R` searches `.rvdbg/history`; `Ctrl+C` clears the draft or interrupts a running command; press `Ctrl+D` twice on an empty line (or run `quit`) to exit.
+- `rtt` opens the bidirectional RTT console (`Ctrl+C` returns to the command composer).
+- `fdx` / `fdx --all` opens a persistent FDX monitor (right-hand split pane on wide fullscreen terminals, or a collapsible preview bar toggled with `Ctrl+O`). Press `Shift+Tab` (or `F6`) to switch composer input between `rvdbg` commands and FDX packets; prefix a line with `!` in FDX mode to run a one-off debugger command without leaving FDX. The pane pauses during `run-until`, discards queued packets and closes open links on `reset`, and resumes automatically when firmware reopens them.
+- In non-TTY pipes, `rvdbg --json`, or `TERM=dumb`, `rvdbg` runs the plain line-by-line stream session.
 
 ## Configuration
 

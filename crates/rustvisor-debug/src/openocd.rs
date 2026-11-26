@@ -199,8 +199,12 @@ impl FlashDisplay {
                     self.finish();
                     self.started = std::time::Instant::now();
                 }
-                // Logs advance in 10% steps; terminals in 1% steps.
-                let bucket = if self.terminal { percent } else { percent / 10 };
+                // Logs advance in 10% steps; terminals and TUI in 1% steps.
+                let bucket = if self.terminal || probecore::output::captured() {
+                    percent
+                } else {
+                    percent / 10
+                };
                 if !new_phase && self.last == Some((phase, bucket)) {
                     return;
                 }

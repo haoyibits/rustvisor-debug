@@ -13,6 +13,7 @@ mod ansi;
 mod complete;
 mod composer;
 mod fdx_view;
+mod logo;
 mod surface;
 mod theme;
 mod transcript;
@@ -421,7 +422,9 @@ impl App {
     ) -> Result<bool, String> {
         match message {
             Message::Banner(text) => {
-                self.transcript.push_banner(&text, self.theme);
+                let width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
+                let lines = logo::banner_lines(&text, self.theme, width);
+                self.transcript.push_banner_lines(lines, self.theme);
             }
             Message::Text(text, is_error) => {
                 self.flush_rtt();
@@ -1342,10 +1345,11 @@ impl App {
         right.push(' ');
         let total = usize::from(area.width);
         let right_w = right.width();
-        let prefix = format!(" rvdbg {} · ", env!("CARGO_PKG_VERSION"));
+        let prefix = format!(" ◈ rvdbg {} · ", env!("CARGO_PKG_VERSION"));
         let avail_path = total.saturating_sub(prefix.width() + right_w + 2);
         let left_path = truncate_left(&short_path(&self.status.config_path), avail_path);
         let mut spans = vec![
+            Span::styled(" ◈", self.theme.rust_brand().patch(bg)),
             Span::styled(" rvdbg ", self.theme.prompt_command().patch(bg)),
             Span::styled(
                 format!("{} ", env!("CARGO_PKG_VERSION")),

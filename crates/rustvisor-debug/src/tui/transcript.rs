@@ -39,8 +39,7 @@ impl Transcript {
         }
     }
 
-    pub(super) fn push_banner(&mut self, text: &str, theme: Theme) {
-        let parsed = ansi::parse_lines(text, theme.plain(), theme.color);
+    pub(super) fn push_banner_lines(&mut self, parsed: Vec<Line<'static>>, theme: Theme) {
         let mut lines = Vec::with_capacity(parsed.len());
         for line in parsed {
             self.inline_queue.push(ansi::to_ansi(&line, 0, theme.color));

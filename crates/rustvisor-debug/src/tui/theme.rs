@@ -14,19 +14,26 @@ pub(super) const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', 
 pub(super) struct Theme {
     pub color: bool,
     pub color256: bool,
+    pub truecolor: bool,
 }
 
 impl Theme {
     pub(super) fn detect() -> Self {
         let color = probecore::style::Style::stdout().enabled();
         let color256 = color && supports_256_color();
-        Self { color, color256 }
+        let truecolor = color && supports_truecolor();
+        Self {
+            color,
+            color256,
+            truecolor,
+        }
     }
 
     #[cfg(test)]
     pub(super) const PLAIN: Self = Self {
         color: false,
         color256: false,
+        truecolor: false,
     };
 
     pub(super) fn plain(self) -> Style {
@@ -189,6 +196,35 @@ impl Theme {
         }
     }
 
+    pub(super) fn rgb(self, r: u8, g: u8, b: u8) -> Color {
+        if !self.color {
+            return Color::Reset;
+        }
+        if self.truecolor {
+            return Color::Rgb(r, g, b);
+        }
+        if self.color256 {
+            return Color::Indexed(rgb_to_ansi256(r, g, b));
+        }
+        if r > 180 && g > 180 && b > 180 {
+            Color::White
+        } else if b > r {
+            Color::Cyan
+        } else {
+            Color::Yellow
+        }
+    }
+
+    pub(super) fn rust_brand(self) -> Style {
+        if self.color {
+            Style::default()
+                .fg(self.rgb(255, 107, 53))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        }
+    }
+
     fn fg(self, color: Color) -> Style {
         if self.color {
             Style::default().fg(color)
@@ -196,6 +232,38 @@ impl Theme {
             Style::default()
         }
     }
+}
+
+fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
+    let cube = |v: u8| ((u16::from(v) * 5 + 127) / 255) as u8;
+    16 + 36 * cube(r) + 6 * cube(g) + cube(b)
+}
+
+fn supports_truecolor() -> bool {
+    if std::env::var("COLORTERM").is_ok_and(|value| {
+        let lower = value.to_ascii_lowercase();
+        lower.contains("truecolor") || lower.contains("24bit")
+    }) {
+        return true;
+    }
+    if std::env::var_os("WT_SESSION").is_some() {
+        return true;
+    }
+    if std::env::var("TERM_PROGRAM").is_ok_and(|program| {
+        matches!(
+            program.as_str(),
+            "iTerm.app" | "WezTerm" | "ghostty" | "vscode" | "WarpTerminal" | "Alacritty" | "kitty"
+        )
+    }) {
+        return true;
+    }
+    std::env::var("TERM").is_ok_and(|term| {
+        term.contains("direct")
+            || term.contains("kitty")
+            || term.contains("ghostty")
+            || term.contains("wezterm")
+            || term.contains("alacritty")
+    })
 }
 
 fn supports_256_color() -> bool {

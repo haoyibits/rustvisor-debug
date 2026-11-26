@@ -60,7 +60,7 @@ pub(super) fn banner_lines(header: &str, theme: Theme, width: u16) -> Vec<Line<'
 
     let art = chip_rows(theme);
     let art_width = CHIP_LINES[0].width();
-    let max_info = usize::from(width).saturating_sub(2 + art_width + 3);
+    let max_info = usize::from(width).saturating_sub(art_width + 3);
     let mut out = Vec::with_capacity(CHIP_LINES.len());
     for (idx, art_spans) in art.into_iter().enumerate() {
         let mut spans = art_spans;

@@ -422,9 +422,10 @@ impl App {
     ) -> Result<bool, String> {
         match message {
             Message::Banner(text) => {
-                let width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
-                let lines = logo::banner_lines(&text, self.theme, width);
-                self.transcript.push_banner_lines(lines, self.theme);
+                let width = crossterm::terminal::size()
+                    .map(|(w, _)| w.saturating_sub(2))
+                    .unwrap_or(78);
+                self.transcript.push_banner(&text, self.theme, width);
             }
             Message::Text(text, is_error) => {
                 self.flush_rtt();
@@ -1369,7 +1370,7 @@ impl App {
     fn render_transcript(&mut self, area: Rect, buf: &mut Buffer) {
         let content_w = usize::from(area.width.saturating_sub(2)).max(1);
         let height = usize::from(area.height);
-        let (rows, total, scroll) = self.transcript.visible_rows(content_w, height);
+        let (rows, total, scroll) = self.transcript.visible_rows(content_w, height, self.theme);
         for (idx, line) in rows.into_iter().enumerate() {
             line.render(
                 Rect::new(

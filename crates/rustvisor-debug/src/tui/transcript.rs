@@ -7,6 +7,7 @@ use std::time::Duration;
 use ratatui::text::{Line, Span};
 
 use super::ansi;
+use super::logo;
 use super::theme::Theme;
 
 const MAX_TURNS: usize = 500;
@@ -19,6 +20,7 @@ struct RecordLine {
 
 struct Turn {
     command: Option<String>,
+    banner: Option<String>,
     lines: Vec<RecordLine>,
 }
 
@@ -39,15 +41,15 @@ impl Transcript {
         }
     }
 
-    pub(super) fn push_banner_lines(&mut self, parsed: Vec<Line<'static>>, theme: Theme) {
-        let mut lines = Vec::with_capacity(parsed.len());
-        for line in parsed {
-            self.inline_queue.push(ansi::to_ansi(&line, 0, theme.color));
-            lines.push(RecordLine { line, indent: 0 });
+    pub(super) fn push_banner(&mut self, header: &str, theme: Theme, width: u16) {
+        let parsed = logo::banner_lines(header, theme, width);
+        for line in &parsed {
+            self.inline_queue.push(ansi::to_ansi(line, 0, theme.color));
         }
         self.push_turn(Turn {
             command: None,
-            lines,
+            banner: Some(header.to_string()),
+            lines: Vec::new(),
         });
     }
 
@@ -67,6 +69,7 @@ impl Transcript {
         }
         self.push_turn(Turn {
             command: Some(command.to_string()),
+            banner: None,
             lines: turn_lines,
         });
         self.scroll = 0;
@@ -81,9 +84,10 @@ impl Transcript {
         let parsed = ansi::parse_lines(text, base, theme.color);
         let has_command = self.turns.back().is_some_and(|turn| turn.command.is_some());
         let indent = if has_command { 2 } else { 0 };
-        if self.turns.is_empty() {
+        if self.turns.is_empty() || self.turns.back().is_some_and(|turn| turn.banner.is_some()) {
             self.push_turn(Turn {
                 command: None,
+                banner: None,
                 lines: Vec::new(),
             });
         }
@@ -103,9 +107,10 @@ impl Transcript {
             Span::styled(text.to_string(), theme.dim()),
         ]);
         self.inline_queue.push(ansi::to_ansi(&line, 2, theme.color));
-        if self.turns.is_empty() {
+        if self.turns.is_empty() || self.turns.back().is_some_and(|turn| turn.banner.is_some()) {
             self.push_turn(Turn {
                 command: None,
+                banner: None,
                 lines: Vec::new(),
             });
         }
@@ -198,6 +203,7 @@ impl Transcript {
         &mut self,
         width: usize,
         height: usize,
+        theme: Theme,
     ) -> (Vec<Line<'static>>, usize, usize) {
         if width == 0 || height == 0 {
             return (Vec::new(), 0, 0);
@@ -206,6 +212,13 @@ impl Transcript {
         for (idx, turn) in self.turns.iter().enumerate() {
             if idx > 0 {
                 all.push(Line::default());
+            }
+            if let Some(header) = &turn.banner {
+                let banner_width = u16::try_from(width).unwrap_or(u16::MAX);
+                for line in logo::banner_lines(header, theme, banner_width) {
+                    all.extend(ansi::wrap_line(&line, width, 0));
+                }
+                continue;
             }
             for item in &turn.lines {
                 all.extend(ansi::wrap_line(&item.line, width, item.indent));
@@ -252,7 +265,7 @@ mod tests {
         t.push_output("halted   PC 0x4000", false, Theme::PLAIN);
         t.finish_command(0, Duration::from_millis(20), Theme::PLAIN);
         assert_eq!(t.copy_turn(1).as_deref(), Some("halted   PC 0x4000"));
-        let (rows, total, scroll) = t.visible_rows(80, 10);
+        let (rows, total, scroll) = t.visible_rows(80, 10, Theme::PLAIN);
         assert_eq!(scroll, 0);
         assert_eq!(total, 2);
         assert_eq!(ansi::plain_text(&rows[0]), "❯ status");
@@ -267,10 +280,26 @@ mod tests {
             t.push_output(&format!("row {i}"), false, Theme::PLAIN);
         }
         t.scroll_up(100);
-        let (rows, total, scroll) = t.visible_rows(80, 5);
+        let (rows, total, scroll) = t.visible_rows(80, 5, Theme::PLAIN);
         assert_eq!(rows.len(), 5);
         assert_eq!(total, 21);
         assert_eq!(scroll, 16);
         assert_eq!(ansi::plain_text(&rows[0]), "❯ mem 0x0 10");
+    }
+
+    #[test]
+    fn banner_adapts_dynamically_to_narrow_and_wide_viewports() {
+        let mut t = Transcript::new();
+        let header = "rvdbg 0.1.42  /very/long/path/to/rustvisor-sdk/rvdbg.toml\n\
+                      backend  no probe found: connect a StellarLINK or a Lauterbach probe\n\
+                      images   /very/long/path/to/target/board-tests/build/latency/inject-five";
+        t.push_banner(header, Theme::PLAIN, 120);
+        // Wide viewport: chip stays 7 rows, zero lines wrap across the chip.
+        let (wide, total_wide, _) = t.visible_rows(72, 20, Theme::PLAIN);
+        assert_eq!(total_wide, 7);
+        assert_eq!(wide.len(), 7);
+        // Narrow viewport (< 68): drops chip cleanly without splitting it.
+        let (narrow, _, _) = t.visible_rows(55, 20, Theme::PLAIN);
+        assert!(ansi::plain_text(&narrow[0]).starts_with("rvdbg"));
     }
 }

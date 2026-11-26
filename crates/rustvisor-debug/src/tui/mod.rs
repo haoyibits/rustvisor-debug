@@ -1177,7 +1177,7 @@ impl App {
             if wide_split {
                 let left_w = (canvas.width * 56) / 100;
                 let right_w = canvas.width.saturating_sub(left_w + 1);
-                let left = Rect::new(canvas.x, canvas.y, left_w, canvas.height);
+                let left = Rect::new(canvas.x, canvas.y, left_w.saturating_sub(1), canvas.height);
                 let sep_x = canvas.x + left_w;
                 let right = Rect::new(sep_x + 1, canvas.y, right_w, canvas.height);
                 self.render_transcript(left, buf);

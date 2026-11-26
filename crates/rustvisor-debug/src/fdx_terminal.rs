@@ -995,7 +995,7 @@ impl<O: Out> Terminal<O> {
                         ));
                         link
                     }
-                    Ok(None) => {
+                    Ok(None) | Err(Error::Corrupt) => {
                         if !self.slots[index].said_closed {
                             self.slots[index].said_closed = true;
                             self.warn(format!("{on}waiting for the target to open the link"));
@@ -1004,6 +1004,15 @@ impl<O: Out> Terminal<O> {
                     }
                     Err(Error::Memory(error)) if error.lost => {
                         return Err(format!("FDX: the connection to the probe is gone: {error}"));
+                    }
+                    Err(Error::Memory(_)) => {
+                        // Uninitialized guest RAM after power-on can raise a non-fatal
+                        // bus error until the hypervisor prepares and starts that core.
+                        if !self.slots[index].said_closed {
+                            self.slots[index].said_closed = true;
+                            self.warn(format!("{on}waiting for the target to open the link"));
+                        }
+                        return Ok(());
                     }
                     Err(error) => return Err(format!("FDX: {error}")),
                 }
@@ -1768,5 +1777,31 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("guest0 is not open"), "{text}");
+    }
+
+    #[test]
+    fn corrupt_peer_ram_waits_without_breaking_open_links() {
+        let mut board = Board::new();
+        let corrupt_addr = BASE + 0x40;
+        // Garbage header (non-power-of-two size) mimics uninitialized guest RAM after power-on.
+        board.put_word(corrupt_addr + 4, 0x1234_5678);
+        let uninit = Target {
+            name: "guest1".into(),
+            symbol: "RUSTVISOR_FDX".into(),
+            address: corrupt_addr,
+        };
+        let mut lines = Lines::default();
+        let mut history = History::default();
+        let targets = [target(), uninit];
+        let mut term = Terminal::new(&targets, &mut lines, Style::PLAIN);
+        let diagnosis = Diagnosis::default();
+        let t0 = term.slots[0].closed_since;
+        term.line(None, "@el2 ping", &history, t0);
+        term.poll(&mut board, &diagnosis, &mut history, t0).unwrap();
+        term.poll(&mut board, &diagnosis, &mut history, t0).unwrap();
+        drop(term);
+        let text = lines.0.join("\n");
+        assert!(text.contains("[el2] < ok ping"), "{text}");
+        assert!(text.contains("guest1: waiting for the target"), "{text}");
     }
 }

@@ -167,20 +167,44 @@ impl FdxView {
             return;
         }
         let width = usize::from(area.width);
-        // Header line: link state indicators + toggle hint.
+        let toggle_hint = if self.expanded {
+            "Ctrl+O collapse".to_string()
+        } else if self.unread > 0 {
+            format!("Ctrl+O expand (+{})", self.unread)
+        } else {
+            "Ctrl+O expand".to_string()
+        };
+        let hint_reserve = toggle_hint.len() + 2;
+        let max_left = width.saturating_sub(hint_reserve);
+
+        // Header line: link state indicators + always-visible toggle hint.
         let mut header = Vec::new();
+        let mut used = 0usize;
+        let title = " FDX ";
         header.push(Span::styled(
-            " FDX ",
+            title,
             if focused {
                 theme.prompt_fdx()
             } else {
                 theme.bold()
             },
         ));
+        used += title.len();
+
         if let Some(cmd) = paused_by {
-            header.push(Span::styled(format!("· Paused ({cmd}) "), theme.yellow()));
+            let text = truncate_right(&format!("· Paused ({cmd}) "), max_left.saturating_sub(used));
+            used += unicode_width::UnicodeWidthStr::width(text.as_str());
+            header.push(Span::styled(text, theme.yellow()));
         } else if !self.links.is_empty() {
-            for link in &self.links {
+            let mut hidden = 0usize;
+            for (idx, link) in self.links.iter().enumerate() {
+                let pill_w = 2 + unicode_width::UnicodeWidthStr::width(link.name.as_str()) + 2;
+                let remaining_after = self.links.len() - idx - 1;
+                let overflow_reserve = if remaining_after > 0 { 5 } else { 0 };
+                if used + pill_w + overflow_reserve > max_left {
+                    hidden = self.links.len() - idx;
+                    break;
+                }
                 let (dot, dot_style) = if link.open {
                     ("● ", theme.green())
                 } else {
@@ -195,19 +219,20 @@ impl FdxView {
                 };
                 header.push(Span::styled(dot, dot_style));
                 header.push(Span::styled(format!("{}  ", link.name), name_style));
+                used += pill_w;
+            }
+            if hidden > 0 {
+                let more = format!("+{hidden}");
+                used += more.len();
+                header.push(Span::styled(more, theme.dim()));
             }
         } else {
-            header.push(Span::styled(self.status.clone(), theme.dim()));
+            let text = truncate_right(&self.status, max_left.saturating_sub(used));
+            used += unicode_width::UnicodeWidthStr::width(text.as_str());
+            header.push(Span::styled(text, theme.dim()));
         }
-        let toggle_hint = if self.expanded {
-            "Ctrl+O collapse".to_string()
-        } else if self.unread > 0 {
-            format!("Ctrl+O expand (+{})", self.unread)
-        } else {
-            "Ctrl+O expand".to_string()
-        };
-        let used: usize = header.iter().map(|s| s.content.len()).sum();
-        if used + toggle_hint.len() + 2 <= width {
+
+        if used + toggle_hint.len() < width {
             let pad = width - used - toggle_hint.len() - 1;
             header.push(Span::raw(" ".repeat(pad)));
             header.push(Span::styled(toggle_hint, theme.dim()));
@@ -248,6 +273,27 @@ impl FdxView {
                 .render(Rect::new(area.x, log_y + row as u16, area.width, 1), buf);
         }
     }
+}
+
+fn truncate_right(text: &str, max_width: usize) -> String {
+    if unicode_width::UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 1 {
+        return "…".repeat(max_width);
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w + 1 > max_width {
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    out.push('…');
+    out
 }
 
 fn parse_link_summaries(status: &str) -> Vec<LinkSummary> {

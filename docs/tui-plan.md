@@ -17,8 +17,7 @@
 ## 验收状态
 
 - **主机自动验收**：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all`（含模拟 TRACE32 / OpenOCD 的 PTY 端到端回归，覆盖默认全屏、One Dark ANSI 颜色与 `NO_COLOR`、`/` 单次回车执行、普通 `Tab` 补全、多行粘贴、`run-until` 中断/命中/超时、RTT 双向收发、`Shift+Tab` FDX 分栏与 `!cmd` 逃逸、`Ctrl+O` 折叠、`Alt+F` 全屏/内联互切、双击 `Ctrl+D`、`SIGTERM` 恢复、`TERM=dumb` 回退及 `--json` 管道兼容）。
-- **上板手工验收清单（待连接 SR6P6 板卡）**：
-  1. TRACE32 与 StellarLINK 分别运行裸 `rvdbg` 验证默认全屏启动、One Dark 色彩显示与缩放重排；
-  2. 执行 `/images` 切到 `lab` 多镜像目录，`flash` 观察动态 Spinner、烧录进度条与运行期预输入队列；
-  3. 执行 `fdx --all` 与 `Shift+Tab` / `Ctrl+O`，给 `el2` 和各 `guest` 发包，用 `!cores` 检查状态，验证 `reset` 关闭链路后 `go` 自动重连；
-  4. 执行 `run-until` 后 `Ctrl+C` 中断，确认断点清理与 FDX 轮询恢复；测试 `Alt+F` 切内联模式与 `/copy` 剪贴板复制。
+- **上板验收结果（2026-11-26，SR6P6 + Lauterbach TRACE32，`--images target/serror-fix/five` 六镜像）**：
+  - 已实机通过：裸 `rvdbg` 默认全屏（零 `\x1b[6n`、无 `␛` 泄漏）、`load`/`verify`/`flash`（6 镜像全量一致）、`/cor` 单次回车执行 `cores`、4.3 MB `hypervisor` ELF 符号 `Tab` 补全（`mem RUSTVISOR_FDX 4`）、`fdx --all` 右侧分栏与 `Ctrl+O`/`!status`/`Shift+Tab`/`reset → go` 重连收 `< ready`、`halt → run-until → Ctrl+C → status`、`/copy`（OSC 52）、`Alt+F` 全屏/内联互切与 One Dark ANSI 配色、双击 `Ctrl+D` 退出恢复。
+  - 上板发现并已修复：刚上电/烧录后未启动 Guest 的 RAM 读出随机值（`Corrupt`）或 `bus error`，`fdx --all` 轮询未打开链路时按等待处理而非重置整个 FDX 面板；宽屏分栏在左侧滚动条与分割线之间增加 1 列间距，FDX 标题栏链路过多时折叠为 `+N` 以保持 `Ctrl+O collapse` 常驻。
+  - 待测：StellarLINK（OpenOCD）实机全流程与烧录进度条。

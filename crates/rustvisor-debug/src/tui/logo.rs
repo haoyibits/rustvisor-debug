@@ -39,7 +39,7 @@ pub(super) fn banner_lines(header: &str, theme: Theme, width: u16) -> Vec<Line<'
         style_rvdbg_prefix(first, theme);
     }
     let tips = Line::from(Span::styled(
-        "/ menu · @target FDX · Tab complete",
+        "Tab commands · @target FDX · ↑↓ select",
         theme.dim(),
     ));
     if width < MIN_LOGO_WIDTH {
@@ -208,7 +208,7 @@ mod tests {
         assert!(text[1].contains("rvdbg 0.1.41"));
         assert!(text[3].contains("backend  trace32"));
         assert!(text[4].contains("images   inject-five"));
-        assert!(text[5].contains("/ menu"));
+        assert!(text[5].contains("Tab commands"));
         assert!(
             wide.iter()
                 .flat_map(|line| &line.spans)

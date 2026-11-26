@@ -1,4 +1,5 @@
 """Exercise rvdbg's terminal UI (Fullscreen default + Inline mode) against TCP test doubles, without a board."""
+import codecs
 import errno
 import fcntl
 import json
@@ -172,6 +173,7 @@ class Tui:
         self.row = 0
         self.col = 0
         self.vt_buf = ""
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.seen_frames = []
         self.pid, self.pty = pty.fork()
         if self.pid == 0:
@@ -291,7 +293,7 @@ class Tui:
                 return
             raise
         self.out.extend(data)
-        self._feed_vt(data.decode(errors="replace"))
+        self._feed_vt(self.decoder.decode(data))
         self.seen_frames.append((len(self.out), self.screen_text()))
 
     def until(self, condition):
@@ -342,10 +344,10 @@ class Tui:
         return True
 
     def close(self):
+        os.close(self.pty)
         if not self.exited():
             os.kill(self.pid, signal.SIGKILL)
             os.waitpid(self.pid, 0)
-        os.close(self.pty)
 
 
 def make_test_elf(symbols):
@@ -390,7 +392,7 @@ def exercise(backend):
         tty = Tui(directory, backend)
         try:
             tty.expect_raw("\x1b[?1049h")
-            tty.expect("Tab complete")
+            tty.expect("Tab commands")
             assert b"\x1b[6n" not in tty.out
             modes = termios.tcgetattr(tty.pty)[3]
             assert not modes & termios.ICANON and not modes & termios.ECHO
@@ -439,7 +441,7 @@ def exercise(backend):
             tty.until(lambda: probe.target.running)
             idx = tty.send(b"\x03")
             tty.expect("interrupted", idx)
-            tty.expect("/ menu", idx)
+            tty.expect("Tab commands", idx)
             assert probe.target.running
             if backend == "openocd":
                 assert "rbp 0x4000" in probe.target.log
@@ -449,11 +451,11 @@ def exercise(backend):
             probe.target.hit = True
             idx = tty.send(b"run-until 0x4000 --timeout 4\r")
             tty.expect("reached", idx)
-            tty.expect("/ menu", idx)
+            tty.expect("Tab commands", idx)
             probe.target.hit = False
             idx = tty.send(b"run-until 0x4000 --timeout 0\r")
             tty.expect("not reached", idx)
-            tty.expect("/ menu", idx)
+            tty.expect("Tab commands", idx)
 
             # RTT console passthrough.
             idx = tty.send(b"rtt --cb 0x1000\r")
@@ -463,14 +465,14 @@ def exercise(backend):
             tty.until(lambda: probe.target.read(0x2100, 4) == b"xyz\n")
             stop_rtt = tty.send(b"\x03")
             tty.expect("RTT terminal stopped", stop_rtt)
-            tty.until(lambda: "/ menu" in tty.screen_text() and "Ctrl+C stop" not in tty.screen_text())
+            tty.until(lambda: "Tab commands" in tty.screen_text() and "Ctrl+C stop" not in tty.screen_text())
 
             # Modeless `@el2` from rvdbg command mode opens the FDX split pane while keeping command focus.
             tty.resize(112, 30)
             idx = tty.send(b"@el2 ping\r")
             tty.expect("FDX", idx)
-            tty.expect("Tab complete", idx)
             tty.until(lambda: probe.target.read(0x3008, 4) != struct.pack("<I", 63))
+            tty.until(lambda: "Tab commands" in tty.screen_text())
             # Switch into FDX mode, test mis-type guard (`cores` is blocked), then test `!status` & `Ctrl+O`.
             tty.expect("fdx:el2", tty.send(b"\x1b[Z"))
             guard_at = tty.send(b"cores\r")
@@ -489,7 +491,7 @@ def exercise(backend):
             expand_at = tty.send(b"\x0f")
             tty.expect("Ctrl+O collapse", expand_at)
             # Shift+Tab switches composer back to rvdbg command mode.
-            tty.expect("Tab complete", tty.send(b"\x1b[Z"))
+            tty.expect("Tab commands", tty.send(b"\x1b[Z"))
             reset_at = tty.send(b"reset\r")
             tty.expect("closed 1 FDX link", reset_at)
             tty.until(lambda: probe.target.read(0x3004, 4) == bytes(4))
@@ -524,7 +526,7 @@ def exercise(backend):
 
             # Switch back into FDX mode with Shift+Tab and close with :q.
             tty.expect("fdx:el2", tty.send(b"\x1b[Z"))
-            tty.expect("Tab complete", tty.send(b":q\r"))
+            tty.expect("Tab commands", tty.send(b":q\r"))
 
             # Hot-switch Fullscreen -> Inline -> Fullscreen via Alt+F.
             inline_at = tty.send(b"\x1bf")
@@ -543,8 +545,8 @@ def exercise(backend):
         try:
             inline.expect("Alt+F full")
             idx = inline.send(b"status\r")
-            inline.expect("state" if backend == "trace32" else "core", idx)
-            inline.expect("running", idx)
+            inline.expect("mode" if backend == "trace32" else "chip.core", idx)
+            inline.expect("cpu" if backend == "trace32" else "running", idx)
             assert b"\x1b[0;36m" in inline.out[idx:] and b"\x1b[0;32m" in inline.out[idx:]
             assert "␛".encode() not in inline.out
             inline.finish()
@@ -573,9 +575,9 @@ with tempfile.TemporaryDirectory() as directory, socket.socket() as port:
     )
     tty = Tui(directory, "trace32")
     try:
-        tty.expect("Tab complete")
+        tty.expect("Tab commands")
         tty.expect("no PowerView", tty.send(b"status\r"))
-        tty.expect("Tab complete")
+        tty.expect("Tab commands")
         tty.finish(signal.SIGTERM)
     finally:
         tty.close()

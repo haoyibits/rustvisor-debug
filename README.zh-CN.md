@@ -148,7 +148,7 @@ rvdbg [openocd halted]> quit
 
 在交互终端里直接运行裸 `rvdbg` 默认进入全屏无闪烁 TUI（如需内联滚动模式，使用 `rvdbg --inline`，或在会话中按 `Alt+F`、输入 `/inline` / `/fullscreen` 随时无损切换）。
 
-- 直接输入命令即可获得行内暗色补全提示与 `Tab` 补全（命令名、子命令 `--flag`、`@目标`、`mem`/`ram`/`run-until` 的 `[镜像:]符号` 含 `SHN_ABS` 符号及镜像目录，多行输入时同样有效）；输入 `/` 打开模糊命令菜单与交互选择器（`/images`、`/backend`、`/fdx`、`/copy`、`/clear`、`/mouse`），无必填参数的斜杠命令按一次 `Enter` 即可执行。
+- 直接输入即可实时弹出模糊命令面板、行内暗色补全提示，并在按空格后自动联想下一级参数与选项（子命令 `--flag`、`@目标` 与 `@0..2` / `@guests` / `@all` 选择器、`mem`/`ram`/`run-until` 的 `[镜像:]符号` 含 `SHN_ABS` 符号、`reg` 常用系统寄存器、`images` 镜像目录，以及 FDX 模式下的 `:命令` / `!命令` / 目标端词，多行草稿同样支持）。无必填参数的命令直接回车执行；输入参数时不抢回车，用 `Tab` 或 `↑`/`↓` 选择补全词（原有的 `/images`、`/backend`、`/fdx`、`/clear` 等 `/` 前缀写法仍然兼容）。
 - 支持多行粘贴与 `Ctrl+J` / `Shift+Enter` 换行、`Ctrl+R` 历史检索、`Ctrl+C` 清空草稿或中断长命令；空行连按两次 `Ctrl+D`（或输入 `quit`）退出。
 - `rtt` 打开双向 RTT 控制台，按键直通目标，`Ctrl+C` 返回命令模式。
 - 在命令模式下可直接用 `@el2 …`、`@0 …`、`@0..2 …`、`@3,4 …` 发送 FDX 包（未开面板时自动打开右侧分栏且不抢焦点），也可以用 `fdx` / `fdx --all` / `Shift+Tab`（`F6`）切入 FDX 模式。面板（宽屏右侧分栏，窄屏或内联模式下顶部 `Ctrl+O` 抽屉）还会每 250 ms 轮询 `RUSTVISOR_STOP_RECORDS` 主动提示 `[stop]` 异常，并拦截误敲的 `rvdbg` 命令（`:send` 可强制发送，`!cmd` 单条执行）；`run-until` 期间暂停，`reset`/`restart` 自动关闭链路并在重启后恢复。

@@ -279,16 +279,19 @@ struct Popup {
     items: Vec<Candidate>,
     selected: usize,
     is_slash: bool,
+    user_navigated: bool,
 }
 
 impl Popup {
     fn move_up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.user_navigated = true;
     }
 
     fn move_down(&mut self) {
         if !self.items.is_empty() {
             self.selected = (self.selected + 1).min(self.items.len() - 1);
+            self.user_navigated = true;
         }
     }
 
@@ -714,11 +717,8 @@ impl App {
                     return Ok(false);
                 }
                 KeyCode::Esc => {
-                    let was_slash = popup.is_slash;
                     self.popup = None;
-                    if was_slash {
-                        self.slash_dismissed = true;
-                    }
+                    self.slash_dismissed = true;
                     return Ok(false);
                 }
                 KeyCode::Tab => {
@@ -734,41 +734,60 @@ impl App {
                         .modifiers
                         .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
                 {
-                    let chosen = popup.chosen().cloned();
                     let is_slash = popup.is_slash;
-                    self.popup = None;
-                    if let Some(cand) = chosen {
-                        if let Some(reason) = cand.unavailable {
-                            self.set_toast(format!("{} unavailable: {reason}", cand.label));
-                            return Ok(false);
+                    let navigated = popup.user_navigated;
+                    let unavailable_unselected =
+                        !navigated && popup.chosen().is_some_and(|c| c.unavailable.is_some());
+                    if (!is_slash && !navigated) || unavailable_unselected {
+                        // Passive argument hint (or user-typed command while still connecting /
+                        // unavailable): let Enter submit the composer text directly.
+                        self.popup = None;
+                    } else {
+                        let chosen = popup.chosen().cloned();
+                        self.popup = None;
+                        if let Some(cand) = chosen {
+                            if let Some(reason) = cand.unavailable {
+                                self.set_toast(format!("{} unavailable: {reason}", cand.label));
+                                return Ok(false);
+                            }
+                            if is_slash && cand.run_on_enter {
+                                self.composer.clear();
+                                return self.execute_submitted_command(
+                                    cand.insert,
+                                    interrupted,
+                                    requests,
+                                    surface,
+                                );
+                            }
+                            self.apply_candidate(&cand, true, interrupted, requests, surface)?;
                         }
-                        if is_slash && cand.run_on_enter {
-                            self.composer.clear();
-                            return self.execute_submitted_command(
-                                cand.insert,
-                                interrupted,
-                                requests,
-                                surface,
-                            );
-                        }
-                        self.apply_candidate(&cand, true, interrupted, requests, surface)?;
+                        return Ok(false);
                     }
-                    return Ok(false);
                 }
                 _ => {}
             }
         }
 
-        // Accept inline ghost completion on Right at end of line, or trigger Tab completion.
+        // Accept inline ghost completion on Right at end of line.
         if key.code == KeyCode::Right
             && key.modifiers.is_empty()
-            && self.mode == InputMode::Command
-            && self.composer.search.is_none()
-            && let Some(suffix) =
-                complete::ghost_suffix(&self.composer.text, self.composer.cursor, &self.specs)
+            && self.active_composer().search.is_none()
         {
-            self.composer.insert(&suffix);
-            return Ok(false);
+            let ghost = if self.mode == InputMode::Command {
+                complete::ghost_suffix(&self.composer.text, self.composer.cursor, &self.specs)
+            } else {
+                complete::fdx_ghost_suffix(
+                    &self.fdx_composer.text,
+                    self.fdx_composer.cursor,
+                    &self.specs,
+                    &self.fdx.target_words,
+                )
+            };
+            if let Some(suffix) = ghost {
+                self.active_composer_mut().insert(&suffix);
+                self.refresh_slash_popup();
+                return Ok(false);
+            }
         }
 
         if key.code == KeyCode::Tab && key.modifiers.is_empty() {
@@ -928,23 +947,104 @@ impl App {
     }
 
     fn refresh_slash_popup(&mut self) {
-        if self.mode != InputMode::Command || self.composer.search.is_some() {
+        if self.active_composer().search.is_some() {
             self.popup = None;
             return;
         }
-        if !self.composer.text.starts_with('/') || self.slash_dismissed {
+        if self.mode != InputMode::Command {
+            if self.slash_dismissed
+                || self.fdx_composer.text.is_empty()
+                || self.fdx_composer.text.contains('\n')
+            {
+                self.popup = None;
+                return;
+            }
+            let links = self.fdx.link_names();
+            let items = complete::fdx_tab_candidates(
+                &self.fdx_composer.text,
+                self.fdx_composer.cursor,
+                &self.specs,
+                &self.symbols,
+                &links,
+                &self.fdx.target_words,
+                self.status.image_paths.len(),
+                &self.config.root,
+                &self.cwd,
+            );
+            if items.is_empty() {
+                self.popup = None;
+            } else {
+                let title = if self.fdx_composer.text.starts_with('!') {
+                    let head = self.fdx_composer.text[1..]
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("rvdbg");
+                    format!("!{head} · suggestions")
+                } else {
+                    format!("fdx:{} · suggestions", self.fdx.target)
+                };
+                self.popup = Some(Popup {
+                    title,
+                    items,
+                    selected: 0,
+                    is_slash: false,
+                    user_navigated: false,
+                });
+            }
+            return;
+        }
+        if self.slash_dismissed
+            || self.composer.text.is_empty()
+            || self.composer.text.contains('\n')
+        {
             self.popup = None;
             return;
         }
-        let items = complete::slash_candidates(&self.composer.text, &self.specs);
+        // First word (no spaces, not `@`): live command palette.
+        if !self.composer.text.starts_with('@') && !self.composer.text.contains(char::is_whitespace)
+        {
+            let items = complete::slash_candidates(&self.composer.text, &self.specs);
+            if items.is_empty() {
+                self.popup = None;
+            } else {
+                self.popup = Some(Popup {
+                    title: "Commands & Actions".into(),
+                    items,
+                    selected: 0,
+                    is_slash: true,
+                    user_navigated: false,
+                });
+            }
+            return;
+        }
+        // After space (or `@target`): live context-aware argument / flag suggestions.
+        let links = self.fdx.link_names();
+        let items = complete::command_tab_candidates(
+            &self.composer.text,
+            self.composer.cursor,
+            &self.specs,
+            &self.symbols,
+            &links,
+            &self.fdx.target_words,
+            self.status.image_paths.len(),
+            &self.config.root,
+            &self.cwd,
+        );
         if items.is_empty() {
             self.popup = None;
         } else {
+            let head = self
+                .composer
+                .text
+                .split_whitespace()
+                .next()
+                .unwrap_or("Next");
             self.popup = Some(Popup {
-                title: "Commands & Actions".into(),
+                title: format!("{head} · suggestions"),
                 items,
                 selected: 0,
-                is_slash: true,
+                is_slash: false,
+                user_navigated: false,
             });
         }
     }
@@ -976,8 +1076,13 @@ impl App {
             complete::fdx_tab_candidates(
                 &self.fdx_composer.text,
                 self.fdx_composer.cursor,
+                &self.specs,
+                &self.symbols,
                 &links,
                 &self.fdx.target_words,
+                self.status.image_paths.len(),
+                &self.config.root,
+                &self.cwd,
             )
         };
         match candidates.len() {
@@ -987,8 +1092,9 @@ impl App {
                 self.apply_candidate(&only, false, interrupted, requests, surface)?;
             }
             _ => {
-                let is_slash =
-                    self.mode == InputMode::Command && self.composer.text.starts_with('/');
+                let is_slash = self.mode == InputMode::Command
+                    && !self.composer.text.contains(char::is_whitespace)
+                    && !self.composer.text.starts_with('@');
                 self.popup = Some(Popup {
                     title: if is_slash {
                         "Commands & Actions".into()
@@ -1000,6 +1106,7 @@ impl App {
                     items: candidates,
                     selected: 0,
                     is_slash,
+                    user_navigated: !is_slash,
                 });
             }
         }
@@ -1018,14 +1125,23 @@ impl App {
         if (cand.add_space || (from_enter && !replacement.ends_with('/')))
             && !replacement.ends_with(' ')
             && !replacement.ends_with('/')
+            && !replacement.ends_with(':')
         {
             replacement.push(' ');
         }
+        let chain_next = replacement.ends_with(' ')
+            || replacement.ends_with(':')
+            || replacement.ends_with('/')
+            || replacement == "!";
         self.active_composer_mut().replace_range(
             cand.replace_start,
             cand.replace_end,
             &replacement,
         );
+        if chain_next {
+            self.slash_dismissed = false;
+            self.refresh_slash_popup();
+        }
         Ok(())
     }
 
@@ -1037,91 +1153,92 @@ impl App {
         surface: &mut Surface,
     ) -> Result<bool, String> {
         let trimmed = text.trim();
-        if let Some(slash) = trimmed.strip_prefix('/') {
-            let mut parts = slash.split_whitespace();
-            let head = parts.next().unwrap_or("");
-            let rest = parts.collect::<Vec<_>>().join(" ");
-            match head {
-                "fullscreen" | "alt" | "altscreen" => {
-                    surface.set_mode(ScreenMode::Fullscreen).map_err(io_error)?;
-                    self.set_toast("Fullscreen mode enabled (Alt+F to switch)");
-                    return Ok(false);
-                }
-                "inline" => {
-                    surface.set_mode(ScreenMode::Inline).map_err(io_error)?;
-                    self.transcript.discard_inline_queue();
-                    self.set_toast("Inline mode enabled (Alt+F to switch)");
-                    return Ok(false);
-                }
-                "clear" => {
-                    self.transcript.clear();
-                    surface.clear_screen().map_err(io_error)?;
-                    return Ok(false);
-                }
-                "mouse" => {
-                    let on = surface.toggle_mouse().map_err(io_error)?;
-                    self.set_toast(if on {
-                        "Mouse scroll capture: on (hold Option/Shift to select)"
-                    } else {
-                        "Mouse scroll capture: off (native mouse selection active)"
-                    });
-                    return Ok(false);
-                }
-                "copy" => {
-                    let n = rest.parse::<usize>().unwrap_or(1).max(1);
-                    if let Some(copied) = self.transcript.copy_turn(n) {
-                        surface.copy_osc52(&copied).map_err(io_error)?;
-                        self.set_toast(format!(
-                            "Copied {} bytes from turn #{n} to clipboard",
-                            copied.len()
-                        ));
-                    } else {
-                        self.set_toast("Nothing to copy yet");
-                    }
-                    return Ok(false);
-                }
-                "images" if rest.is_empty() => {
-                    self.picker = Some(complete::images_picker(&self.config, &self.cwd));
-                    return Ok(false);
-                }
-                "backend" if rest.is_empty() => {
-                    self.picker = Some(complete::backend_picker(self.status.backend));
-                    return Ok(false);
-                }
-                "fdx" if rest.is_empty() => {
-                    let links = self.fdx.link_names();
-                    self.picker = Some(complete::fdx_picker(&links, self.fdx.active));
-                    return Ok(false);
-                }
-                "fdx-close" => {
-                    requests
-                        .send(Request::FdxClose)
-                        .map_err(|_| "debug session worker stopped".to_string())?;
-                    return Ok(false);
-                }
-                "quit" | "exit" => return Ok(true),
-                other => {
-                    let known = self
-                        .specs
-                        .iter()
-                        .any(|s| s.name == other && !s.is_tui_action);
-                    if !known {
-                        self.transcript.begin_command(trimmed, self.theme);
-                        self.transcript.push_output(
-                            &format!("unknown command '/{other}'; type / to browse commands"),
-                            true,
-                            self.theme,
-                        );
-                        return Ok(false);
-                    }
-                    let rewritten = if rest.is_empty() {
-                        other.to_string()
-                    } else {
-                        format!("{other} {rest}")
-                    };
-                    return self.submit_or_queue(rewritten, interrupted, requests);
-                }
+        let has_slash = trimmed.starts_with('/');
+        let body = trimmed.strip_prefix('/').unwrap_or(trimmed);
+        let mut parts = body.split_whitespace();
+        let head = parts.next().unwrap_or("");
+        let rest = parts.collect::<Vec<_>>().join(" ");
+        match head {
+            "fullscreen" | "alt" | "altscreen" => {
+                surface.set_mode(ScreenMode::Fullscreen).map_err(io_error)?;
+                self.set_toast("Fullscreen mode enabled (Alt+F to switch)");
+                return Ok(false);
             }
+            "inline" => {
+                surface.set_mode(ScreenMode::Inline).map_err(io_error)?;
+                self.transcript.discard_inline_queue();
+                self.set_toast("Inline mode enabled (Alt+F to switch)");
+                return Ok(false);
+            }
+            "clear" => {
+                self.transcript.clear();
+                surface.clear_screen().map_err(io_error)?;
+                return Ok(false);
+            }
+            "mouse" => {
+                let on = surface.toggle_mouse().map_err(io_error)?;
+                self.set_toast(if on {
+                    "Mouse scroll capture: on (hold Option/Shift to select)"
+                } else {
+                    "Mouse scroll capture: off (native mouse selection active)"
+                });
+                return Ok(false);
+            }
+            "copy" => {
+                let n = rest.parse::<usize>().unwrap_or(1).max(1);
+                if let Some(copied) = self.transcript.copy_turn(n) {
+                    surface.copy_osc52(&copied).map_err(io_error)?;
+                    self.set_toast(format!(
+                        "Copied {} bytes from turn #{n} to clipboard",
+                        copied.len()
+                    ));
+                } else {
+                    self.set_toast("Nothing to copy yet");
+                }
+                return Ok(false);
+            }
+            "images" if has_slash && rest.is_empty() => {
+                self.picker = Some(complete::images_picker(&self.config, &self.cwd));
+                return Ok(false);
+            }
+            "backend" if rest.is_empty() => {
+                self.picker = Some(complete::backend_picker(self.status.backend));
+                return Ok(false);
+            }
+            "fdx" if has_slash && rest.is_empty() => {
+                let links = self.fdx.link_names();
+                self.picker = Some(complete::fdx_picker(&links, self.fdx.active));
+                return Ok(false);
+            }
+            "fdx-close" => {
+                requests
+                    .send(Request::FdxClose)
+                    .map_err(|_| "debug session worker stopped".to_string())?;
+                return Ok(false);
+            }
+            "quit" | "exit" => return Ok(true),
+            other if has_slash => {
+                let known = self
+                    .specs
+                    .iter()
+                    .any(|s| s.name == other && !s.is_tui_action);
+                if !known {
+                    self.transcript.begin_command(trimmed, self.theme);
+                    self.transcript.push_output(
+                        &format!("unknown command '/{other}'; press Tab to browse commands"),
+                        true,
+                        self.theme,
+                    );
+                    return Ok(false);
+                }
+                let rewritten = if rest.is_empty() {
+                    other.to_string()
+                } else {
+                    format!("{other} {rest}")
+                };
+                return self.submit_or_queue(rewritten, interrupted, requests);
+            }
+            _ => {}
         }
         self.submit_or_queue(text, interrupted, requests)
     }
@@ -1488,8 +1605,12 @@ impl App {
             let count = format!(" {} / {} ", (popup.selected + 1).min(total), total);
             let hint = if popup.is_slash {
                 " Enter run/fill · Tab fill · Esc close "
+            } else if popup.user_navigated {
+                " Enter / Tab fill · Esc close "
+            } else if self.mode != InputMode::Command {
+                " Tab fill · ↑↓ select · Enter send · Esc "
             } else {
-                " Tab / Enter fill · Esc close "
+                " Tab fill · ↑↓ select · Enter run · Esc "
             };
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -1612,9 +1733,17 @@ impl App {
             return None;
         }
         let prompt_w = prompt.width() as u16;
-        let ghost = if !is_rtt && self.mode == InputMode::Command && self.composer.search.is_none()
-        {
-            complete::ghost_suffix(&self.composer.text, self.composer.cursor, &self.specs)
+        let ghost = if !is_rtt && self.active_composer().search.is_none() {
+            if self.mode == InputMode::Command {
+                complete::ghost_suffix(&self.composer.text, self.composer.cursor, &self.specs)
+            } else {
+                complete::fdx_ghost_suffix(
+                    &self.fdx_composer.text,
+                    self.fdx_composer.cursor,
+                    &self.specs,
+                    &self.fdx.target_words,
+                )
+            }
         } else {
             None
         };
@@ -1710,7 +1839,7 @@ impl App {
                 ScreenMode::Fullscreen => "Alt+F inline",
                 ScreenMode::Inline => "Alt+F full",
             };
-            format!("Tab complete · / menu · ⇧Tab fdx · {mode_hint}")
+            format!("Tab commands · ⇧Tab fdx · {mode_hint}")
         };
 
         let left_w: usize = left.iter().map(|s| s.content.width()).sum();
@@ -1731,7 +1860,7 @@ impl App {
         } else if self.running.is_some() {
             Some("Ctrl+C stop")
         } else {
-            Some("Tab · / menu · ⇧Tab")
+            Some("Tab · ⇧Tab")
         };
         let chosen = if left_w + right_text.width() + 3 <= width {
             Some(right_text.as_str())

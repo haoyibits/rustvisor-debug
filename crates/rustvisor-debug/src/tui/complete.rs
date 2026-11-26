@@ -257,31 +257,63 @@ pub(super) fn ghost_suffix(text: &str, cursor: usize, specs: &[CommandSpec]) -> 
     }
     specs
         .iter()
-        .filter(|spec| !spec.is_tui_action && spec.unavailable.is_none())
+        .filter(|spec| spec.unavailable.is_none())
         .find(|spec| spec.name.starts_with(line) && spec.name.len() > line.len())
         .map(|spec| spec.name[line.len()..].to_string())
 }
 
-/// Slash menu candidates when text begins with `/` (no spaces yet).
+/// Inline dimmed ghost completion suffix in FDX composer mode (`:cmd`, `!cmd`, target words).
+pub(super) fn fdx_ghost_suffix(
+    text: &str,
+    cursor: usize,
+    specs: &[CommandSpec],
+    target_words: &[String],
+) -> Option<String> {
+    let clamped = cursor.min(text.len());
+    if clamped != text.len() || text.is_empty() || text.contains('\n') {
+        return None;
+    }
+    if let Some(escaped) = text.strip_prefix('!') {
+        return ghost_suffix(escaped, escaped.len(), specs);
+    }
+    if text.starts_with(':') && !text.contains(' ') {
+        return [":help", ":last", ":q", ":send", ":to"]
+            .into_iter()
+            .find(|cmd| cmd.starts_with(text) && cmd.len() > text.len())
+            .map(|cmd| cmd[text.len()..].to_string());
+    }
+    if !text.contains(' ') && !text.starts_with('@') {
+        return target_words
+            .iter()
+            .map(String::as_str)
+            .chain(["help", "lab", "ping", "run"])
+            .find(|w| w.starts_with(text) && w.len() > text.len())
+            .map(|w| w[text.len()..].to_string());
+    }
+    None
+}
+
+/// Live command palette candidates for the first word (works with or without a
+/// leading `/`; stays closed on empty input, `@target` FDX input, or once
+/// whitespace starts arguments).
 pub(super) fn slash_candidates(text: &str, specs: &[CommandSpec]) -> Vec<Candidate> {
-    let Some(query) = text
-        .strip_prefix('/')
-        .filter(|s| !s.contains(char::is_whitespace))
-    else {
+    if text.is_empty() || text.starts_with('@') || text.contains(char::is_whitespace) {
         return Vec::new();
-    };
+    }
+    let has_slash = text.starts_with('/');
+    let query = text.strip_prefix('/').unwrap_or(text);
     let needle = query.to_lowercase();
     let mut prefix_matches = Vec::new();
     let mut fuzzy_matches = Vec::new();
     for spec in specs {
         let lower = spec.name.to_lowercase();
         let item = Candidate {
-            insert: if spec.is_tui_action {
+            insert: spec.name.clone(),
+            label: if has_slash {
                 format!("/{}", spec.name)
             } else {
                 spec.name.clone()
             },
-            label: format!("/{}", spec.name),
             detail: spec.help.clone(),
             unavailable: spec.unavailable,
             run_on_enter: !spec.requires_args && spec.unavailable.is_none(),
@@ -334,7 +366,17 @@ pub(super) fn command_tab_candidates(
         link_names.to_vec()
     };
     if before.starts_with('@') {
-        let mut items = fdx_tab_candidates(before, before.len(), &effective_links, target_words);
+        let mut items = fdx_tab_candidates(
+            before,
+            before.len(),
+            specs,
+            symbols,
+            &effective_links,
+            target_words,
+            image_count,
+            root,
+            cwd,
+        );
         for item in &mut items {
             item.replace_start += line_start;
             item.replace_end += line_start;
@@ -351,16 +393,16 @@ pub(super) fn command_tab_candidates(
     if head.is_empty() {
         return specs
             .iter()
-            .filter(|s| !s.is_tui_action && s.name.starts_with(word))
+            .filter(|s| s.name.starts_with(word))
             .map(|s| Candidate {
                 insert: s.name.clone(),
                 label: s.name.clone(),
                 detail: s.help.clone(),
                 unavailable: s.unavailable,
-                run_on_enter: false,
+                run_on_enter: line_start == 0 && !s.requires_args && s.unavailable.is_none(),
                 replace_start: word_start,
                 replace_end: abs_cursor,
-                add_space: true,
+                add_space: s.requires_args,
             })
             .collect();
     }
@@ -371,15 +413,14 @@ pub(super) fn command_tab_candidates(
     };
     let prev = tokens.last().copied().unwrap_or("");
 
-    // Complete `--flags` for the active subcommand.
-    if word.starts_with('-') {
+    // Helper to collect unused `--flags` for the active subcommand.
+    let flag_candidates = |prefix: &str| -> Vec<Candidate> {
         let Some(spec) = specs.iter().find(|s| s.name == cmd) else {
             return Vec::new();
         };
-        return spec
-            .flags
+        spec.flags
             .iter()
-            .filter(|f| f.flag.starts_with(word))
+            .filter(|f| f.flag.starts_with(prefix) && !tokens.contains(&f.flag.as_str()))
             .map(|f| Candidate {
                 insert: f.flag.clone(),
                 label: f.flag.clone(),
@@ -390,10 +431,15 @@ pub(super) fn command_tab_candidates(
                 replace_end: abs_cursor,
                 add_space: true,
             })
-            .collect();
+            .collect()
+    };
+
+    // Complete `--flags` for the active subcommand.
+    if word.starts_with('-') {
+        return flag_candidates(word);
     }
 
-    match cmd {
+    let mut out = match cmd {
         "backend" => ["trace32", "openocd"]
             .into_iter()
             .filter(|v| v.starts_with(word))
@@ -426,8 +472,26 @@ pub(super) fn command_tab_candidates(
                 add_space: false,
             })
             .collect(),
+        "swtrace" if prev == "--from" => {
+            let mut items = Vec::new();
+            if "latest".starts_with(word) {
+                items.push(Candidate {
+                    insert: "latest".into(),
+                    label: "latest".into(),
+                    detail: "Auto-saved .rvdbg/swtrace/latest.csv".into(),
+                    unavailable: None,
+                    run_on_enter: false,
+                    replace_start: word_start,
+                    replace_end: abs_cursor,
+                    add_space: true,
+                });
+            }
+            items.extend(path_candidates(word, word_start, abs_cursor, cwd, false));
+            items
+        }
         "fdx" | "swtrace" if prev == "--guest" => effective_links
             .into_iter()
+            .chain(["0..2".into(), "guests".into(), "all".into()])
             .filter(|name| name.starts_with(word))
             .map(|name| Candidate {
                 insert: name.clone(),
@@ -440,6 +504,43 @@ pub(super) fn command_tab_candidates(
                 add_space: true,
             })
             .collect(),
+        "ram" if prev == "=" => ["GOGO", "DONE", "0x0"]
+            .into_iter()
+            .filter(|v| v.starts_with(word))
+            .map(|v| Candidate {
+                insert: v.to_string(),
+                label: v.to_string(),
+                detail: if v == "GOGO" {
+                    "4-byte ASCII start tag (0x474F474F)".into()
+                } else if v == "DONE" {
+                    "4-byte ASCII done tag (0x444F4E45)".into()
+                } else {
+                    "32-bit word value".into()
+                },
+                unavailable: None,
+                run_on_enter: false,
+                replace_start: word_start,
+                replace_end: abs_cursor,
+                add_space: false,
+            })
+            .collect(),
+        "ram" if tokens.len() >= 2 && !prev.starts_with('-') => {
+            let mut items = Vec::new();
+            if "=".starts_with(word) {
+                items.push(Candidate {
+                    insert: "=".into(),
+                    label: "= <VALUE>".into(),
+                    detail: "Write 32-bit word(s) or 4-byte ASCII tag (e.g. GOGO)".into(),
+                    unavailable: None,
+                    run_on_enter: false,
+                    replace_start: word_start,
+                    replace_end: abs_cursor,
+                    add_space: true,
+                });
+            }
+            items.extend(flag_candidates(word));
+            items
+        }
         "mem" | "ram" | "run-until" => {
             if let Some((scope, sym_prefix)) = word.split_once(':') {
                 let matches = if scope.is_empty() {
@@ -495,8 +596,98 @@ pub(super) fn command_tab_candidates(
                     }
                 }
             }
+            if cmd == "mem" {
+                for (prefix, detail) in [
+                    ("AD:0x", "Physical RAM / MMIO address"),
+                    ("C15:0x", "AArch32 CP15 system register"),
+                ] {
+                    if prefix.starts_with(word) {
+                        out.push(Candidate {
+                            insert: prefix.into(),
+                            label: prefix.into(),
+                            detail: detail.into(),
+                            unavailable: None,
+                            run_on_enter: false,
+                            replace_start: word_start,
+                            replace_end: abs_cursor,
+                            add_space: false,
+                        });
+                    }
+                }
+            }
             out
         }
+        "reg" => [
+            ("PC", "Program counter"),
+            ("CPSR", "Current program status register"),
+            ("SP", "Stack pointer"),
+            ("LR", "Link register"),
+            ("SCTLR", "System control register (EL1)"),
+            ("HSCTLR", "Hyp system control register (EL2)"),
+            ("HACTLR", "Hyp auxiliary control register"),
+            ("HCR", "Hyp configuration register"),
+            ("VSCTLR", "Virtualization system control (VMID)"),
+            ("ELR_HYP", "Exception link register (EL2)"),
+            ("SPSR_HYP", "Saved program status (EL2)"),
+            ("HSR", "Hyp syndrome register"),
+            ("HDFAR", "Hyp data fault address register"),
+            ("HIFAR", "Hyp instruction fault address register"),
+        ]
+        .into_iter()
+        .filter(|(reg, _)| {
+            reg.to_ascii_lowercase()
+                .starts_with(&word.to_ascii_lowercase())
+        })
+        .map(|(reg, help)| Candidate {
+            insert: reg.into(),
+            label: reg.into(),
+            detail: help.into(),
+            unavailable: None,
+            run_on_enter: false,
+            replace_start: word_start,
+            replace_end: abs_cursor,
+            add_space: true,
+        })
+        .collect(),
+        "clock" => {
+            let mut items = Vec::new();
+            if prev == "--tree" {
+                items.extend(path_candidates(word, word_start, abs_cursor, cwd, false));
+            } else if "XOSC=40MHz"
+                .to_ascii_lowercase()
+                .starts_with(&word.to_ascii_lowercase())
+                && !tokens.iter().any(|t| t.starts_with("XOSC="))
+            {
+                items.push(Candidate {
+                    insert: "XOSC=40MHz".into(),
+                    label: "XOSC=40MHz".into(),
+                    detail: "Board external oscillator frequency".into(),
+                    unavailable: None,
+                    run_on_enter: false,
+                    replace_start: word_start,
+                    replace_end: abs_cursor,
+                    add_space: true,
+                });
+            }
+            items
+        }
+        "copy" => [
+            ("1", "Copy latest command output"),
+            ("2", "Copy 2nd latest command output"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| n.starts_with(word))
+        .map(|(n, help)| Candidate {
+            insert: n.into(),
+            label: n.into(),
+            detail: help.into(),
+            unavailable: None,
+            run_on_enter: false,
+            replace_start: word_start,
+            replace_end: abs_cursor,
+            add_space: false,
+        })
+        .collect(),
         "images" => {
             let mut out = Vec::new();
             let discovered = config::discover_image_dirs(root, cwd);
@@ -536,33 +727,102 @@ pub(super) fn command_tab_candidates(
             out.extend(path_candidates(word, word_start, abs_cursor, cwd, true));
             out
         }
-        "source" | "check" | "do" => path_candidates(word, word_start, abs_cursor, cwd, false),
+        "source" | "check" | "do" | "verify" => {
+            path_candidates(word, word_start, abs_cursor, cwd, false)
+        }
         _ => Vec::new(),
+    };
+
+    // After pressing Space (`word.is_empty()`), surface the command's available
+    // `--flags` as well (like PowerView's next-token suggestions).
+    if word.is_empty() && !matches!(cmd, "ram" if prev == "=") {
+        for flag in flag_candidates("") {
+            if !out.iter().any(|existing| existing.insert == flag.insert) {
+                out.push(flag);
+            }
+        }
     }
+    out
 }
 
-/// Tab completion candidates for FDX input mode (`@link`, `:to`, `:cmd`, target `help` words).
+/// Completion & live suggestion candidates for FDX mode (`@link`, `:to`, `:cmd`, `!rvdbg`, target words).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn fdx_tab_candidates(
     text: &str,
     cursor: usize,
+    specs: &[CommandSpec],
+    symbols: &SymbolCache,
     link_names: &[String],
     target_words: &[String],
+    image_count: usize,
+    root: &Path,
+    cwd: &Path,
 ) -> Vec<Candidate> {
     let clamped = cursor.min(text.len());
     let line_start = text[..clamped].rfind('\n').map_or(0, |i| i + 1);
     let before = &text[line_start..clamped];
+    let effective_links = if link_names.is_empty() {
+        default_image_names(image_count)
+    } else {
+        link_names.to_vec()
+    };
+
+    // `!cmd ...` escapes to full rvdbg command + argument completion without leaving FDX mode.
+    if let Some(escaped) = before.strip_prefix('!') {
+        let mut items = if !escaped.is_empty()
+            && !escaped.starts_with('@')
+            && !escaped.contains(char::is_whitespace)
+        {
+            slash_candidates(escaped, specs)
+        } else {
+            command_tab_candidates(
+                escaped,
+                escaped.len(),
+                specs,
+                symbols,
+                &effective_links,
+                target_words,
+                image_count,
+                root,
+                cwd,
+            )
+        };
+        for item in &mut items {
+            item.run_on_enter = false;
+            item.replace_start += line_start + 1;
+            item.replace_end += line_start + 1;
+        }
+        return items;
+    }
+
     let word_start_rel = before.rfind(' ').map_or(0, |idx| idx + 1);
     let word = &before[word_start_rel..];
     let word_start = line_start + word_start_rel;
+
     if word_start_rel == 0 && word.starts_with('@') {
-        return link_names
+        let mut items: Vec<(String, String)> = effective_links
             .iter()
-            .map(|name| format!("@{name}"))
-            .filter(|candidate| candidate.starts_with(word))
-            .map(|candidate| Candidate {
-                insert: candidate.clone(),
-                label: candidate,
-                detail: "Send one packet to this link".into(),
+            .map(|name| (format!("@{name}"), format!("Send packet to {name}")))
+            .collect();
+        if word.len() >= 2 && word.as_bytes()[1].is_ascii_digit() {
+            for idx in 0..effective_links.len().saturating_sub(1) {
+                items.push((format!("@{idx}"), format!("Short selector for guest{idx}")));
+            }
+        }
+        if effective_links.len() > 2 {
+            if effective_links.len() >= 4 {
+                items.push(("@0..2".into(), "Send to range guest0..guest2".into()));
+            }
+            items.push(("@guests".into(), "Broadcast to every guest link".into()));
+            items.push(("@all".into(), "Broadcast to EL2 + every guest".into()));
+        }
+        return items
+            .into_iter()
+            .filter(|(cand, _)| cand.starts_with(word))
+            .map(|(cand, detail)| Candidate {
+                insert: cand.clone(),
+                label: cand,
+                detail,
                 unavailable: None,
                 run_on_enter: false,
                 replace_start: line_start,
@@ -572,7 +832,7 @@ pub(super) fn fdx_tab_candidates(
             .collect();
     }
     if before.starts_with(":to ") && word_start_rel == 4 {
-        return link_names
+        return effective_links
             .iter()
             .filter(|name| name.starts_with(word))
             .map(|name| Candidate {
@@ -587,45 +847,100 @@ pub(super) fn fdx_tab_candidates(
             })
             .collect();
     }
+    let local_cmds = [
+        (":q", "Close FDX panel and return to rvdbg"),
+        (":to", "Switch active FDX link (:to <name>)"),
+        (":last", "Show recent packets on this link"),
+        (":send", "Send a literal packet bypassing command guard"),
+        (":help", "Show local FDX commands"),
+    ];
     if word_start_rel == 0 && word.starts_with(':') {
-        return [
-            (":q", "Close FDX panel and return to rvdbg"),
-            (":to", "Switch active FDX link (:to <name>)"),
-            (":last", "Show recent packets on this link"),
-            (":send", "Send a literal packet to the current link"),
-            (":help", "Show local FDX commands"),
-        ]
-        .into_iter()
-        .filter(|(cmd, _)| cmd.starts_with(word))
-        .map(|(cmd, help)| Candidate {
-            insert: cmd.to_string(),
-            label: cmd.to_string(),
-            detail: help.to_string(),
+        return local_cmds
+            .into_iter()
+            .filter(|(cmd, _)| cmd.starts_with(word))
+            .map(|(cmd, help)| Candidate {
+                insert: cmd.to_string(),
+                label: cmd.to_string(),
+                detail: help.to_string(),
+                unavailable: None,
+                run_on_enter: false,
+                replace_start: line_start,
+                replace_end: clamped,
+                add_space: matches!(cmd, ":to" | ":send"),
+            })
+            .collect();
+    }
+
+    let mut out = Vec::new();
+    // Pressing Tab on an empty FDX line shows targets, local `:commands`, `!cmd`, and target words.
+    if before.is_empty() {
+        for name in &effective_links {
+            let at = format!("@{name}");
+            out.push(Candidate {
+                insert: at.clone(),
+                label: at,
+                detail: format!("Send packet to {name}"),
+                unavailable: None,
+                run_on_enter: false,
+                replace_start: line_start,
+                replace_end: clamped,
+                add_space: true,
+            });
+        }
+        for (cmd, help) in local_cmds {
+            out.push(Candidate {
+                insert: cmd.into(),
+                label: cmd.into(),
+                detail: help.into(),
+                unavailable: None,
+                run_on_enter: false,
+                replace_start: line_start,
+                replace_end: clamped,
+                add_space: matches!(cmd, ":to" | ":send"),
+            });
+        }
+        out.push(Candidate {
+            insert: "!".into(),
+            label: "!<cmd>".into(),
+            detail: "Run an rvdbg command without leaving FDX".into(),
             unavailable: None,
             run_on_enter: false,
             replace_start: line_start,
             replace_end: clamped,
-            add_space: matches!(cmd, ":to" | ":send"),
-        })
-        .collect();
+            add_space: false,
+        });
     }
-    let mut matches: Vec<Candidate> = target_words
+
+    let mut words: Vec<(&str, &str)> = target_words
         .iter()
-        .filter(|w| w.starts_with(word))
-        .map(|w| Candidate {
-            insert: w.clone(),
-            label: w.clone(),
-            detail: "Target FDX command".into(),
-            unavailable: None,
-            run_on_enter: false,
-            replace_start: word_start,
-            replace_end: clamped,
-            add_space: true,
-        })
+        .map(|w| (w.as_str(), "Target FDX word"))
         .collect();
-    matches.sort_unstable_by(|a, b| a.label.cmp(&b.label));
-    matches.dedup_by(|a, b| a.label == b.label);
-    matches
+    for builtin in [
+        ("help", "List commands supported by this target"),
+        ("ping", "Ping target FDX agent"),
+        ("run", "Start a guest scenario (e.g. run timer)"),
+        ("lab", "Configure EL2 lab scenario"),
+    ] {
+        if !words.iter().any(|(w, _)| *w == builtin.0) {
+            words.push(builtin);
+        }
+    }
+    words.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    for (w, detail) in words {
+        if w.starts_with(word) {
+            out.push(Candidate {
+                insert: w.to_string(),
+                label: w.to_string(),
+                detail: detail.to_string(),
+                unavailable: None,
+                run_on_enter: false,
+                replace_start: word_start,
+                replace_end: clamped,
+                add_space: true,
+            });
+        }
+    }
+    out
 }
 
 pub(super) fn backend_picker(current: Option<Backend>) -> Picker {
@@ -842,6 +1157,15 @@ mod tests {
         assert_eq!(mem[0].insert, "mem");
         assert!(!mem[0].run_on_enter);
         assert!(mem[0].add_space);
+
+        // Bare first word (no leading `/`) opens the exact same command palette.
+        let bare = slash_candidates("stat", &specs);
+        assert!(!bare.is_empty());
+        assert_eq!(bare[0].label, "status");
+        assert_eq!(bare[0].insert, "status");
+        assert!(bare[0].run_on_enter);
+        assert!(slash_candidates("@el2", &specs).is_empty());
+        assert!(slash_candidates("", &specs).is_empty());
     }
 
     #[test]
@@ -907,7 +1231,81 @@ mod tests {
             Path::new("."),
         );
         let labels: Vec<&str> = at_items.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(labels, ["@guest0", "@guest1"]);
+        assert_eq!(labels, ["@guest0", "@guest1", "@guests"]);
         assert_eq!((at_items[0].replace_start, at_items[0].replace_end), (3, 5));
+    }
+
+    #[test]
+    fn post_space_and_fdx_suggestions_cover_flags_registers_and_escape() {
+        let specs = build_specs(Some(Backend::Trace32));
+        let syms = SymbolCache::default();
+
+        // Post-space on `swtrace ` immediately surfaces unused `--flags`.
+        let sw = command_tab_candidates(
+            "swtrace ",
+            8,
+            &specs,
+            &syms,
+            &[],
+            &[],
+            6,
+            Path::new("."),
+            Path::new("."),
+        );
+        let sw_labels: Vec<&str> = sw.iter().map(|c| c.insert.as_str()).collect();
+        assert!(sw_labels.contains(&"--html") && sw_labels.contains(&"--from"));
+
+        // `swtrace --from ` suggests `latest`.
+        let from = command_tab_candidates(
+            "swtrace --from ",
+            15,
+            &specs,
+            &syms,
+            &[],
+            &[],
+            6,
+            Path::new("."),
+            Path::new("."),
+        );
+        assert_eq!(from[0].insert, "latest");
+
+        // `reg ` suggests R52 / EL2 registers.
+        let regs = command_tab_candidates(
+            "reg HS",
+            6,
+            &specs,
+            &syms,
+            &[],
+            &[],
+            1,
+            Path::new("."),
+            Path::new("."),
+        );
+        let reg_names: Vec<&str> = regs.iter().map(|c| c.insert.as_str()).collect();
+        assert!(reg_names.contains(&"HSCTLR") && reg_names.contains(&"HSR"));
+
+        // FDX `!` escape reuses full rvdbg command + argument suggestions.
+        let esc = fdx_tab_candidates(
+            "!reset ",
+            7,
+            &specs,
+            &syms,
+            &["el2".into(), "guest0".into()],
+            &[],
+            2,
+            Path::new("."),
+            Path::new("."),
+        );
+        let esc_names: Vec<&str> = esc.iter().map(|c| c.insert.as_str()).collect();
+        assert!(esc_names.contains(&"--go"));
+        assert_eq!(esc[0].replace_start, 7);
+        assert_eq!(
+            fdx_ghost_suffix("!sta", 4, &specs, &[]).as_deref(),
+            Some("tus")
+        );
+        assert_eq!(
+            fdx_ghost_suffix(":h", 2, &specs, &[]).as_deref(),
+            Some("elp")
+        );
     }
 }

@@ -109,7 +109,7 @@ rvdbg --images latest
 rvdbg images
 ```
 
-`--images <目录|短名|latest>` 用一个目录里的镜像，代替 `rvdbg.toml` 和 `ELF`/`EXTRA_ELF` 给的：`hypervisor`（或目录里唯一的另一个 ELF）是主镜像，`guest0.elf`、`guest1.elf`…… 按编号是额外镜像，符号程序名取主镜像的文件名。这正是 board-tests 用例目录的样子。除了完整路径，也可以直接填 `target/board-tests/` 下发现的短名（如 `inject-five`、`latency/inject-five`）或 `latest`（按修改时间取最新构建）。交互会话里用 `images <目录|短名|latest>` 或 `/images` 交互选择器切换。`rvdbg images` 列出正在用的镜像、它们来自哪里，以及每个镜像的 FDX 链接（有探针时显示打开还是关闭）。
+`--images <目录|短名|latest>` 用一个目录里的镜像，代替 `rvdbg.toml` 和 `ELF`/`EXTRA_ELF` 给的：`hypervisor`（或目录里唯一的另一个 ELF）是主镜像，`guest0.elf`、`guest1.elf`…… 按编号是额外镜像，符号程序名取主镜像的文件名。这正是 board-tests 用例目录的样子。除了完整路径，也可以直接填 `target/board-tests/` 下发现的短名（如 `inject-five`、`latency/inject-five`）或 `latest`（按修改时间取最新构建）。交互会话里输入 `images ` 即可实时列出可选目录并用 `images <目录|短名|latest>`（或 `/images` 选择器）切换。`rvdbg images` 列出正在用的镜像、它们来自哪里，以及每个镜像的 FDX 链接（有探针时显示打开还是关闭）。
 
 ## 配置和日志放在哪里？
 

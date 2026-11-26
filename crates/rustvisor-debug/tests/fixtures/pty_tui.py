@@ -461,7 +461,9 @@ def exercise(backend):
             tty.expect("Ctrl+C return", idx)
             tty.send(b"xyz\r")
             tty.until(lambda: probe.target.read(0x2100, 4) == b"xyz\n")
-            tty.expect("/ menu", tty.send(b"\x03"))
+            stop_rtt = tty.send(b"\x03")
+            tty.expect("RTT terminal stopped", stop_rtt)
+            tty.until(lambda: "/ menu" in tty.screen_text() and "Ctrl+C stop" not in tty.screen_text())
 
             # Modeless `@el2` from rvdbg command mode opens the FDX split pane while keeping command focus.
             tty.resize(112, 30)

@@ -17,6 +17,8 @@ mod repl;
 pub(crate) mod t32target;
 mod trace;
 
+use probecore::output::{eprintln, println};
+
 use probecore::decode;
 
 use std::path::{Path, PathBuf};
@@ -278,6 +280,14 @@ pub fn help_text(command: Option<&str>, style: Style) -> std::result::Result<Str
 
 /// Run one command (everything except the session commands).
 pub fn execute(ctx: &mut Context, command: &DebugCommand) -> DResult<Outcome> {
+    execute_cancellable(ctx, command, &|| false)
+}
+
+fn execute_cancellable(
+    ctx: &mut Context,
+    command: &DebugCommand,
+    cancelled: &dyn Fn() -> bool,
+) -> DResult<Outcome> {
     match command {
         DebugCommand::Status => commands::status(ctx),
         DebugCommand::Reg { names } => commands::reg(ctx, names),
@@ -309,10 +319,11 @@ pub fn execute(ctx: &mut Context, command: &DebugCommand) -> DResult<Outcome> {
         DebugCommand::Down => commands::command(ctx, "SYStem.Down", "SYStem.Down done"),
         DebugCommand::Break => commands::command(ctx, "Break", "halted"),
         DebugCommand::Go => commands::go(ctx),
-        DebugCommand::RunUntil { timeout, target } => commands::run_until(
+        DebugCommand::RunUntil { timeout, target } => commands::run_until_cancellable(
             ctx,
             target,
             Duration::from_secs(timeout.unwrap_or(ctx.config.operation_timeout)),
+            cancelled,
         ),
         DebugCommand::Do {
             timeout,
@@ -390,7 +401,11 @@ pub fn main_without_config(args: &[String]) -> Option<i32> {
     let cli = match parse(args.to_vec()) {
         Ok((cli, _)) => cli,
         Err(error) => {
-            let _ = error.print();
+            if probecore::output::captured() {
+                probecore::output::print(error.use_stderr(), format_args!("{}", error.render()));
+            } else {
+                let _ = error.print();
+            }
             return Some(error.exit_code());
         }
     };
@@ -423,7 +438,7 @@ pub fn main(config: &Config, cwd: &Path, args: Vec<String>) -> Result<i32> {
     };
     let result = connect(config).and_then(|mut debugger| {
         let mut per = PerSnapshot::new(Some(config.t32_sys.clone()));
-        run_command(config, cwd, &mut debugger, &mut per, &command)
+        run_command(config, cwd, &mut debugger, &mut per, &command, &|| false)
     });
     Ok(emit(command.name(), json, result))
 }
@@ -437,6 +452,7 @@ pub fn main_on(
     args: Vec<String>,
     debugger: &mut Debugger,
     per: &mut PerSnapshot,
+    cancelled: &dyn Fn() -> bool,
 ) -> i32 {
     if let Some(code) = main_without_config(&args) {
         return code;
@@ -446,7 +462,7 @@ pub fn main_on(
         eprintln!("{}: debug needs a command here", crate::ui::program());
         return 2;
     };
-    let result = run_command(config, cwd, debugger, per, &command);
+    let result = run_command(config, cwd, debugger, per, &command, cancelled);
     emit(command.name(), json, result)
 }
 
@@ -456,6 +472,7 @@ fn run_command(
     debugger: &mut Debugger,
     per: &mut PerSnapshot,
     command: &DebugCommand,
+    cancelled: &dyn Fn() -> bool,
 ) -> DResult<Outcome> {
     if *command == DebugCommand::Reconnect {
         return Ok(Outcome::ok(
@@ -470,7 +487,7 @@ fn run_command(
         cwd,
         style: Style::stdout(),
     };
-    execute(&mut ctx, command)
+    execute_cancellable(&mut ctx, command, cancelled)
 }
 
 #[cfg(test)]

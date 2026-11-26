@@ -19,6 +19,8 @@
 //! With `--send`/`--expect` it sends, waits for the expected packets and
 //! exits: what a script or the board runner needs.
 
+use probecore::output::{eprintln, println};
+
 use std::collections::{HashMap, VecDeque};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -37,7 +39,7 @@ use serde_json::json;
 use crate::EXIT_FAILED;
 
 /// How often the open links are polled.
-const POLL: Duration = Duration::from_millis(20);
+pub(crate) const POLL: Duration = Duration::from_millis(20);
 /// How often a closed link is looked at again when several are watched.
 const REOPEN_POLL: Duration = Duration::from_millis(200);
 /// A packet still unread after this is reported.
@@ -311,7 +313,9 @@ fn scripted(
                 Some(Packet::Data(packet)) => {
                     let packet = text(&packet);
                     history.record(target.address, &packet, Instant::now());
-                    if !options.json {
+                    if !options.json
+                        && !probecore::output::send(probecore::output::Line::Text(&packet))
+                    {
                         let _ = writeln!(stdout, "{packet}");
                     }
                     let found = packet == *wanted;
@@ -506,6 +510,202 @@ impl Out for Screen {
     }
 }
 
+struct Inline(crate::tui::CommandUi);
+
+impl Out for Inline {
+    fn packet(&mut self, from: Option<&str>, text: &str) {
+        let line = match from {
+            Some(name) => format!("[{name}] < {text}"),
+            None => format!("< {text}"),
+        };
+        self.0.fdx_line(line);
+    }
+
+    fn note(&mut self, text: &str) {
+        self.0
+            .fdx_line(text.strip_prefix("[fdx] ").unwrap_or(text).to_string());
+    }
+}
+
+/// A managed subscription. Each tick borrows memory and history from the
+/// session just for the duration of that tick.
+pub(crate) struct Panel {
+    pub selection: crate::FdxArgs,
+    terminal: Option<Terminal<Inline>>,
+    diagnosis: Diagnosis,
+    selected: String,
+    status: Option<(String, String)>,
+    retry_after: Instant,
+    ui: crate::tui::CommandUi,
+}
+
+impl Panel {
+    pub fn new(
+        selection: crate::FdxArgs,
+        options: Options,
+        history: &History,
+        ui: crate::tui::CommandUi,
+    ) -> Result<Self, String> {
+        let selected = options.targets[0].name.clone();
+        ui.fdx_open(selected.clone(), options.history_file.clone())?;
+        let mut panel = Self {
+            selection,
+            terminal: None,
+            diagnosis: Diagnosis::default(),
+            selected,
+            status: None,
+            retry_after: Instant::now(),
+            ui,
+        };
+        panel.configure(Ok(options));
+        if let Some(terminal) = &mut panel.terminal {
+            terminal.show_history(history, Instant::now());
+        }
+        Ok(panel)
+    }
+
+    pub fn configure(&mut self, options: Result<Options, String>) {
+        self.retry_after = Instant::now();
+        self.terminal = match options {
+            Ok(options) => {
+                self.diagnosis = options.diagnosis;
+                let mut terminal =
+                    Terminal::new(&options.targets, Inline(self.ui.clone()), Style::PLAIN);
+                terminal.current = options
+                    .targets
+                    .iter()
+                    .position(|t| t.name == self.selected)
+                    .unwrap_or(0);
+                self.selected
+                    .clone_from(&options.targets[terminal.current].name);
+                Some(terminal)
+            }
+            Err(error) => {
+                self.publish(format!("Unavailable · {error}"));
+                None
+            }
+        };
+        if self.terminal.is_some() {
+            self.update_status();
+        }
+    }
+
+    pub fn boundary(&mut self, command: &str) {
+        self.retry_after = Instant::now();
+        let mut discarded = 0;
+        if let Some(terminal) = &mut self.terminal {
+            let now = Instant::now();
+            for slot in &mut terminal.slots {
+                discarded += slot.queue.len();
+                *slot = Slot::new(&slot.target, now);
+            }
+            terminal.help_from = None;
+        }
+        self.ui.fdx_boundary(format!(
+            "--- {command} · discarded {discarded} queued packet(s) ---"
+        ));
+        self.update_status();
+    }
+
+    pub fn ready_to_poll(&self) -> bool {
+        self.terminal.is_some() && Instant::now() >= self.retry_after
+    }
+
+    pub fn open_targets(&self) -> Vec<Target> {
+        self.terminal.as_ref().map_or_else(Vec::new, |terminal| {
+            terminal
+                .slots
+                .iter()
+                .filter(|slot| slot.link.is_some())
+                .map(|slot| slot.target.clone())
+                .collect()
+        })
+    }
+
+    pub fn input(&mut self, line: &str, history: &History) -> bool {
+        if matches!(line.trim(), ":q" | "exit" | "quit") {
+            return false;
+        }
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|(_, status)| status.starts_with("Waiting ·"))
+        {
+            self.ui
+                .fdx_line("Probe unavailable; input was not sent".into());
+            return true;
+        }
+        if let Some(terminal) = &mut self.terminal {
+            self.ui.fdx_line(format!("{}> {line}", self.selected));
+            if terminal.line(None, line, history, Instant::now()) == Flow::Quit {
+                return false;
+            }
+            self.selected
+                .clone_from(&terminal.slots[terminal.current].target.name);
+            self.update_status();
+        } else {
+            self.ui
+                .fdx_line("FDX links unavailable; reconnect or change images".into());
+        }
+        true
+    }
+
+    pub fn poll(&mut self, memory: &mut impl Memory, history: &mut History) -> Result<(), String> {
+        if let Some(terminal) = &mut self.terminal {
+            terminal.poll(memory, &self.diagnosis, history, Instant::now())?;
+            self.update_status();
+        }
+        Ok(())
+    }
+
+    pub fn failed(&mut self, error: String) {
+        let status = format!("Waiting · {error}");
+        if self
+            .status
+            .as_ref()
+            .is_none_or(|(_, previous)| *previous != status)
+        {
+            self.boundary("probe access interrupted");
+        }
+        self.retry_after = Instant::now() + Duration::from_millis(500);
+        self.publish(status);
+    }
+
+    pub fn close(self) {
+        self.ui.fdx_closed();
+    }
+
+    fn publish(&mut self, status: String) {
+        if self
+            .status
+            .as_ref()
+            .is_none_or(|(selected, previous)| *selected != self.selected || *previous != status)
+        {
+            self.ui.fdx_status(self.selected.clone(), status.clone());
+            self.status = Some((self.selected.clone(), status));
+        }
+    }
+
+    fn update_status(&mut self) {
+        if let Some(terminal) = &self.terminal {
+            let status = terminal
+                .slots
+                .iter()
+                .map(|slot| {
+                    let state = if slot.link.is_some() {
+                        "open"
+                    } else {
+                        "waiting"
+                    };
+                    format!("{} {state}", slot.target.name)
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            self.publish(status);
+        }
+    }
+}
+
 /// Through a pipe: bare packets on stdout (`name: packet` when several are
 /// watched), notes on stderr.
 struct Plain;
@@ -575,11 +775,10 @@ enum Flow {
 
 /// The interactive terminal's state, independent of the terminal and the
 /// clock so that tests drive it.
-struct Terminal<'h, O: Out> {
+struct Terminal<O: Out> {
     slots: Vec<Slot>,
     current: usize,
     out: O,
-    history: &'h mut History,
     style: Style,
     /// `help` was sent to this link at this time: its reply feeds completion.
     help_from: Option<(usize, Instant)>,
@@ -587,8 +786,8 @@ struct Terminal<'h, O: Out> {
     consecutive_errors: u64,
 }
 
-impl<'h, O: Out> Terminal<'h, O> {
-    fn new(targets: &[Target], out: O, history: &'h mut History, style: Style) -> Self {
+impl<O: Out> Terminal<O> {
+    fn new(targets: &[Target], out: O, style: Style) -> Self {
         let now = Instant::now();
         Terminal {
             slots: targets
@@ -597,7 +796,6 @@ impl<'h, O: Out> Terminal<'h, O> {
                 .collect(),
             current: 0,
             out,
-            history,
             style,
             help_from: None,
             words: Arc::new(Mutex::new(vec![Vec::new(); targets.len()])),
@@ -638,10 +836,10 @@ impl<'h, O: Out> Terminal<'h, O> {
     }
 
     /// The session's log of each link, before anything is read.
-    fn show_history(&mut self, now: Instant) {
+    fn show_history(&mut self, history: &History, now: Instant) {
         for index in 0..self.slots.len() {
             let address = self.slots[index].target.address;
-            let last = self.history.last(address, SHOWN);
+            let last = history.last(address, SHOWN);
             if last.is_empty() {
                 continue;
             }
@@ -663,7 +861,7 @@ impl<'h, O: Out> Terminal<'h, O> {
 
     /// A typed line; `target` is the link the input was talking to (`None`:
     /// the terminal's current one).
-    fn line(&mut self, target: Option<usize>, text: &str, now: Instant) -> Flow {
+    fn line(&mut self, target: Option<usize>, text: &str, history: &History, now: Instant) -> Flow {
         let names = self.names();
         let current = target.unwrap_or(self.current);
         match parse(text, &names, current, self.several()) {
@@ -677,7 +875,7 @@ impl<'h, O: Out> Terminal<'h, O> {
             }
             Action::Last(index) => {
                 let address = self.slots[index].target.address;
-                let last = self.history.last(address, LOG);
+                let last = history.last(address, LOG);
                 let on = self.on(index);
                 if last.is_empty() {
                     self.note(format!("{on}nothing received on this link in this session"));
@@ -687,6 +885,10 @@ impl<'h, O: Out> Terminal<'h, O> {
                 }
             }
             Action::Send(index, packet) => {
+                if self.slots[index].queue.len() >= 32 {
+                    self.warn("not queued: the link's input queue is full".to_string());
+                    return Flow::Continue;
+                }
                 if let Some(link) = self.slots[index].link
                     && packet.len() > link.max_payload()
                 {
@@ -715,10 +917,11 @@ impl<'h, O: Out> Terminal<'h, O> {
         &mut self,
         memory: &mut impl Memory,
         diagnosis: &Diagnosis,
+        history: &mut History,
         now: Instant,
     ) -> Result<(), String> {
         for index in 0..self.slots.len() {
-            self.poll_slot(memory, index, now)?;
+            self.poll_slot(memory, index, history, now)?;
         }
         // A link that stays closed: what the others and the stop records
         // say. With several links one diagnosis covers them all.
@@ -734,7 +937,7 @@ impl<'h, O: Out> Terminal<'h, O> {
                     slot.diagnosed = true;
                 }
             }
-            let lines = diagnosis.lines(memory, self.history, now);
+            let lines = diagnosis.lines(memory, history, now);
             if !lines.is_empty() {
                 let head = if several {
                     "some links are still not open:".to_string()
@@ -754,6 +957,7 @@ impl<'h, O: Out> Terminal<'h, O> {
         &mut self,
         memory: &mut impl Memory,
         index: usize,
+        history: &mut History,
         now: Instant,
     ) -> Result<(), String> {
         let several = self.several();
@@ -792,7 +996,7 @@ impl<'h, O: Out> Terminal<'h, O> {
                 }
             }
         };
-        match self.exchange(memory, index, link, now) {
+        match self.exchange(memory, index, history, link, now) {
             Ok(()) => self.consecutive_errors = 0,
             Err(Error::Closed) => {
                 let slot = &mut self.slots[index];
@@ -802,7 +1006,12 @@ impl<'h, O: Out> Terminal<'h, O> {
                 slot.closed_since = now;
                 slot.diagnosed = false;
                 slot.said_closed = true;
-                self.history.forget(address);
+                let discarded = slot.queue.len();
+                slot.queue.clear();
+                history.forget(address);
+                if discarded != 0 {
+                    self.warn(format!("{on}discarded {discarded} queued packet(s)"));
+                }
                 self.warn(format!("{on}the target closed or reopened the link"));
             }
             Err(Error::Memory(error)) if error.lost => {
@@ -824,18 +1033,22 @@ impl<'h, O: Out> Terminal<'h, O> {
         &mut self,
         memory: &mut impl Memory,
         index: usize,
+        history: &mut History,
         link: Link,
         now: Instant,
     ) -> Result<(), Error> {
         let address = self.slots[index].target.address;
         let label = self.label(index);
         let mut answered = false;
-        while let Some(packet) = link.receive(memory)? {
+        for _ in 0..16 {
+            let Some(packet) = link.receive(memory)? else {
+                break;
+            };
             match packet {
                 Packet::Data(packet) => {
                     let packet = text(&packet);
                     answered = true;
-                    self.history.record(address, &packet, now);
+                    history.record(address, &packet, now);
                     self.slots[index].reply_since = None;
                     if let Some((from, since)) = self.help_from
                         && from == index
@@ -1059,28 +1272,35 @@ fn interactive(
     let result = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         on_terminal(memory, options, history, interrupted)
     } else {
-        let mut term = Terminal::new(&options.targets, Plain, history, Style::stderr());
-        term.show_history(Instant::now());
+        let mut term = Terminal::new(&options.targets, Plain, Style::stderr());
+        term.show_history(history, Instant::now());
         let mut pending: Vec<u8> = Vec::new();
         let mut lines: VecDeque<Input> = VecDeque::new();
         let mut open = true;
-        drive(&mut term, memory, &options.diagnosis, interrupted, || {
-            if open {
-                match tracebridge::backend::read_stdin_now() {
-                    Some(bytes) => pending.extend(bytes),
-                    None => open = false,
+        drive(
+            &mut term,
+            memory,
+            &options.diagnosis,
+            history,
+            interrupted,
+            || {
+                if open {
+                    match tracebridge::backend::read_stdin_now() {
+                        Some(bytes) => pending.extend(bytes),
+                        None => open = false,
+                    }
+                    while let Some(end) = pending.iter().position(|&b| b == b'\n') {
+                        let line: Vec<u8> = pending.drain(..=end).collect();
+                        lines.push_back(Input::Line {
+                            target: None,
+                            text: text(&line),
+                        });
+                    }
                 }
-                while let Some(end) = pending.iter().position(|&b| b == b'\n') {
-                    let line: Vec<u8> = pending.drain(..=end).collect();
-                    lines.push_back(Input::Line {
-                        target: None,
-                        text: text(&line),
-                    });
-                }
-            }
-            // At the end of the input the links stay watched until Ctrl-C.
-            Some(lines.pop_front())
-        })
+                // At the end of the input the links stay watched until Ctrl-C.
+                Some(lines.pop_front())
+            },
+        )
     };
     eprintln!("{}", style.label(format!("{probe} FDX stopped")));
     result
@@ -1106,7 +1326,6 @@ fn on_terminal(
             printer: Box::new(printer),
             style: Style::stdout(),
         },
-        history,
         Style::stdout(),
     );
     editor.set_helper(Some(FdxHelper {
@@ -1127,11 +1346,12 @@ fn on_terminal(
         stop.clone(),
         sender,
     );
-    term.show_history(Instant::now());
+    term.show_history(history, Instant::now());
     let result = drive(
         &mut term,
         memory,
         &options.diagnosis,
+        history,
         interrupted,
         || match receiver.try_recv() {
             Ok(input) => Some(Some(input)),
@@ -1155,9 +1375,10 @@ fn on_terminal(
 /// error. `next` gives the next input (`Some(None)`: none now; `None`: the
 /// input has ended for good).
 fn drive<O: Out>(
-    term: &mut Terminal<'_, O>,
+    term: &mut Terminal<O>,
     memory: &mut impl Memory,
     diagnosis: &Diagnosis,
+    history: &mut History,
     interrupted: &AtomicBool,
     mut next: impl FnMut() -> Option<Option<Input>>,
 ) -> Result<u8, String> {
@@ -1165,7 +1386,7 @@ fn drive<O: Out>(
         loop {
             match next() {
                 Some(Some(Input::Line { target, text })) => {
-                    if term.line(target, &text, Instant::now()) == Flow::Quit {
+                    if term.line(target, &text, history, Instant::now()) == Flow::Quit {
                         return Ok(0);
                     }
                 }
@@ -1173,7 +1394,7 @@ fn drive<O: Out>(
                 Some(None) => break,
             }
         }
-        term.poll(memory, diagnosis, Instant::now())?;
+        term.poll(memory, diagnosis, history, Instant::now())?;
         std::thread::sleep(POLL);
     }
     Ok(0)
@@ -1417,18 +1638,23 @@ mod tests {
         let mut board = Board::new();
         let mut lines = Lines::default();
         let mut history = History::default();
-        let mut term = Terminal::new(&[target()], &mut lines, &mut history, Style::PLAIN);
+        let mut term = Terminal::new(&[target()], &mut lines, Style::PLAIN);
         let t0 = term.slots[0].closed_since;
         let diagnosis = Diagnosis::default();
-        assert_eq!(term.line(None, "--guest 0", t0), Flow::Continue);
-        assert_eq!(term.line(None, "help", t0), Flow::Continue);
+        assert_eq!(term.line(None, "--guest 0", &history, t0), Flow::Continue);
+        assert_eq!(term.line(None, "help", &history, t0), Flow::Continue);
         for _ in 0..3 {
-            term.poll(&mut board, &diagnosis, t0).unwrap();
+            term.poll(&mut board, &diagnosis, &mut history, t0).unwrap();
         }
         // Answered at once: no "no reply yet" later.
-        term.poll(&mut board, &diagnosis, t0 + Duration::from_secs(3))
-            .unwrap();
-        assert_eq!(term.line(None, "exit", t0), Flow::Quit);
+        term.poll(
+            &mut board,
+            &diagnosis,
+            &mut history,
+            t0 + Duration::from_secs(3),
+        )
+        .unwrap();
+        assert_eq!(term.line(None, "exit", &history, t0), Flow::Quit);
         assert_eq!(term.words.lock().unwrap()[0], ["ok", "help"]);
         drop(term);
         assert!(lines.0[0].contains("not sent"), "{:?}", lines.0);
@@ -1449,19 +1675,23 @@ mod tests {
         board.serving = false;
         let mut lines = Lines::default();
         let mut history = History::default();
-        let mut term = Terminal::new(&[target()], &mut lines, &mut history, Style::PLAIN);
+        let mut term = Terminal::new(&[target()], &mut lines, Style::PLAIN);
         let t0 = term.slots[0].closed_since;
         let diagnosis = Diagnosis::default();
         let at = |ms| t0 + Duration::from_millis(ms);
-        term.line(None, "lab five", t0);
-        term.poll(&mut board, &diagnosis, t0).unwrap();
-        term.poll(&mut board, &diagnosis, at(500)).unwrap();
-        term.poll(&mut board, &diagnosis, at(1100)).unwrap();
+        term.line(None, "lab five", &history, t0);
+        term.poll(&mut board, &diagnosis, &mut history, t0).unwrap();
+        term.poll(&mut board, &diagnosis, &mut history, at(500))
+            .unwrap();
+        term.poll(&mut board, &diagnosis, &mut history, at(1100))
+            .unwrap();
         // The target takes it and stays silent.
         let host = board.word(BASE + 8);
         board.put_word(BASE + 12, host);
-        term.poll(&mut board, &diagnosis, at(1200)).unwrap();
-        term.poll(&mut board, &diagnosis, at(3300)).unwrap();
+        term.poll(&mut board, &diagnosis, &mut history, at(1200))
+            .unwrap();
+        term.poll(&mut board, &diagnosis, &mut history, at(3300))
+            .unwrap();
         drop(term);
         let text = lines.0.join("\n");
         assert!(text.contains("has not read \"lab five\" for 1 s"), "{text}");
@@ -1475,8 +1705,8 @@ mod tests {
         let t0 = Instant::now();
         history.record(BASE, "ready", t0);
         let mut lines = Lines::default();
-        let mut term = Terminal::new(&[target()], &mut lines, &mut history, Style::PLAIN);
-        term.show_history(t0 + Duration::from_secs(35));
+        let mut term = Terminal::new(&[target()], &mut lines, Style::PLAIN);
+        term.show_history(&history, t0 + Duration::from_secs(35));
         drop(term);
         assert_eq!(
             lines.0,
@@ -1499,17 +1729,22 @@ mod tests {
             address: BASE + 0x40,
         };
         let targets = [target(), closed.clone()];
-        let mut term = Terminal::new(&targets, &mut lines, &mut history, Style::PLAIN);
+        let mut term = Terminal::new(&targets, &mut lines, Style::PLAIN);
         let diagnosis = Diagnosis {
             peers: vec![target(), closed],
             ..Diagnosis::default()
         };
         let t0 = term.slots[0].closed_since;
-        term.line(None, "@el2 go", t0);
-        term.poll(&mut board, &diagnosis, t0).unwrap();
-        term.poll(&mut board, &diagnosis, t0).unwrap();
-        term.poll(&mut board, &diagnosis, t0 + Duration::from_secs(4))
-            .unwrap();
+        term.line(None, "@el2 go", &history, t0);
+        term.poll(&mut board, &diagnosis, &mut history, t0).unwrap();
+        term.poll(&mut board, &diagnosis, &mut history, t0).unwrap();
+        term.poll(
+            &mut board,
+            &diagnosis,
+            &mut history,
+            t0 + Duration::from_secs(4),
+        )
+        .unwrap();
         drop(term);
         let text = lines.0.join("\n");
         assert!(text.contains("[el2] < ok go"), "{text}");

@@ -50,6 +50,9 @@ impl Style {
 
     /// For what a command prints.
     pub fn stdout() -> Style {
+        if crate::output::captured() {
+            return Self::PLAIN;
+        }
         Style::detect(std::io::stdout().is_terminal(), |name| {
             std::env::var_os(name)
         })
@@ -57,6 +60,9 @@ impl Style {
 
     /// For errors and warnings.
     pub fn stderr() -> Style {
+        if crate::output::captured() {
+            return Self::PLAIN;
+        }
         Style::detect(std::io::stderr().is_terminal(), |name| {
             std::env::var_os(name)
         })

@@ -14,6 +14,7 @@ pub mod decode;
 pub mod elf;
 pub mod fault;
 pub mod fdx;
+pub mod output;
 pub mod rtt;
 pub mod style;
 pub mod target;

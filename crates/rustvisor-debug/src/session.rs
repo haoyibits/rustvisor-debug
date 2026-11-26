@@ -22,6 +22,8 @@
 //! Ctrl-C stops a waiting command (`rtt`, `fdx`, `run-until`), not the session;
 //! `quit`, `exit` or Ctrl-D end it.
 
+use probecore::output::{eprintln, println};
+
 use std::borrow::Cow;
 use std::io::{BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
@@ -212,6 +214,53 @@ fn command_names() -> Vec<String> {
         .chain(SESSION_WORDS.iter().map(|(word, _)| word.to_string()))
         .chain(["exit".to_string()])
         .collect()
+}
+
+pub(crate) struct MenuCommand {
+    pub name: String,
+    pub help: String,
+    pub unavailable: Option<&'static str>,
+}
+
+pub(crate) fn menu_commands(backend: Option<Backend>) -> Vec<MenuCommand> {
+    let cli = Cli::command();
+    let mut entries: Vec<_> = cli
+        .get_subcommands()
+        .filter(|command| !command.is_hide_set())
+        .map(|command| {
+            let name = command.get_name();
+            let requirement = GROUPS
+                .iter()
+                .flat_map(|(_, commands)| commands.iter())
+                .find(|(candidate, _)| *candidate == name)
+                .map(|(_, need)| *need)
+                .unwrap_or(if name == "watch" {
+                    Need::Trace32
+                } else {
+                    Need::Nothing
+                });
+            MenuCommand {
+                name: name.to_string(),
+                help: command
+                    .get_about()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+                unavailable: match (name, requirement, backend) {
+                    ("init", _, _) => Some("Project already initialized"),
+                    (_, Need::Probe | Need::Trace32, None) => Some("Needs a probe"),
+                    (_, Need::Trace32, Some(Backend::OpenOcd)) => Some("Needs TRACE32"),
+                    _ => None,
+                },
+            }
+        })
+        .collect();
+    entries.extend(SESSION_WORDS.iter().map(|(name, help)| MenuCommand {
+        name: name.to_string(),
+        help: help.to_string(),
+        unavailable: None,
+    }));
+    entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    entries
 }
 
 /// Split a line like a shell does (quotes, backslashes), except that `eval`
@@ -479,13 +528,15 @@ pub struct Session {
     history: History,
     /// `source` files being run, innermost last.
     sourcing: Vec<PathBuf>,
+    ui: Option<crate::tui::CommandUi>,
+    fdx_panel: Option<crate::fdx_terminal::Panel>,
 }
 
 /// How deep `source` files may nest.
 const SOURCE_DEPTH: usize = 8;
 
 impl Session {
-    fn new(config: Config, flag: Option<Backend>, json: bool, style: Style) -> Session {
+    pub(crate) fn new(config: Config, flag: Option<Backend>, json: bool, style: Style) -> Session {
         Session {
             config,
             flag,
@@ -501,7 +552,103 @@ impl Session {
             detect: probe::detect,
             history: History::default(),
             sourcing: Vec::new(),
+            ui: None,
+            fdx_panel: None,
         }
+    }
+
+    pub(crate) fn use_tui(&mut self, ui: crate::tui::CommandUi, interrupted: Arc<AtomicBool>) {
+        self.ui = Some(ui);
+        self.interrupted = interrupted;
+    }
+
+    pub(crate) fn has_fdx_panel(&self) -> bool {
+        self.fdx_panel.is_some()
+    }
+
+    pub(crate) fn fdx_input(&mut self, text: &str) {
+        if self
+            .fdx_panel
+            .as_mut()
+            .is_some_and(|panel| !panel.input(text, &self.history))
+        {
+            self.close_fdx_panel();
+        }
+    }
+
+    pub(crate) fn close_fdx_panel(&mut self) {
+        if let Some(panel) = self.fdx_panel.take() {
+            panel.close();
+        }
+    }
+
+    pub(crate) fn poll_fdx(&mut self) {
+        let Some(panel) = self
+            .fdx_panel
+            .as_mut()
+            .filter(|panel| panel.ready_to_poll())
+        else {
+            return;
+        };
+        let Some(backend) = self.backend else {
+            panel.failed("No probe; reconnect to resume".into());
+            return;
+        };
+        let mut env = Env {
+            config: &self.config,
+            flag: self.backend.or(self.flag),
+            json: false,
+            session: Some(SessionLink {
+                backend,
+                server: self.server.as_mut(),
+                interrupted: &self.interrupted,
+                powerview: Some(&mut self.powerview),
+                history: None,
+                ui: None,
+                fdx_targets: &[],
+            }),
+        };
+        if let Err(error) = env.with_ram(|mut memory, _| panel.poll(&mut memory, &mut self.history))
+        {
+            panel.failed(error);
+        }
+    }
+
+    fn fdx_boundary(&mut self, reason: &str) {
+        if let Some(panel) = &mut self.fdx_panel {
+            panel.boundary(reason);
+        }
+    }
+
+    fn refresh_fdx_targets(&mut self) {
+        if let Some(panel) = &mut self.fdx_panel {
+            panel.configure(crate::fdx_options(
+                &self.config,
+                panel.selection.clone(),
+                false,
+            ));
+        }
+    }
+
+    pub(crate) fn tui_status(&mut self) -> crate::tui::Status {
+        crate::tui::Status {
+            target: self.target_state(),
+            backend: self.backend,
+        }
+    }
+
+    pub(crate) fn tui_header(&self) -> String {
+        format!(
+            "rvdbg {}  {}\n{}\nimages  {}",
+            env!("CARGO_PKG_VERSION"),
+            self.config.file.display(),
+            self.reason,
+            self.images_line()
+        )
+    }
+
+    pub(crate) fn last_code(&self) -> u8 {
+        self.code
     }
 
     fn note(&self, text: &str) {
@@ -518,7 +665,7 @@ impl Session {
 
     /// Choose the backend (`forced`, else `--backend`, `project.backend`,
     /// the connected probe) and, for OpenOCD, start or attach to OpenOCD.
-    fn connect(&mut self, forced: Option<Backend>) {
+    pub(crate) fn connect(&mut self, forced: Option<Backend>) {
         self.server = None;
         self.powerview = None;
         let fixed = match forced {
@@ -619,7 +766,11 @@ impl Session {
 
     /// `rvdbg [openocd running]> `, `rvdbg [trace32]> `, `rvdbg [no probe]> `.
     pub fn prompt(&mut self) -> String {
-        let inside = match self.backend {
+        format!("rvdbg [{}]> ", self.target_state())
+    }
+
+    fn target_state(&mut self) -> String {
+        match self.backend {
             None => "no probe".to_string(),
             Some(Backend::Trace32) => {
                 if !probe::listening(probe::rcl_port(&self.config)) {
@@ -663,8 +814,7 @@ impl Session {
                     (None, _) => "openocd not-running".into(),
                 }
             }
-        };
-        format!("rvdbg [{inside}]> ")
+        }
     }
 
     /// What was typed or pasted: one line, or several run in order until
@@ -685,7 +835,9 @@ impl Session {
     /// Lines one after the other, each shown after the prompt; the first that
     /// fails (or Ctrl-C) stops the rest. `file` names them in the message.
     fn run_lines(&mut self, lines: &[(usize, String)], file: Option<&Path>) -> Flow {
-        self.interrupted.store(false, Ordering::SeqCst);
+        if self.ui.is_none() {
+            self.interrupted.store(false, Ordering::SeqCst);
+        }
         for (index, (number, line)) in lines.iter().enumerate() {
             if !self.json {
                 let prompt = self.prompt();
@@ -751,10 +903,12 @@ impl Session {
             .unwrap_or_else(|_| PathBuf::from(dir));
         match self.config.clone().with_images(&path) {
             Ok(config) => {
+                self.fdx_boundary("images");
                 self.config = config;
                 // The connection and the links belong to the old images.
                 self.powerview = None;
                 self.history.clear();
+                self.refresh_fdx_targets();
                 self.note(&format!(
                     "images from {}: {} and {} extra image(s)",
                     path.display(),
@@ -769,6 +923,11 @@ impl Session {
     pub fn handle_line(&mut self, line: &str) -> Flow {
         self.code = 0;
         self.failure = None;
+        if self.ui.is_some() && self.interrupted.load(Ordering::SeqCst) {
+            self.code = 130;
+            self.error("interrupted");
+            return Flow::Continue;
+        }
         let args = match split_line(line) {
             Ok(args) => args,
             Err(error) => {
@@ -822,12 +981,22 @@ impl Session {
                         return Flow::Continue;
                     }
                 };
+                self.fdx_boundary("backend");
                 self.connect(Some(backend));
+                if self.has_fdx_panel() {
+                    self.history.clear();
+                    self.refresh_fdx_targets();
+                }
                 self.note(&format!("backend {}", self.reason));
                 return Flow::Continue;
             }
             "reconnect" => {
+                self.fdx_boundary("reconnect");
                 self.connect(None);
+                if self.has_fdx_panel() {
+                    self.history.clear();
+                    self.refresh_fdx_targets();
+                }
                 match self.backend {
                     Some(backend) => {
                         self.note(&format!("backend {} ({})", backend.name(), self.reason))
@@ -857,6 +1026,10 @@ impl Session {
                 return Flow::Continue;
             }
         };
+        if cli.tui {
+            self.error("--tui is a session startup option");
+            return Flow::Continue;
+        }
         if cli.config.is_some() || cli.backend.is_some() {
             self.error("--config and --backend are fixed for the session; use 'backend <name>'");
             return Flow::Continue;
@@ -889,6 +1062,18 @@ impl Session {
             }
         }
         match command {
+            Commands::Fdx(args) if args.interactive() && self.ui.is_some() => {
+                let options = crate::fdx_options(&self.config, args.clone(), json)?;
+                self.close_fdx_panel();
+                let ui = self.ui.clone().expect("the TUI owns this panel");
+                self.fdx_panel = Some(crate::fdx_terminal::Panel::new(
+                    args,
+                    options,
+                    &self.history,
+                    ui,
+                )?);
+                Ok(())
+            }
             Commands::Init => Err(format!(
                 "{} already exists; this session uses it",
                 self.config.file.display()
@@ -899,7 +1084,9 @@ impl Session {
                 Ok(())
             }
             command => {
-                self.interrupted.store(false, Ordering::SeqCst);
+                if self.ui.is_none() {
+                    self.interrupted.store(false, Ordering::SeqCst);
+                }
                 if !SHARES_POWERVIEW.contains(&name.as_str()) {
                     // flash, load, open and the like manage PowerView
                     // themselves.
@@ -911,6 +1098,28 @@ impl Session {
                     // The images start again.
                     self.history.clear();
                 }
+                // Explicit addresses have no ELF symbol to anchor them.
+                // Only close an extra link that the pane verified was open.
+                let fdx_targets = if matches!(command, Commands::Reset { .. }) {
+                    self.fdx_panel
+                        .as_ref()
+                        .map_or_else(Vec::new, |panel| panel.open_targets())
+                } else {
+                    Vec::new()
+                };
+                if matches!(
+                    command,
+                    Commands::Reset { .. }
+                        | Commands::Flash { .. }
+                        | Commands::Load
+                        | Commands::Attach
+                        | Commands::Down
+                        | Commands::Do { .. }
+                        | Commands::Cmd { .. }
+                        | Commands::Fdx(_)
+                ) {
+                    self.fdx_boundary(&name);
+                }
                 let mut env = Env {
                     config: &self.config,
                     flag: self.backend.or(self.flag),
@@ -921,9 +1130,21 @@ impl Session {
                         interrupted: &self.interrupted,
                         powerview: Some(&mut self.powerview),
                         history: Some(&mut self.history),
+                        ui: self.ui.as_ref(),
+                        fdx_targets: &fdx_targets,
                     }),
                 };
-                let code = execute(&mut env, command)?;
+                if let Some(ui) = &self.ui {
+                    let cancellable =
+                        matches!(command, Commands::RunUntil { .. } | Commands::Rtt { .. })
+                            || matches!(&command, Commands::Fdx(args) if !args.close);
+                    ui.begin(&name, cancellable)?;
+                }
+                let result = execute(&mut env, command);
+                if matches!(name.as_str(), "flash" | "load") {
+                    self.refresh_fdx_targets();
+                }
+                let code = result?;
                 self.code = code;
                 if code != 0 {
                     eprintln!("{}", self.style.dim(format!("(exit code {code})")));
@@ -982,7 +1203,14 @@ fn print_clap_error(error: &clap::Error, command: &str, style: Style) {
         error.kind(),
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
     ) {
-        let _ = error.print();
+        if probecore::output::captured() {
+            probecore::output::print(
+                error.use_stderr(),
+                format_args!("{}", error.render().to_string().trim_end()),
+            );
+        } else {
+            let _ = error.print();
+        }
         return;
     }
     let rendered = error.render();
@@ -1034,8 +1262,21 @@ fn command_name(command: &Commands) -> String {
     name
 }
 
-fn history_path(config: &Config) -> Option<PathBuf> {
+pub(crate) fn history_path(config: &Config) -> Option<PathBuf> {
     crate::run_dir(config).ok().map(|dir| dir.join("history"))
+}
+
+/// Load the project and apply any command-line image override.
+pub(crate) fn load_config(
+    path: &Path,
+    cwd: &Path,
+    images: Option<&Path>,
+) -> Result<Config, String> {
+    let mut config = config::load(path)?;
+    if let Some(dir) = images {
+        config = config.with_images(&cwd.join(dir))?;
+    }
+    Ok(config)
 }
 
 /// The interactive session.
@@ -1054,10 +1295,7 @@ pub fn run(
             return Err(error);
         }
     };
-    let mut config = config::load(&path)?;
-    if let Some(dir) = images {
-        config = config.with_images(&cwd.join(dir))?;
-    }
+    let config = load_config(&path, cwd, images)?;
 
     // Ctrl-C sets the flag instead of ending rvdbg; the line editor reads it
     // as a key while it waits for input.

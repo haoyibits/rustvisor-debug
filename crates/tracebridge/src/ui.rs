@@ -1,5 +1,7 @@
 //! Console output shared by the commands.
 
+use probecore::output::println;
+
 use std::path::{Path, PathBuf};
 
 /// What stdin holds right now, without blocking: empty when nothing is
@@ -43,7 +45,11 @@ pub fn program() -> &'static str {
 
 /// `info` in cli.py: a cyan `[tracebridge]` (`[rvdbg]`) prefix on stdout.
 pub fn info(message: &str) {
-    println!("\x1b[1;36m[{}]\x1b[0m {message}", program());
+    if probecore::output::captured() {
+        println!("[{}] {message}", program());
+    } else {
+        println!("\x1b[1;36m[{}]\x1b[0m {message}", program());
+    }
 }
 
 /// The absolute path of this executable, used wherever tracebridge calls itself

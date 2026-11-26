@@ -994,6 +994,15 @@ fn breakpoint_address(target: &str) -> String {
 /// `break`) gives exit code 3 with where it stopped; one that has not stopped
 /// within `timeout` keeps running, its temporary breakpoint still set.
 pub fn run_until(ctx: &mut Context, target: &str, timeout: Duration) -> DResult<Outcome> {
+    run_until_cancellable(ctx, target, timeout, &|| false)
+}
+
+pub fn run_until_cancellable(
+    ctx: &mut Context,
+    target: &str,
+    timeout: Duration,
+    cancelled: &dyn Fn() -> bool,
+) -> DResult<Outcome> {
     let style = ctx.style;
     let address_text = breakpoint_address(target);
     if address_text.is_empty() {
@@ -1021,6 +1030,15 @@ pub fn run_until(ctx: &mut Context, target: &str, timeout: Duration) -> DResult<
     let probe = &mut *ctx.probe;
     let start = Instant::now();
     while probe::core_running(probe)? {
+        if cancelled() {
+            return Ok(Outcome {
+                text: format!(
+                    "interrupted while waiting for {target}; the core keeps running and the temporary breakpoint stays set until it next stops"
+                ),
+                json: json!({"target": target, "interrupted": true}),
+                code: 130,
+            });
+        }
         if start.elapsed() > timeout {
             fail!(
                 "{target} was not reached within {}s; the core keeps running and the temporary \

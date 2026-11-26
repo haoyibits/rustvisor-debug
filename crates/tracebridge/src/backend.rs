@@ -29,7 +29,9 @@ pub use crate::memory::RamMemory;
 pub use crate::pycompat::process_env;
 /// The RTT terminal loop, for any memory access that works while the core
 /// runs (another backend's).
-pub use crate::rtt::{Terminal as RttTerminal, terminal as rtt_terminal};
+pub use crate::rtt::{
+    Terminal as RttTerminal, terminal as rtt_terminal, terminal_with_input as rtt_with_input,
+};
 
 /// Where clock tree descriptions are looked up by chip:
 /// `~/.config/rvdbg/clock` (or under `XDG_CONFIG_HOME`).
@@ -194,14 +196,29 @@ impl Project {
     /// `tracebridge rtt <args>`: the RTT terminal through the running
     /// PowerView until Ctrl-C. Usage errors exit like any clap parser.
     pub fn rtt(&self, args: &[String]) -> Result<()> {
-        let args = crate::rtt::parse_args(args);
+        self.rtt_with_input(args, None, None)
+    }
+
+    pub fn rtt_with_input(
+        &self,
+        args: &[String],
+        interrupted: Option<&std::sync::atomic::AtomicBool>,
+        input: Option<&std::sync::mpsc::Receiver<Vec<u8>>>,
+    ) -> Result<()> {
+        let args = if probecore::output::captured() {
+            let argv = std::iter::once("tracebridge rtt").chain(args.iter().map(String::as_str));
+            <crate::rtt::RttArgs as clap::Parser>::try_parse_from(argv)
+                .map_err(|error| bridge_error!("{error}"))?
+        } else {
+            crate::rtt::parse_args(args)
+        };
         if !crate::powerview::port_open(self.0.rcl_port) {
             return Err(bridge_error!(
                 "no PowerView on RCL port {}; flash or load first, or start PowerView",
                 self.0.rcl_port
             ));
         }
-        crate::rtt::run(&self.0, args)
+        crate::rtt::run_with_input(&self.0, args, interrupted, input)
     }
 
     /// The chip name: `flash.chip`, else `target.cpu`.
@@ -255,6 +272,14 @@ impl Session {
     /// command, printed the same way, without connecting again. The result
     /// is its exit code (0 ok, 1 error, 2 usage, 3 a check failed, ...).
     pub fn debug(&mut self, args: Vec<String>) -> Result<i32> {
+        self.debug_cancellable(args, &|| false)
+    }
+
+    pub fn debug_cancellable(
+        &mut self,
+        args: Vec<String>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<i32> {
         let cwd = std::env::current_dir()
             .map_err(|error| bridge_error!("cannot read the current directory: {error}"))?;
         Ok(debug::main_on(
@@ -263,6 +288,7 @@ impl Session {
             args,
             &mut self.debugger,
             &mut self.per,
+            cancelled,
         ))
     }
 

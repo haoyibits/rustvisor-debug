@@ -6,7 +6,10 @@
 //! uses the `E:` (run-time) access class.
 
 use std::io::Write;
+
+use probecore::output::{self, eprintln};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use clap::Parser;
@@ -132,6 +135,15 @@ fn read_terminal_input() -> Vec<u8> {
 
 /// `run`.
 pub fn run(config: &Config, args: RttArgs) -> Result<()> {
+    run_with_input(config, args, None, None)
+}
+
+pub fn run_with_input(
+    config: &Config,
+    args: RttArgs,
+    interrupted: Option<&AtomicBool>,
+    input: Option<&Receiver<Vec<u8>>>,
+) -> Result<()> {
     let port = args.port.unwrap_or(config.rcl_port);
     let program = args.program.unwrap_or_else(|| config.program.clone());
     let symbol = args.symbol.unwrap_or_else(|| config.rtt_symbol.clone());
@@ -173,7 +185,7 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
     };
 
     let mut memory = RamMemory::run_time(&mut debugger);
-    terminal(
+    terminal_with_input(
         &mut memory,
         &Terminal {
             probe: "TRACE32",
@@ -183,6 +195,8 @@ pub fn run(config: &Config, args: RttArgs) -> Result<()> {
             replay: args.replay,
             output_only: args.output_only,
         },
+        interrupted,
+        input,
     )
 }
 
@@ -203,6 +217,15 @@ pub struct Terminal<'a> {
 /// The interactive RTT terminal on channel 0 until Ctrl-C, through any
 /// memory access that works while the core runs.
 pub fn terminal(memory: &mut impl Memory, options: &Terminal) -> Result<()> {
+    terminal_with_input(memory, options, None, None)
+}
+
+pub fn terminal_with_input(
+    memory: &mut impl Memory,
+    options: &Terminal,
+    interrupted: Option<&AtomicBool>,
+    input: Option<&Receiver<Vec<u8>>>,
+) -> Result<()> {
     let Terminal {
         probe,
         symbol,
@@ -232,22 +255,33 @@ pub fn terminal(memory: &mut impl Memory, options: &Terminal) -> Result<()> {
             .map_err(|error| bridge_error!("cannot reset the RTT read offset: {error}"))?;
     }
 
-    let interrupted = std::sync::Arc::new(AtomicBool::new(false));
-    crate::signals::flag_on_interrupt(&interrupted);
-    let guard = TerminalGuard::enable(!options.output_only);
+    let own_interrupt = std::sync::Arc::new(AtomicBool::new(false));
+    let interrupted = interrupted.unwrap_or_else(|| {
+        crate::signals::flag_on_interrupt(&own_interrupt);
+        &own_interrupt
+    });
+    let guard = TerminalGuard::enable(!options.output_only && input.is_none());
     let mut pending_input: Vec<u8> = Vec::new();
     let mut consecutive_errors = 0u64;
     let mut stdout = std::io::stdout();
     while !interrupted.load(Ordering::SeqCst) {
         let step = (|| -> probecore::Result<()> {
             let output = channel.read_up(memory)?;
-            if !output.is_empty() {
+            if !output.is_empty() && !output::send(output::Line::Rtt(&output)) {
                 // Passed through byte for byte: escape sequences are the target's business.
                 let _ = stdout.write_all(&output);
                 let _ = stdout.flush();
             }
             if !options.output_only {
-                pending_input.extend(read_terminal_input());
+                if let Some(input) = input {
+                    if pending_input.is_empty()
+                        && let Ok(bytes) = input.try_recv()
+                    {
+                        pending_input = bytes;
+                    }
+                } else {
+                    pending_input.extend(read_terminal_input());
+                }
                 if !pending_input.is_empty() {
                     let sent = channel.write_down(memory, &pending_input)?;
                     pending_input.drain(..sent);

@@ -144,6 +144,13 @@ rvdbg [openocd halted]> quit
 - 从管道读入时不显示提示符，每行执行一条命令。
 - `rvdbg --json` 从管道读入时是给程序（板级 runner）用的：先输出一行 `{"ready": true, "backend": …}`，之后每条命令先输出它自己的内容（查看类命令、`ram` 和 `fdx --send/--expect` 是一行 JSON），再输出一行 `{"end": "<这一行>", "ok": …, "exit_code": …, "error": …}`。
 
+### 内联终端界面
+
+在终端里运行 `rvdbg --tui`，它会查找当前项目的 `rvdbg.toml`。可以直接输入命令，也可以输入 `/` 打开菜单，用方向键选择、Tab 填入、Enter 提交。命令结果保留在终端滚动历史里。Ctrl+C 清除草稿或中断支持取消的操作，空输入时按 Ctrl+D 退出。
+
+- `rtt` 打开双向 RTT 控制台，按键直接发给目标，Ctrl+C 返回主命令框。`rtt --output-only` 只读。内联界面按文本显示目标输出。独立的 `rvdbg rtt` 还支持目标输出的终端转义序列。
+- `fdx` 打开常驻面板。按 F6 在主命令框和面板间切换，面板继续接收数据。面板内按 Enter 发包，`:help` 查看链路命令，空闲时用 `:q` 或 Ctrl+C 关闭。`fdx --all` 显示每条链路的状态，支持 `:to <name>` 和 `@<name> <packet>`。执行 `run-until` 等命令时面板暂停，命令结束后恢复轮询。`reset` 后面板等待固件重新打开链路。
+
 ## 配置
 
 `rvdbg.toml` 所在的目录就是项目根目录，文件里的相对路径都相对于这个目录。`rvdbg init` 生成带注释的文件，默认值是 SR6P6 的。

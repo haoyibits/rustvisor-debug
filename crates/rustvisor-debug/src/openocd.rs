@@ -1,5 +1,7 @@
 //! The StellarLINK backend: OpenOCD (openocd-stellar) through stellarbridge.
 
+use probecore::output::{eprintln, println};
+
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -160,7 +162,8 @@ struct FlashDisplay {
 impl FlashDisplay {
     fn new() -> Self {
         Self {
-            terminal: std::io::stdout().is_terminal()
+            terminal: !probecore::output::captured()
+                && std::io::stdout().is_terminal()
                 && std::env::var("TERM").as_deref() != Ok("dumb"),
             active: false,
             last: None,
@@ -215,7 +218,7 @@ impl FlashDisplay {
                     print!("\r\x1b[K{line}");
                     let _ = std::io::stdout().flush();
                     self.active = true;
-                } else {
+                } else if !probecore::output::send(probecore::output::Line::Progress(&line)) {
                     println!("{line}");
                 }
             }

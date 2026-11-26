@@ -204,6 +204,13 @@ rvdbg [openocd halted]> quit
   output (for the inspect commands, `ram` and `fdx --send/--expect` one JSON
   line) an `{"end": "<line>", "ok": …, "exit_code": …, "error": …}` line.
 
+### Inline terminal interface
+
+Run `rvdbg --tui` from a terminal with an `rvdbg.toml`. Enter commands directly, or type `/` to browse them. Use the arrow keys to select a command, Tab to fill it in, and Enter to submit. Command results stay in the terminal's scrollback. Ctrl+C clears the draft or interrupts a supported operation. Ctrl+D on an empty line ends the session.
+
+- `rtt` opens the bidirectional RTT console. Keystrokes go to the target and Ctrl+C returns to the command prompt. Use `rtt --output-only` to read output only. The inline interface displays target output as text. The standalone `rvdbg rtt` also supports target-generated terminal escape sequences.
+- `fdx` opens a persistent packet pane. Press F6 to switch between the main prompt and FDX. Enter in the pane sends a packet, `:help` lists the link commands, and `:q` or Ctrl+C while the pane is focused closes it. `fdx --all` shows the state of each link and supports `:to <name>` and `@<name> <packet>`. The pane pauses during commands such as `run-until`, and resumes polling when the command returns. After `reset` it waits for the firmware to reopen its links.
+
 ## Configuration
 
 `rvdbg.toml` marks the project root. Every relative path in it is relative

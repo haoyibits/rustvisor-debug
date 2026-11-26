@@ -6,6 +6,8 @@
 //! adapter. Flash, load and RTT are CLI commands, so the old visible tasks
 //! are removed when the files are merged.
 
+use probecore::output::println;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};

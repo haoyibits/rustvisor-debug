@@ -18,6 +18,7 @@ use crate::{
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
+use probecore::output::println;
 
 use crate::config::{Config, find_config_file, load_config};
 use crate::errors::Result;

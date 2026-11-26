@@ -5,6 +5,8 @@
 //! always cyan (as in the Python tool), and the log of the `adapter` proxy is
 //! always plain, because the IDEs match its lines.
 
+use probecore::output::eprintln;
+
 use std::fmt;
 
 use crate::ui;

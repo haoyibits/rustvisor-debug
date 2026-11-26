@@ -20,6 +20,10 @@ stellarbridge = { path = "../stellarbridge" }
 tracebridge = { path = "../tracebridge" }
 # The interactive session: line editing and history, like tracebridge's.
 rustyline = { version = "18.0", default-features = false, features = ["with-file-history"] }
+crossterm = "0.28"
+ratatui = { version = "0.28", default-features = false, features = ["crossterm"] }
+unicode-segmentation = "1"
+unicode-width = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 # Ctrl-C stops a command in the session, not rvdbg (safe API, no unsafe).

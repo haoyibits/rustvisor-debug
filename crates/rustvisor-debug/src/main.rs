@@ -7,6 +7,8 @@
 //! rvdbg accepts the same command names; `adapter` is always TRACE32.
 #![forbid(unsafe_code)]
 
+use probecore::output::{eprintln, println};
+
 use rustvisor_debug::config;
 mod fdx_terminal;
 mod init;
@@ -15,7 +17,9 @@ mod openocd;
 mod probe;
 mod session;
 mod skill;
+mod tui;
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,6 +41,10 @@ const EXIT_FAILED: u8 = 3;
     about = "Flash and debug rustvisor on its board (TRACE32 or StellarLINK)"
 )]
 struct Cli {
+    /// Start the inline interactive interface
+    #[arg(long, conflicts_with = "json")]
+    tui: bool,
+
     /// Project configuration (default: the nearest rvdbg.toml)
     #[arg(long, global = true, value_name = "FILE")]
     config: Option<PathBuf>,
@@ -288,7 +296,7 @@ enum Commands {
 }
 
 /// The options of `rvdbg fdx`.
-#[derive(Debug, clap::Args)]
+#[derive(Clone, Debug, clap::Args)]
 struct FdxArgs {
     /// The image whose link to use: el2 (the ELF, the default), guest<n> or <n> (the n-th extra image)
     #[arg(long, value_name = "NAME|N")]
@@ -317,6 +325,12 @@ struct FdxArgs {
 }
 
 /// The options of `rvdbg swtrace`.
+impl FdxArgs {
+    fn interactive(&self) -> bool {
+        !self.close && self.send.is_empty() && self.expect.is_empty()
+    }
+}
+
 #[derive(Debug, clap::Args)]
 struct SwtraceArgs {
     /// Only the n-th extra image (project.extra_elf, from 0); repeat for several (default: the ELF and every extra image that has the symbol)
@@ -387,6 +401,22 @@ fn is_closed_stdout(payload: &(dyn std::any::Any + Send)) -> bool {
 fn run(cli: Cli) -> Result<u8, String> {
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let flag = cli.backend.map(Backend::from);
+    if cli.tui {
+        if cli.command.is_some() {
+            return Err("--tui starts a session and takes no subcommand".into());
+        }
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            return Err("--tui requires a terminal on stdin and stdout".into());
+        }
+        return tui::run(
+            session::load_config(
+                &config::find(cli.config.as_deref(), &cwd)?,
+                &cwd,
+                cli.images.as_deref(),
+            )?,
+            flag,
+        );
+    }
     let Some(command) = cli.command else {
         return session::run(
             cli.config.as_deref(),
@@ -457,6 +487,8 @@ pub struct SessionLink<'a> {
     pub powerview: Option<&'a mut Option<tracebridge::backend::Session>>,
     /// What the session received on each FDX link.
     pub history: Option<&'a mut fdx_terminal::History>,
+    pub(crate) ui: Option<&'a tui::CommandUi>,
+    pub(crate) fdx_targets: &'a [fdx_terminal::Target],
 }
 
 impl Env<'_> {
@@ -476,8 +508,8 @@ impl Env<'_> {
         &mut self,
         f: impl FnOnce(&mut tracebridge::backend::Session) -> Result<T, String>,
     ) -> Result<T, String> {
-        let project = trace32(self.config)?;
-        let connect = |project| tracebridge::backend::Session::connect(project).map_err(text);
+        let connect =
+            || tracebridge::backend::Session::connect(trace32(self.config)?).map_err(text);
         match self
             .session
             .as_mut()
@@ -486,7 +518,7 @@ impl Env<'_> {
             Some(slot) => {
                 let session = match slot {
                     Some(session) => session,
-                    None => slot.insert(connect(project)?),
+                    None => slot.insert(connect()?),
                 };
                 let result = f(session);
                 if result.is_err() {
@@ -494,7 +526,7 @@ impl Env<'_> {
                 }
                 result
             }
-            None => f(&mut connect(project)?),
+            None => f(&mut connect()?),
         }
     }
 
@@ -665,63 +697,78 @@ fn execute(env: &mut Env, command: Commands) -> Result<u8, String> {
             program,
             node,
             port,
-        } => match env.backend()? {
-            Backend::OpenOcd => {
-                for (set, option) in [
-                    (program.is_some(), "--program"),
-                    (node.is_some(), "--node"),
-                    (port.is_some(), "--port"),
-                ] {
-                    if set {
-                        return Err(format!("{option} applies to the trace32 backend only"));
+        } => {
+            let backend = env.backend()?;
+            let ui = env.session.as_ref().and_then(|link| link.ui);
+            let input = if output_only {
+                None
+            } else {
+                ui.map(tui::CommandUi::rtt).transpose()?
+            };
+            match backend {
+                Backend::OpenOcd => {
+                    for (set, option) in [
+                        (program.is_some(), "--program"),
+                        (node.is_some(), "--node"),
+                        (port.is_some(), "--port"),
+                    ] {
+                        if set {
+                            return Err(format!("{option} applies to the trace32 backend only"));
+                        }
                     }
+                    let project = trace32(config)?;
+                    let interrupted = env.session.as_ref().map(|link| link.interrupted);
+                    env.with_server(|server| {
+                        inspect::rtt(
+                            config,
+                            &project,
+                            server,
+                            inspect::RttOptions {
+                                symbol,
+                                control_block,
+                                poll,
+                                replay,
+                                output_only,
+                            },
+                            interrupted,
+                            input.as_ref(),
+                        )
+                    })
                 }
-                let project = trace32(config)?;
-                env.with_server(|server| {
-                    inspect::rtt(
-                        config,
-                        &project,
-                        server,
-                        inspect::RttOptions {
-                            symbol,
-                            control_block,
-                            poll,
-                            replay,
-                            output_only,
-                        },
-                    )
-                })
-            }
-            Backend::Trace32 => {
-                let mut args = Vec::new();
-                for (option, value) in [
-                    ("--program", program),
-                    ("--node", node),
-                    ("--port", port.map(|port| port.to_string())),
-                ] {
-                    if let Some(value) = value {
-                        args.extend([option.to_string(), value]);
+                Backend::Trace32 => {
+                    let mut args = Vec::new();
+                    for (option, value) in [
+                        ("--program", program),
+                        ("--node", node),
+                        ("--port", port.map(|port| port.to_string())),
+                    ] {
+                        if let Some(value) = value {
+                            args.extend([option.to_string(), value]);
+                        }
                     }
+                    if let Some(symbol) = symbol {
+                        args.extend(["--symbol".to_string(), symbol]);
+                    }
+                    if let Some(address) = control_block {
+                        args.extend(["--cb".to_string(), format!("0x{address:X}")]);
+                    }
+                    if let Some(poll) = poll {
+                        args.extend(["--poll".to_string(), poll.to_string()]);
+                    }
+                    if replay {
+                        args.push("--replay".into());
+                    }
+                    if output_only {
+                        args.push("--output-only".into());
+                    }
+                    let interrupted = env.session.as_ref().map(|link| link.interrupted);
+                    trace32(config)?
+                        .rtt_with_input(&args, interrupted, input.as_ref())
+                        .map_err(text)?;
+                    Ok(0)
                 }
-                if let Some(symbol) = symbol {
-                    args.extend(["--symbol".to_string(), symbol]);
-                }
-                if let Some(address) = control_block {
-                    args.extend(["--cb".to_string(), format!("0x{address:X}")]);
-                }
-                if let Some(poll) = poll {
-                    args.extend(["--poll".to_string(), poll.to_string()]);
-                }
-                if replay {
-                    args.push("--replay".into());
-                }
-                if output_only {
-                    args.push("--output-only".into());
-                }
-                trace32(config)?.rtt(&args).map_err(text)?;
-                Ok(0)
             }
-        },
+        }
         Commands::Fdx(args) => fdx(env, args),
         Commands::Reset { keep_links } => reset(env, keep_links),
         Commands::Cores => cores(env),
@@ -753,7 +800,11 @@ fn inspect_command(env: &mut Env, command: Commands) -> Result<u8, String> {
                 args.insert(0, "--json".into());
             }
             let code = if env.session.is_some() {
-                let code = env.with_powerview(|session| session.debug(args).map_err(text))?;
+                let interrupted = env.session.as_ref().map(|link| link.interrupted);
+                let cancel = || interrupted.is_some_and(|flag| flag.load(Ordering::SeqCst));
+                let code = env.with_powerview(|session| {
+                    session.debug_cancellable(args, &cancel).map_err(text)
+                })?;
                 if code == 1 {
                     // The error may have been the connection's.
                     env.drop_powerview();
@@ -943,9 +994,11 @@ fn link_targets(config: &Config, symbol: &str) -> Vec<fdx_terminal::Target> {
         .collect()
 }
 
-/// `rvdbg fdx`: the links' addresses, then the terminal on the backend's
-/// memory access.
-fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
+fn fdx_options(
+    config: &Config,
+    args: FdxArgs,
+    json: bool,
+) -> Result<fdx_terminal::Options, String> {
     let FdxArgs {
         guest,
         all,
@@ -956,7 +1009,6 @@ fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
         timeout,
         close,
     } = args;
-    let config = env.config;
     if !(timeout > 0.0 && timeout.is_finite()) {
         return Err("--timeout must be positive".into());
     }
@@ -997,12 +1049,12 @@ fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
             .filter(|peer| peer.address != targets[0].address)
             .collect()
     };
-    let options = fdx_terminal::Options {
+    Ok(fdx_terminal::Options {
         targets,
         send,
         expect,
         timeout: std::time::Duration::from_secs_f64(timeout),
-        json: env.json,
+        json,
         diagnosis: fdx_terminal::Diagnosis {
             peers,
             stops: rustvisor_debug::stop::slots(&config.elf).ok().flatten(),
@@ -1013,7 +1065,13 @@ fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
             },
         },
         history_file: run_dir(config).ok().map(|dir| dir.join("fdx-history")),
-    };
+    })
+}
+
+/// Resolve the links, then run the standalone or scripted FDX command.
+fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
+    let close = args.close;
+    let options = fdx_options(env.config, args, env.json)?;
     // Ctrl-C: the session's flag, else one for this command.
     let own = std::sync::Arc::new(AtomicBool::new(false));
     let interrupted: &AtomicBool = match env.session.as_ref().map(|link| link.interrupted) {
@@ -1053,7 +1111,14 @@ fn reset(env: &mut Env, keep_links: bool) -> Result<u8, String> {
     if code != 0 || keep_links {
         return Ok(code);
     }
-    let targets = link_targets(env.config, &env.config.fdx_symbol);
+    let mut targets = link_targets(env.config, &env.config.fdx_symbol);
+    if let Some(link) = &env.session {
+        for target in link.fdx_targets {
+            if !targets.iter().any(|known| known.address == target.address) {
+                targets.push(target.clone());
+            }
+        }
+    }
     let mut local = fdx_terminal::History::default();
     let history = match env.session.as_mut().and_then(|link| link.history.take()) {
         Some(history) => history,

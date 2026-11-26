@@ -4,6 +4,8 @@
 //! is one (its Tcl port answers), or start their own without resetting the
 //! target.
 
+use probecore::output::{eprintln, println};
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -575,6 +577,8 @@ pub fn rtt(
     project: &Project,
     server: &mut stellarbridge::Server,
     options: RttOptions,
+    interrupted: Option<&std::sync::atomic::AtomicBool>,
+    input: Option<&std::sync::mpsc::Receiver<Vec<u8>>>,
 ) -> Result<u8, String> {
     let openocd = config.openocd()?;
     let Some(memory_ap) = openocd.memory_ap.clone() else {
@@ -605,7 +609,7 @@ pub fn rtt(
             })?,
     };
     let mut memory = ApMemory { server, memory_ap };
-    tracebridge::backend::rtt_terminal(
+    tracebridge::backend::rtt_with_input(
         &mut memory,
         &tracebridge::backend::RttTerminal {
             probe: "StellarLINK",
@@ -615,6 +619,8 @@ pub fn rtt(
             replay: options.replay,
             output_only: options.output_only,
         },
+        interrupted,
+        input,
     )
     .map_err(text)?;
     Ok(0)

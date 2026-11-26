@@ -48,6 +48,8 @@ rvdbg fdx --all
 
 The first command uses the primary ELF, named `el2`. `--guest 0` (or `--guest guest0`) means the first `project.extra_elf` entry, not VMID 0 or hardware core 0. `--all` watches every image's link at once. In interactive mode each input line is one packet, and received packets print one per line. On a terminal the input line has history and Tab completion (the words of the target's reply to `help`), received packets start with `< ` and are printed above the line being typed; through a pipe the lines are the bare packets. The terminal follows a link reopened after target reset.
 
+In `rvdbg --tui`, `fdx` opens a persistent pane. Press F6 to return to the command prompt while it keeps receiving packets. The full transcript stays in terminal scrollback. The pane and debugger commands share the same probe session. The pane pauses during commands such as `run-until` and resumes when the command returns. Commands such as `reset` and `flash` discard packets the pane has yet to write and mark the boundary in the transcript. A normal `reset` also marks the watched links it has verified open as closed, and the pane resumes exchanging packets when firmware reopens them.
+
 With `--all` each packet carries its link's name (`[guest0] < ready`) and the prompt names the link input goes to (`el2> `). `@guest1 run timer` sends one packet to another link, `:to guest1` switches.
 
 Lines that are not packets:

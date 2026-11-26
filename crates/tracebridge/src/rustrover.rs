@@ -8,6 +8,8 @@
 //! and connects to the address and port in it. Launch mode sends a `launch`
 //! request; the proxy turns it into the `attach` t32debugadapter expects.
 
+use probecore::output::println;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

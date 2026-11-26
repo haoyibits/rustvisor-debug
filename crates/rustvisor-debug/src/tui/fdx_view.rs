@@ -346,6 +346,9 @@ fn style_fdx_line(text: &str, theme: Theme) -> Line<'static> {
             Span::styled(payload.to_string(), theme.bold()),
         ]);
     }
+    if text.starts_with("[stop] ") {
+        return Line::styled(text.to_string(), theme.error());
+    }
     if text.contains("waiting for") || text.contains("not sent") || text.contains("not read") {
         return Line::styled(text.to_string(), theme.yellow());
     }

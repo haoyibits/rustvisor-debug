@@ -197,7 +197,24 @@ const EM_ARM: u64 = 40;
 /// The named functions, objects and untyped symbols that are defined in a
 /// section (`.symtab`). Arm mapping symbols (`$a`, `$t`, `$d`) are skipped.
 pub fn symbols(bytes: &[u8]) -> Result<Vec<Symbol>, String> {
+    Ok(parse_symtab(bytes, false)?
+        .into_iter()
+        .map(|(symbol, _)| symbol)
+        .collect())
+}
+
+/// All defined `.symtab` symbols including linker `SHN_ABS` definitions
+/// (`name`, `value`, `is_abs`). Arm mapping symbols (`$a`, `$t`, `$d`) are skipped.
+pub fn named_symbols(bytes: &[u8]) -> Result<Vec<(String, u64, bool)>, String> {
+    Ok(parse_symtab(bytes, true)?
+        .into_iter()
+        .map(|(symbol, is_abs)| (symbol.name, symbol.value, is_abs))
+        .collect())
+}
+
+fn parse_symtab(bytes: &[u8], include_abs: bool) -> Result<Vec<(Symbol, bool)>, String> {
     const SHT_SYMTAB: u64 = 2;
+    const SHN_ABS: u64 = 0xFFF1;
     let (r, wide) = header(bytes)?;
     let machine = r.u16(0x12)?;
     let (shoff, shentsize, shnum) = if wide {
@@ -256,9 +273,10 @@ pub fn symbols(bytes: &[u8]) -> Result<Vec<Symbol>, String> {
                     r.u32(base + 8)?,
                 )
             };
-            // NOTYPE, OBJECT, FUNC; defined (not SHN_UNDEF, not SHN_ABS).
+            // NOTYPE, OBJECT, FUNC; defined (not SHN_UNDEF).
             let kind = info & 0xF;
-            if kind > 2 || shndx == 0 || shndx == 0xFFF1 {
+            let is_abs = shndx == SHN_ABS;
+            if kind > 2 || shndx == 0 || (is_abs && !include_abs) {
                 continue;
             }
             let Some(tail) = strings.get(index(name)?..) else {
@@ -276,13 +294,16 @@ pub fn symbols(bytes: &[u8]) -> Result<Vec<Symbol>, String> {
             } else {
                 value
             };
-            found.push(Symbol {
-                name,
-                value,
-                size: symbol_size,
-                thumb,
-                is_function: function,
-            });
+            found.push((
+                Symbol {
+                    name,
+                    value,
+                    size: symbol_size,
+                    thumb,
+                    is_function: function,
+                },
+                is_abs,
+            ));
         }
     }
     Ok(found)
@@ -577,6 +598,18 @@ mod tests {
         // Past the slack of a symbol without size, and past main's end.
         assert!(table.lookup(0x2800_1100).is_none());
         assert!(table.lookup(0x2800_0140).is_none());
+
+        let all = named_symbols(&bytes).unwrap();
+        assert_eq!(
+            all,
+            [
+                ("main".to_string(), 0x2800_0100, false),
+                ("arm_code".to_string(), 0x2800_0200, false),
+                ("_SEGGER_RTT".to_string(), 0x6000_0000, false),
+                ("__hyp_vectors".to_string(), 0x2800_1000, false),
+                ("absolute".to_string(), 0x10, true),
+            ]
+        );
     }
 
     #[test]

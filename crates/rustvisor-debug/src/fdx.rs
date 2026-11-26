@@ -92,6 +92,99 @@ pub fn parse_image(name: &str, extra: usize) -> std::result::Result<Option<usize
     }
 }
 
+/// Resolve a link/image selector (`el2`, `guest0`, `0`, `0..2`, `0..=2`,
+/// `guest0..guest2`, `all`, `*`, `guests`, or comma-separated `0,2`)
+/// against `names`, preserving first-seen order without duplicates.
+pub fn resolve_targets(spec: &str, names: &[String]) -> std::result::Result<Vec<usize>, String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err("target selector cannot be empty".into());
+    }
+    let mismatch = |bad: &str| -> String {
+        if names.len() == 1 {
+            format!(
+                "only {} is watched; run 'fdx --all' (or press Shift+Tab) to talk to {bad}",
+                names[0]
+            )
+        } else {
+            format!("no link {bad:?}; links: {}", names.join(" "))
+        }
+    };
+    let find_single = |item: &str| -> std::result::Result<usize, String> {
+        if let Some(pos) = names.iter().position(|candidate| candidate == item) {
+            return Ok(pos);
+        }
+        if let Ok(n) = item.parse::<usize>() {
+            let guest = format!("guest{n}");
+            if let Some(pos) = names.iter().position(|candidate| candidate == &guest) {
+                return Ok(pos);
+            }
+        }
+        Err(mismatch(item))
+    };
+    let mut out = Vec::new();
+    let mut push_unique = |idx: usize| {
+        if !out.contains(&idx) {
+            out.push(idx);
+        }
+    };
+    for raw_part in spec.split(',') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            return Err(format!("empty item in target selector {spec:?}"));
+        }
+        match part {
+            "all" | "*" => {
+                if names.is_empty() {
+                    return Err("no links available".into());
+                }
+                for idx in 0..names.len() {
+                    push_unique(idx);
+                }
+            }
+            "guests" => {
+                let mut any = false;
+                for (idx, name) in names.iter().enumerate() {
+                    if name.starts_with("guest") {
+                        push_unique(idx);
+                        any = true;
+                    }
+                }
+                if !any {
+                    return Err(mismatch("guests"));
+                }
+            }
+            _ => {
+                if let Some((raw_start, raw_end)) =
+                    part.split_once("..=").or_else(|| part.split_once(".."))
+                {
+                    let parse_bound = |s: &str| -> std::result::Result<usize, String> {
+                        let s = s.trim();
+                        let num = s.strip_prefix("guest").unwrap_or(s);
+                        num.parse::<usize>().map_err(|_| mismatch(part))
+                    };
+                    let start = parse_bound(raw_start)?;
+                    let end = parse_bound(raw_end)?;
+                    if start > end {
+                        return Err(format!("invalid range {part:?}: start > end"));
+                    }
+                    for n in start..=end {
+                        let guest = format!("guest{n}");
+                        let pos = names
+                            .iter()
+                            .position(|candidate| candidate == &guest)
+                            .ok_or_else(|| mismatch(&guest))?;
+                        push_unique(pos);
+                    }
+                } else {
+                    push_unique(find_single(part)?);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The address of `symbol` in the symbol table of the ELF at `path`.
 pub fn symbol_address(path: &Path, symbol: &str) -> std::result::Result<u64, String> {
     let bytes =
@@ -171,5 +264,25 @@ mod tests {
                 .contains("has 5 image(s)")
         );
         assert!(parse_image("g1", 5).is_err());
+    }
+
+    #[test]
+    fn resolve_targets_supports_short_ranges_and_lists() {
+        let names: Vec<String> = ["el2", "guest0", "guest1", "guest2", "guest3"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(resolve_targets("el2", &names).unwrap(), [0]);
+        assert_eq!(resolve_targets("0", &names).unwrap(), [1]);
+        assert_eq!(resolve_targets("guest2", &names).unwrap(), [3]);
+        assert_eq!(resolve_targets("0..2", &names).unwrap(), [1, 2, 3]);
+        assert_eq!(resolve_targets("guest0..=guest1", &names).unwrap(), [1, 2]);
+        assert_eq!(resolve_targets("0,2,0", &names).unwrap(), [1, 3]);
+        assert_eq!(resolve_targets("guests", &names).unwrap(), [1, 2, 3, 4]);
+        assert_eq!(resolve_targets("all", &names).unwrap(), [0, 1, 2, 3, 4]);
+        assert!(resolve_targets("2..0", &names).is_err());
+        let single = vec!["el2".to_string()];
+        let err = resolve_targets("guest0", &single).unwrap_err();
+        assert!(err.contains("only el2 is watched"), "{err}");
     }
 }

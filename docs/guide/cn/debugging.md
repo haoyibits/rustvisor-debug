@@ -12,7 +12,8 @@
 | `rvdbg attach` | 不复位地连接目标，保留原有运行/停止状态 |
 | `rvdbg halt` | 停下所选核 |
 | `rvdbg go` | 继续所选核；已经在运行的核不动（`already running`） |
-| `rvdbg reset` | 复位芯片并停在复位向量，然后把所有镜像的 FDX 链接标成关闭（`--keep-links` 保留） |
+| `rvdbg reset` | 复位芯片并停在复位向量，然后把所有镜像的 FDX 链接标成关闭（`--keep-links` 保留；`--go` 复位后直接继续运行） |
+| `rvdbg restart` | 快捷连招：`reset --go`（复位、关 FDX 链接并继续运行） |
 | `rvdbg run-until <符号或地址>` | 从停核状态运行到临时硬件断点 |
 | `rvdbg down` | TRACE32：执行 `SYStem.Down` |
 
@@ -101,7 +102,7 @@ fdx --send "lab five inject trace" --expect ready --expect "ok lab"
 fdx --guest 0 --send "run timer" --expect ready --expect "ok timer"
 ```
 
-`images <目录>` 把会话换成一个目录里的镜像（见[项目配置](configuration.md)）。以选项开头的行（例如 `--close`）会被拒绝，并提示正确写法（`fdx --close`）。
+`images <目录|短名|latest>` 把会话换成一个目录里的镜像（见[项目配置](configuration.md)）；在命令模式下也可以直接输入 `@el2 …`、`@0..2 …` 发送 FDX 包。以选项开头的行（例如 `--close`）会被拒绝，并提示正确写法（`fdx --close`）。
 
 StellarLINK 会话保持一个 OpenOCD 供命令与 GDB 共用。TRACE32 的查看命令、`ram` 和 `fdx` 共用首次使用时建立的连接；失败后丢弃，下一条命令重新连接，失败命令不会自动重试。`flash`、`load`、`open` 等另行管理连接。
 

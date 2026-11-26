@@ -29,13 +29,13 @@ asks for, despite t32mcp's advice not to drive the debugger by other means.
 | Load symbols without flashing (TRACE32) | `rvdbg load` |
 | Run state; PC and CPSR when halted | `rvdbg status --json` |
 | Stop / resume the core | `rvdbg halt`, `rvdbg go` |
-| Reset and halt at the reset vector; marks every image's FDX link closed | `rvdbg reset` (`--keep-links` leaves them) |
+| Reset and halt at the reset vector; marks every image's FDX link closed | `rvdbg reset` (`--keep-links` leaves them; `--go` or `rvdbg restart` resumes right after) |
 | Why a core stopped, without halting (stop records, FDX links) | `rvdbg cores --json` |
-| Use the images of a directory (a board-tests case) | `rvdbg --images <dir> <command>`; `rvdbg images` lists them |
+| Use the images of a directory (a board-tests case, short name, or `latest`) | `rvdbg --images <dir\|name\|latest> <command>`; `rvdbg images` lists them |
 | Run a halted core to a symbol or address | `rvdbg run-until <symbol> --json` |
 | AArch32 Hyp fault: vector, HSR decoded, fault addresses | `rvdbg fault --json` |
-| Memory words at an address or symbol | `rvdbg mem <address|symbol> [count] --json` |
-| Many words of ordinary RAM while the cores run (not MMIO) | `rvdbg ram <address|symbol> [count] --json` |
+| Memory words at an address or symbol (`guest0:SYM+0x3c`) | `rvdbg mem <address\|symbol> [count] --json` |
+| Many words of ordinary RAM while the cores run (not MMIO; supports `0..2:MAILBOX+0x3c = GOGO`) | `rvdbg ram <address\|symbol> [count] --json` |
 | A register by PER name or field (TRACE32) | `rvdbg reg <name>... --json` |
 | Target memory against the ELF's loadable content | `rvdbg verify --json` |
 | A check file of expected register values and clocks | `rvdbg check <file> --json` |
@@ -44,8 +44,8 @@ asks for, despite t32mcp's advice not to drive the debugger by other means.
 | The project's PRACTICE script, waiting for its end (TRACE32) | `rvdbg do <script>` |
 | Target output over SEGGER RTT | `timeout 10 rvdbg rtt --output-only` |
 | Send packets over the image's FDX link and wait for the answers | `rvdbg fdx --send <packet> --expect <answer> --json` (`--guest <n>` or `--guest guest<n>` for an extra image; a link that does not open says why) |
-| Software trace records: drain them, IPC latency per direction | `rvdbg swtrace --json` (`--guest <n>`, `--csv <file>`, `--html <file>` timeline page) |
-| Draw a saved trace again, no probe | `rvdbg swtrace --from <csv> --html <file>` (`[swtrace] map` or `--map C0C0=VM1 --map guest0=VM1:C0C0`) |
+| Software trace records: drain them, IPC latency per direction | `rvdbg swtrace --json` (`--guest <name\|n\|range>`, `--csv <file>`, `--html [file]`, `--open`; auto-backs up to `.rvdbg/swtrace/latest.csv`) |
+| Draw a saved trace again, no probe | `rvdbg swtrace --from <csv\|latest> --html [file]` (`[swtrace] map` or `--map C0C0=VM1 --map guest0=VM1:C0C0`) |
 
 With TRACE32, generic interactive debugging (single steps, breakpoints,
 source, locals, stack, any PRACTICE command) goes through t32mcp and the
@@ -57,14 +57,14 @@ runs OpenOCD's GDB server for GDB or VS Code.
 - Run rvdbg inside the project. Put `--json` after the command's arguments.
 - Always run one command per call (`rvdbg status --json`). Bare `rvdbg`
   starts an interactive session for the user; do not start it yourself.
-- Ask the user before `flash`, `load`, `reset`, `halt`, `go`, `run-until`,
+- Ask the user before `flash`, `load`, `reset`, `restart`, `halt`, `go`, `run-until`,
   `attach`, `down`, `do`, `cmd`, `check --halt`, and anything with
   `--write-otp`. `flash` resets the target and erases flash; it can take
   minutes, so raise the shell timeout. Never pass `--write-otp` on your own:
   it changes one-time-programmable flash permanently.
-- Read-only: `config`, `status`, `fault`, `mem`, `ram` without `--write`,
+- Read-only: `config`, `status`, `fault`, `mem`, `ram` without `--write`/`=`,
   `reg`, `verify`, `check` without `--halt`, `clock`, `trace`. Ask before
-  `ram --write` and `fdx --close` (`--all`).
+  `ram --write` / `ram ... = ...` and `fdx --close` (`--all`).
 - Exit codes: 0 ok, 1 error, 2 usage error, 3 a check failed, `verify`
   found differences, or `run-until` stopped elsewhere.
 - Commands marked TRACE32 above fail with StellarLINK; say so instead of

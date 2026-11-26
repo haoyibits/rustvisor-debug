@@ -127,15 +127,15 @@ Day to day:
 | `cores` | each core's stop record (`RUSTVISOR_STOP_RECORDS`) and each image's FDX link, while the cores run | through `AD:` | through the MEM-AP |
 | `images` | the images, where they come from, their FDX link and whether it is open | yes | yes |
 | `fault` | AArch32 Hyp fault report | also `--trace [N]` | the same report; the core must be halted in Hyp mode |
-| `mem <addr\|symbol> [n]` | 32-bit words | yes | through the MEM-AP, symbols from the ELF |
-| `ram <addr\|symbol> [n]`, `ram … --write v…` | ordinary RAM in bulk while the cores run (never MMIO) | through `AD:` | through the MEM-AP |
+| `mem <addr\|symbol> [n]` | 32-bit words (supports `<image>:symbol+offset`) | yes | through the MEM-AP, symbols from the ELF |
+| `ram <addr\|symbol> [n]`, `ram … = v…` / `--write v…` | ordinary RAM in bulk while the cores run (never MMIO); accepts `<image_spec>:symbol+offset`, 4-char ASCII tags (`GOGO`/`DONE`), and shows ASCII beside words | through `AD:` | through the MEM-AP |
 | `verify [ELF]` | target memory against the images | also `--t32` | through the MEM-AP |
 | `check FILE` | a check file of expected values | every read kind | `addr`, `core` and `clock` reads |
 | `clock` | the clock tree with frequencies | also `--html` | yes |
 | `rtt` | SEGGER RTT terminal on channel 0 | yes | through the MEM-AP while the core runs |
 | `fdx` | the image's FDX link: one line per packet, `--send`/`--expect`, or `--close`; `--all` for every image's link in one terminal | through `AD:` while the cores run | through the MEM-AP while the core runs |
-| `swtrace` | software trace records (`RUSTVISOR_TRACE`): drain, pair IPC sends with receives, latency per direction, `--csv`, `--html` timeline; `--from` a CSV without a probe | through `AD:` while the cores run | through the MEM-AP while the core runs |
-| `reset` | reset and halt at the reset vector; closes every image's FDX link (`--keep-links` leaves them) | yes | `reset halt` |
+| `swtrace` | software trace records (`RUSTVISOR_TRACE`): drain, pair IPC sends with receives, latency per direction, auto-backup to `.rvdbg/swtrace/latest.csv`, `--csv`, `--html [FILE]`, `--open`; `--from [CSV\|latest]` without a probe | through `AD:` while the cores run | through the MEM-AP while the core runs |
+| `reset`, `restart` | reset and halt at the reset vector, closing every image's FDX link (`--keep-links` leaves them); `reset --go` / `restart` also resumes immediately | yes | `reset halt` |
 | `attach` | connect without resetting | `SYStem.Mode Attach` | yes |
 | `run-until <symbol\|addr>` | run a halted core to a symbol or address | on-chip breakpoint | hardware breakpoint |
 | `open`, `chips`, `reg`, `eval`, `cmd`, `watch`, `trace`, `do`, `down` | PowerView, flash scripts, PER files, PRACTICE, trace | yes | — |
@@ -208,10 +208,10 @@ rvdbg [openocd halted]> quit
 
 Running bare `rvdbg` on an interactive terminal starts the fullscreen TUI by default (use `rvdbg --inline` for inline scrollback mode, or press `Alt+F` / run `/inline` and `/fullscreen` to switch at any time).
 
-- Type commands directly with inline ghost hints and `Tab` completion (commands, `--flags`, ELF symbols for `mem`/`ram`/`run-until`, and local paths), or type `/` to open the fuzzy command and picker menu (`/images`, `/backend`, `/fdx`, `/copy`, `/clear`, `/mouse`). Zero-argument slash commands run on a single `Enter`.
+- Type commands directly with inline ghost hints and `Tab` completion (commands, `--flags`, `@target` FDX links, `[image:]symbol` for `mem`/`ram`/`run-until` including linker `SHN_ABS` symbols, and image directories, even on later lines of a multiline draft), or type `/` to open the fuzzy command and picker menu (`/images`, `/backend`, `/fdx`, `/copy`, `/clear`, `/mouse`). Zero-argument slash commands run on a single `Enter`.
 - Multiline paste and `Ctrl+J` / `Shift+Enter` grow the composer automatically; `Ctrl+R` searches `.rvdbg/history`; `Ctrl+C` clears the draft or interrupts a running command; press `Ctrl+D` twice on an empty line (or run `quit`) to exit.
 - `rtt` opens the bidirectional RTT console (`Ctrl+C` returns to the command composer).
-- `fdx` / `fdx --all` opens a persistent FDX monitor (right-hand split pane on wide fullscreen terminals, or a collapsible preview bar toggled with `Ctrl+O`). Press `Shift+Tab` (or `F6`) to switch composer input between `rvdbg` commands and FDX packets; prefix a line with `!` in FDX mode to run a one-off debugger command without leaving FDX. The pane pauses during `run-until`, discards queued packets and closes open links on `reset`, and resumes automatically when firmware reopens them.
+- Send FDX packets directly from command mode via `@el2 …`, `@0 …`, `@0..2 …`, or `@3,4 …` (which auto-opens the persistent FDX monitor without stealing command focus), or open/focus it explicitly with `fdx` / `fdx --all` / `Shift+Tab` (`F6`). The monitor sits in a right-hand split pane on wide fullscreen terminals or a collapsible preview bar (`Ctrl+O`), polls `RUSTVISOR_STOP_RECORDS` for live `[stop]` alerts, guards against accidentally typing `rvdbg` commands as bare packets (`:send` sends literally; `!cmd` runs a one-off command), pauses during `run-until`, discards queued packets and closes open links on `reset`/`restart`, and resumes when firmware reopens them.
 - In non-TTY pipes, `rvdbg --json`, or `TERM=dumb`, `rvdbg` runs the plain line-by-line stream session.
 
 ## Configuration
@@ -376,11 +376,14 @@ EXTRA_ELF= rvdbg flash      # only elf; with TRACE32 the other images' sectors a
 
 `--images DIR` takes the images from a build directory instead of
 `rvdbg.toml`: `hypervisor` (or the only other ELF in it) as `elf`, then
-`guest0.elf`, `guest1.elf`, … in order as `extra_elf`. `rvdbg images` lists
-what a command would use and where it comes from.
+`guest0.elf`, `guest1.elf`, … in order as `extra_elf`. `DIR` can also be a
+short name discovered under `target/board-tests/` (like `inject-five`) or
+`latest` for the newest build. `rvdbg images` lists what a command would use
+and where it comes from.
 
 ```sh
-rvdbg --images target/board-tests/latency/<run>/00-inject-five flash
+rvdbg --images inject-five flash
+rvdbg --images latest
 ```
 
 ## Debugging from an IDE or GDB
@@ -525,10 +528,12 @@ format, `rustvisor-timeline/3`, is in [docs/timeline-format.md](docs/timeline-fo
 
 ```sh
 rvdbg swtrace --json
-rvdbg swtrace --guest 0 --guest 1 --csv trace.csv
-rvdbg swtrace --csv run.csv --html run.html
-rvdbg swtrace --from run.csv --html run.html --map C0C0=VM1 --map guest0=VM1:C0C0
+rvdbg swtrace --guest guest0 --guest 1 --csv trace.csv
+rvdbg swtrace --html --open
+rvdbg swtrace --from latest --open --map C0C0=VM1 --map guest0=VM1:C0C0
 ```
+
+Board drains with records automatically back up raw CSV to `.rvdbg/swtrace/latest.csv` (unless `--csv` is given), so `rvdbg swtrace --from latest` can always redraw later. `--html` defaults to `.rvdbg/swtrace/latest.html` when omitted, and `--open` launches the system browser.
 
 ## Inspecting the target
 

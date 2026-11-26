@@ -217,6 +217,15 @@ enum Commands {
         /// Leave the FDX links as they are (RAM keeps the last run's open links)
         #[arg(long)]
         keep_links: bool,
+        /// Start running immediately after resetting and closing links (same as `restart`)
+        #[arg(long)]
+        go: bool,
+    },
+    /// Reset the chip, close FDX links, and start running (shortcut for `reset --go`)
+    Restart {
+        /// Leave the FDX links as they are (RAM keeps the last run's open links)
+        #[arg(long)]
+        keep_links: bool,
     },
     /// The hypervisor's stop records and the images' FDX links, read while the cores run
     Cores,
@@ -310,12 +319,12 @@ enum Commands {
     Swtrace(SwtraceArgs),
     /// Words of ordinary RAM in bulk while the cores run (TRACE32 AD:, the OpenOCD MEM-AP); never MMIO or coprocessor registers, use mem for those
     Ram {
-        /// An address, or a symbol of the images
+        /// An address, `[image:]symbol[+offset]` (`0..2:MAILBOX+0x3c`), or `location=value`
         #[arg(value_name = "ADDRESS|SYMBOL")]
         location: String,
-        /// Number of 32-bit words to read
-        #[arg(default_value_t = 1, conflicts_with = "write")]
-        count: u32,
+        /// Number of 32-bit words to read (default 1), or `= VALUE...` to write
+        #[arg(value_name = "COUNT|= VALUE", num_args = 0..)]
+        args: Vec<String>,
         /// Write these 32-bit words from the address on, one access each, instead of reading
         #[arg(long, value_name = "VALUE", num_args = 1.., value_parser = parse_word)]
         write: Vec<u32>,
@@ -362,19 +371,22 @@ impl FdxArgs {
 
 #[derive(Debug, clap::Args)]
 struct SwtraceArgs {
-    /// Only the n-th extra image (project.extra_elf, from 0); repeat for several (default: the ELF and every extra image that has the symbol)
-    #[arg(long, value_name = "N")]
-    guest: Vec<usize>,
+    /// Only these images: el2, guest<n>, <n>, or a range like 0..2; repeat for several (default: every image that has the symbol)
+    #[arg(long, value_name = "NAME|N")]
+    guest: Vec<String>,
     /// Channel symbol; SYMBOL_<suffix> are channels too (default: RUSTVISOR_TRACE)
     #[arg(long)]
     symbol: Option<String>,
     /// Also write every record, merged by time, to FILE as CSV
     #[arg(long, value_name = "FILE", conflicts_with = "from")]
     csv: Option<PathBuf>,
-    /// Also draw the records as a VM state timeline page in FILE (self-contained HTML)
-    #[arg(long, value_name = "FILE")]
+    /// Also draw the records as a VM state timeline page in FILE (self-contained HTML; defaults to .rvdbg/swtrace/latest.html)
+    #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "latest")]
     html: Option<PathBuf>,
-    /// Read the records from a CSV that --csv wrote instead of the board (no probe needed)
+    /// Generate the HTML timeline and open it in the default browser
+    #[arg(long)]
+    open: bool,
+    /// Read the records from a CSV that --csv wrote (or 'latest' for the last board backup) instead of the board (no probe needed)
     #[arg(long, value_name = "CSV", conflicts_with = "guest")]
     from: Option<PathBuf>,
     /// For --html: KEY=VM[:CORE], the VM a core's EL2 channel is (C0C0=VM1) and the VM and core of an image's channel (guest0=VM1:C0C0); repeatable, over swtrace.map
@@ -503,11 +515,13 @@ fn run(cli: Cli) -> Result<u8, String> {
     let path = config::find(cli.config.as_deref(), &cwd)?;
     let mut config = config::load(&path)?;
     if let Some(dir) = &cli.images {
-        config = config.with_images(&cwd.join(dir))?;
+        let resolved = config::resolve_images_dir(dir, &cwd, &config.root)?;
+        config = config.with_images(&resolved)?;
     }
     let mut env = Env {
         config: &config,
         flag,
+        selected: std::cell::Cell::new(None),
         json: cli.json,
         session: None,
     };
@@ -525,6 +539,7 @@ fn install_skill(dir: Option<&Path>) -> Result<u8, String> {
 pub struct Env<'a> {
     pub config: &'a Config,
     pub flag: Option<Backend>,
+    pub selected: std::cell::Cell<Option<Backend>>,
     pub json: bool,
     pub session: Option<SessionLink<'a>>,
 }
@@ -551,7 +566,14 @@ impl Env<'_> {
     fn backend(&self) -> Result<Backend, String> {
         match &self.session {
             Some(link) => Ok(link.backend),
-            None => select(self.config, self.flag),
+            None => {
+                if let Some(backend) = self.selected.get() {
+                    return Ok(backend);
+                }
+                let backend = select(self.config, self.flag)?;
+                self.selected.set(Some(backend));
+                Ok(backend)
+            }
         }
     }
 
@@ -824,15 +846,20 @@ fn execute(env: &mut Env, command: Commands) -> Result<u8, String> {
             }
         }
         Commands::Fdx(args) => fdx(env, args),
-        Commands::Reset { keep_links } => reset(env, keep_links),
+        Commands::Reset { keep_links, go } => reset(env, keep_links, go),
+        Commands::Restart { keep_links } => reset(env, keep_links, true),
         Commands::Cores => cores(env),
         Commands::Images => images(env),
         Commands::Swtrace(args) => swtrace(env, args),
         Commands::Ram {
             location,
-            count,
+            args,
             write,
-        } => ram(env, location, count, write),
+        } => ram(env, location, args, write),
+        Commands::Mem { location, count } => {
+            let location = resolve_mem_location(env.config, location)?;
+            inspect_command(env, Commands::Mem { location, count })
+        }
         command => inspect_command(env, command),
     }
 }
@@ -897,7 +924,9 @@ fn plan(
         Commands::Halt => (Ok(inspect::Request::Halt), vec!["break".into()]),
         Commands::Go => (Ok(inspect::Request::Go), vec!["go".into()]),
         Commands::Attach => (Ok(inspect::Request::Attach), vec!["attach".into()]),
-        Commands::Reset { .. } => (Ok(inspect::Request::Reset), vec!["reset".into()]),
+        Commands::Reset { .. } | Commands::Restart { .. } => {
+            (Ok(inspect::Request::Reset), vec!["reset".into()])
+        }
         Commands::Down => (Err(trace32_only("down")), vec!["down".into()]),
         Commands::Fault { trace } => {
             let mut args = vec!["fault".to_string()];
@@ -1030,7 +1059,7 @@ fn trace32_only(what: &str) -> String {
 
 /// Every image's FDX link: the images with `symbol`, as `el2`, `guest0`, …
 /// An image that is missing or has no such symbol has no link.
-fn link_targets(config: &Config, symbol: &str) -> Vec<fdx_terminal::Target> {
+pub(crate) fn link_targets(config: &Config, symbol: &str) -> Vec<fdx_terminal::Target> {
     std::iter::once(None)
         .chain((0..config.extra_elf.len()).map(Some))
         .filter_map(|extra| {
@@ -1157,71 +1186,115 @@ fn fdx(env: &mut Env, args: FdxArgs) -> Result<u8, String> {
     })
 }
 
-/// `rvdbg reset`: the reset, then every image's FDX link marked closed while
-/// the chip is held, so that `fdx` waits for this run's links. Said on
-/// stderr, so that `--json` still prints one value.
-fn reset(env: &mut Env, keep_links: bool) -> Result<u8, String> {
-    let code = inspect_command(env, Commands::Reset { keep_links })?;
-    if code != 0 || keep_links {
-        return Ok(code);
-    }
-    let mut targets = link_targets(env.config, &env.config.fdx_symbol);
-    if let Some(link) = &env.session {
-        for target in link.fdx_targets {
-            if !targets.iter().any(|known| known.address == target.address) {
-                targets.push(target.clone());
-            }
-        }
-    }
-    let mut local = fdx_terminal::History::default();
-    let history = match env.session.as_mut().and_then(|link| link.history.take()) {
-        Some(history) => history,
-        None => &mut local,
+/// `rvdbg reset` (and `rvdbg restart` / `reset --go`): reset, mark every
+/// image's FDX link closed while the chip is held, and optionally `go`.
+fn reset(env: &mut Env, keep_links: bool, go: bool) -> Result<u8, String> {
+    let code = if go && env.json {
+        // Keep `--json` strictly one JSON document per command.
+        probecore::output::with_sink(
+            |line| {
+                if let probecore::output::Line::Error(error) = line {
+                    std::eprintln!("{error}");
+                }
+            },
+            || {
+                let mut quiet = Env {
+                    config: env.config,
+                    flag: env.flag,
+                    selected: std::cell::Cell::new(env.selected.get()),
+                    json: false,
+                    session: env.session.as_mut().map(|link| SessionLink {
+                        backend: link.backend,
+                        server: link.server.as_deref_mut(),
+                        interrupted: link.interrupted,
+                        powerview: link.powerview.as_deref_mut(),
+                        history: link.history.as_deref_mut(),
+                        ui: link.ui,
+                        fdx_targets: link.fdx_targets,
+                    }),
+                };
+                inspect_command(
+                    &mut quiet,
+                    Commands::Reset {
+                        keep_links,
+                        go: false,
+                    },
+                )
+            },
+        )?
+    } else {
+        inspect_command(
+            env,
+            Commands::Reset {
+                keep_links,
+                go: false,
+            },
+        )?
     };
-    history.clear();
-    if targets.is_empty() {
+    if code != 0 {
         return Ok(code);
     }
-    let style = Style::stderr();
-    // Each link on its own: RAM a Guest has not set up since power-on may
-    // refuse the write (bus error) while the chip is held.
-    let outcome = env.with_ram(|mut memory, _| {
-        Ok(targets
-            .iter()
-            .map(|target| {
-                rustvisor_debug::fdx::Link::close(&mut memory, target.address)
-                    .map_err(|error| error.to_string())
-            })
-            .collect::<Vec<_>>())
-    });
-    match outcome {
-        Ok(results) => {
-            let mut closed = Vec::new();
-            let mut failed = Vec::new();
-            for (target, result) in targets.iter().zip(&results) {
-                match result {
-                    Ok(()) => closed.push(target.name.as_str()),
-                    Err(error) => failed.push(format!("{} ({error})", target.name)),
+    if !keep_links {
+        let mut targets = link_targets(env.config, &env.config.fdx_symbol);
+        if let Some(link) = &env.session {
+            for target in link.fdx_targets {
+                if !targets.iter().any(|known| known.address == target.address) {
+                    targets.push(target.clone());
                 }
             }
-            let mut line = format!(
-                "{} closed {} FDX link(s): {}",
-                style.label("[rvdbg]"),
-                closed.len(),
-                closed.join(" ")
-            );
-            if !failed.is_empty() {
-                line.push_str(&format!(
-                    "; not closed: {} (RAM its image has not set up since power-on)",
-                    failed.join(", ")
-                ));
-            }
-            eprintln!("{line}");
         }
-        Err(error) => eprintln!(
-            "{} FDX links not closed ({error}); 'fdx --close --all' tries again",
-            style.warn("[rvdbg]")
-        ),
+        let mut local = fdx_terminal::History::default();
+        let history = match env.session.as_mut().and_then(|link| link.history.take()) {
+            Some(history) => history,
+            None => &mut local,
+        };
+        history.clear();
+        if !targets.is_empty() {
+            let style = Style::stderr();
+            // Each link on its own: RAM a Guest has not set up since power-on may
+            // refuse the write (bus error) while the chip is held.
+            let outcome = env.with_ram(|mut memory, _| {
+                Ok(targets
+                    .iter()
+                    .map(|target| {
+                        rustvisor_debug::fdx::Link::close(&mut memory, target.address)
+                            .map_err(|error| error.to_string())
+                    })
+                    .collect::<Vec<_>>())
+            });
+            match outcome {
+                Ok(results) => {
+                    let mut closed = Vec::new();
+                    let mut failed = Vec::new();
+                    for (target, result) in targets.iter().zip(&results) {
+                        match result {
+                            Ok(()) => closed.push(target.name.as_str()),
+                            Err(error) => failed.push(format!("{} ({error})", target.name)),
+                        }
+                    }
+                    let mut line = format!(
+                        "{} closed {} FDX link(s): {}",
+                        style.label("[rvdbg]"),
+                        closed.len(),
+                        closed.join(" ")
+                    );
+                    if !failed.is_empty() {
+                        line.push_str(&format!(
+                            "; not closed: {} (RAM its image has not set up since power-on)",
+                            failed.join(", ")
+                        ));
+                    }
+                    eprintln!("{line}");
+                }
+                Err(error) => eprintln!(
+                    "{} FDX links not closed ({error}); 'fdx --close --all' tries again",
+                    style.warn("[rvdbg]")
+                ),
+            }
+        }
+    }
+    if go {
+        return inspect_command(env, Commands::Go);
     }
     Ok(code)
 }
@@ -1409,21 +1482,29 @@ fn swtrace(env: &mut Env, args: SwtraceArgs) -> Result<u8, String> {
     let symbol = args.symbol.unwrap_or_else(|| swtrace::SYMBOL.to_string());
     let explicit = !args.guest.is_empty();
     let images: Vec<(String, PathBuf)> = if explicit {
-        args.guest
-            .iter()
-            .map(|&n| {
-                config
-                    .extra_elf
-                    .get(n)
-                    .map(|path| (format!("guest{n}"), path.clone()))
-                    .ok_or_else(|| {
-                        format!(
-                            "--guest {n}: project.extra_elf has {} image(s)",
-                            config.extra_elf.len()
-                        )
-                    })
+        let mut all_names = vec!["el2".to_string()];
+        all_names.extend((0..config.extra_elf.len()).map(|n| format!("guest{n}")));
+        let mut chosen_indices = Vec::new();
+        for spec in &args.guest {
+            let resolved = rustvisor_debug::fdx::resolve_targets(spec, &all_names)
+                .map_err(|error| format!("--guest {error}"))?;
+            for idx in resolved {
+                if !chosen_indices.contains(&idx) {
+                    chosen_indices.push(idx);
+                }
+            }
+        }
+        chosen_indices
+            .into_iter()
+            .map(|idx| {
+                if idx == 0 {
+                    ("elf".to_string(), config.elf.clone())
+                } else {
+                    let n = idx - 1;
+                    (format!("guest{n}"), config.extra_elf[n].clone())
+                }
             })
-            .collect::<Result<_, _>>()?
+            .collect()
     } else {
         std::iter::once(("elf".to_string(), config.elf.clone()))
             .chain(
@@ -1468,34 +1549,101 @@ fn swtrace(env: &mut Env, args: SwtraceArgs) -> Result<u8, String> {
             });
         }
         let (mut text, mut json) = swtrace::report(&found, &symbol);
+        let has_records = found.iter().any(|f| !f.drained.records.is_empty());
         if let Some(path) = &args.csv {
-            let names: Vec<String> = found.iter().map(|f| f.label(&symbol)).collect();
-            let records: Vec<_> = found
-                .iter()
-                .enumerate()
-                .flat_map(|(i, f)| f.drained.records.iter().map(move |&r| (i, r)))
-                .collect();
-            std::fs::write(path, swtrace::csv(&records, &names))
-                .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+            write_swtrace_csv(path, &found, &symbol)?;
             text.push_str(&format!("\nrecords written to {}", path.display()));
             json["csv"] = serde_json::Value::String(path.display().to_string());
+        } else if has_records && let Ok(dir) = run_dir(config) {
+            let backup_dir = dir.join("swtrace");
+            let backup_path = backup_dir.join("latest.csv");
+            if std::fs::create_dir_all(&backup_dir).is_ok()
+                && write_swtrace_csv(&backup_path, &found, &symbol).is_ok()
+            {
+                text.push_str(&format!(
+                    "\nsaved backup to {} ('swtrace --from latest' redraws)",
+                    backup_path.display()
+                ));
+                json["saved_csv"] = serde_json::Value::String(backup_path.display().to_string());
+            }
         }
         // The records are consumed: a page that cannot be drawn must not
         // lose the report (or the CSV written above).
         let mut code = 0;
-        if let Some(path) = &args.html {
+        if let Some(html_path) = resolve_swtrace_html(Some(config), args.html.as_deref(), args.open)
+        {
             let source = format!("{} channel(s) read from the board", found.len());
             if let Err(error) = swtrace_html(
-                &found, &symbol, &map, path, "swtrace", &source, &mut text, &mut json,
+                &found, &symbol, &map, &html_path, "swtrace", &source, &mut text, &mut json,
             ) {
                 text.push_str(&format!("\ntimeline not written: {error}"));
                 json["html_error"] = serde_json::Value::String(error);
                 code = 1;
+            } else if args.open {
+                open_in_browser(&html_path, &mut text);
             }
         }
         Ok(inspect::Outcome { text, json, code })
     });
     inspect::emit("swtrace", json, result)
+}
+
+fn write_swtrace_csv(
+    path: &Path,
+    found: &[rustvisor_debug::swtrace::Found],
+    symbol: &str,
+) -> Result<(), String> {
+    let names: Vec<String> = found.iter().map(|f| f.label(symbol)).collect();
+    let records: Vec<_> = found
+        .iter()
+        .enumerate()
+        .flat_map(|(i, f)| f.drained.records.iter().map(move |&r| (i, r)))
+        .collect();
+    std::fs::write(path, rustvisor_debug::swtrace::csv(&records, &names))
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))
+}
+
+fn resolve_swtrace_html(
+    config: Option<&config::Config>,
+    explicit: Option<&Path>,
+    open: bool,
+) -> Option<PathBuf> {
+    if explicit.is_none() && !open {
+        return None;
+    }
+    match explicit {
+        Some(path) if path != Path::new("latest") && !path.as_os_str().is_empty() => {
+            Some(path.to_path_buf())
+        }
+        _ => match config {
+            Some(c) => {
+                let dir = c.run_dir().join("swtrace");
+                let _ = std::fs::create_dir_all(&dir);
+                Some(dir.join("latest.html"))
+            }
+            None => Some(PathBuf::from("swtrace.html")),
+        },
+    }
+}
+
+fn open_in_browser(path: &Path, text: &mut String) {
+    if std::env::var_os("RVDBG_NO_BROWSER").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    let launcher = "open";
+    #[cfg(not(target_os = "macos"))]
+    let launcher = "xdg-open";
+    match std::process::Command::new(launcher)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => text.push_str(&format!("\nopened {} with {launcher}", path.display())),
+        Err(error) => text.push_str(&format!("\ncannot open browser with {launcher}: {error}")),
+    }
 }
 
 /// `rvdbg swtrace --from`: the report (and `--html`) of records a
@@ -1506,11 +1654,19 @@ fn swtrace_from(
     args: SwtraceArgs,
 ) -> Result<u8, String> {
     use rustvisor_debug::swtrace;
-    let path = args.from.as_ref().expect("--from");
+    let raw_path = args.from.as_ref().expect("--from");
+    let path = if raw_path == Path::new("latest") && !raw_path.is_file() {
+        let Some(c) = config else {
+            return Err("cannot find 'latest': pass a CSV path or run inside a project".into());
+        };
+        c.run_dir().join("swtrace/latest.csv")
+    } else {
+        raw_path.clone()
+    };
     let symbol = args.symbol.unwrap_or_else(|| swtrace::SYMBOL.to_string());
     let map = swtrace_map(config, &args.map)?;
     let result = (|| {
-        let text = std::fs::read_to_string(path)
+        let text = std::fs::read_to_string(&path)
             .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
         let found = swtrace::from_csv(&text, &symbol)
             .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -1520,7 +1676,7 @@ fn swtrace_from(
             path.display()
         );
         json["from"] = serde_json::Value::String(path.display().to_string());
-        if let Some(html) = &args.html {
+        if let Some(html_path) = resolve_swtrace_html(config, args.html.as_deref(), args.open) {
             let name = path
                 .file_stem()
                 .map_or("swtrace".into(), |stem| stem.to_string_lossy().into_owned());
@@ -1528,8 +1684,11 @@ fn swtrace_from(
                 .file_name()
                 .map_or(String::new(), |name| name.to_string_lossy().into_owned());
             swtrace_html(
-                &found, &symbol, &map, html, &name, &source, &mut text, &mut json,
+                &found, &symbol, &map, &html_path, &name, &source, &mut text, &mut json,
             )?;
+            if args.open {
+                open_in_browser(&html_path, &mut text);
+            }
         }
         Ok(inspect::Outcome {
             text,
@@ -1582,80 +1741,395 @@ fn swtrace_html(
     Ok(())
 }
 
+fn configured_images(config: &Config) -> Vec<(String, &Path)> {
+    std::iter::once(("el2".to_string(), config.elf.as_path()))
+        .chain(
+            config
+                .extra_elf
+                .iter()
+                .enumerate()
+                .map(|(n, path)| (format!("guest{n}"), path.as_path())),
+        )
+        .collect()
+}
+
+fn parse_symbol_offset(expr: &str) -> Result<(&str, u64), String> {
+    match expr.split_once('+') {
+        Some((sym, off)) => {
+            let sym = sym.trim();
+            if sym.is_empty() {
+                return Err(format!("missing symbol before '+' in {expr:?}"));
+            }
+            let offset = probecore::text::parse_int_auto(off.trim())
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or_else(|| format!("invalid offset in {expr:?}"))?;
+            Ok((sym, offset))
+        }
+        None => Ok((expr.trim(), 0)),
+    }
+}
+
+fn find_named_symbol(path: &Path, symbol: &str) -> Result<Option<(u64, bool)>, String> {
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let list = probecore::elf::named_symbols(&bytes)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(list
+        .into_iter()
+        .find(|(name, _, _)| name == symbol)
+        .map(|(_, value, is_abs)| (value, is_abs)))
+}
+
+fn resolve_mem_location(config: &Config, location: String) -> Result<String, String> {
+    if probecore::target::TargetAddress::parse(&location).is_some() {
+        return Ok(location);
+    }
+    if let Some(addr) = probecore::text::parse_int_auto(&location) {
+        return Ok(format!("AD:0x{addr:08X}"));
+    }
+    if location.contains(':') {
+        let targets = resolve_ram_targets(config, &location)?;
+        if targets.len() != 1 {
+            return Err(format!(
+                "{location} matches multiple images; use a single image for 'mem', or use 'ram' \
+                 for multi-image reads"
+            ));
+        }
+        return Ok(format!("AD:0x{:08X}", targets[0].1));
+    }
+    // Let normal ELF symbols keep their name for TRACE32/OpenOCD display,
+    // while resolving `SHN_ABS` symbols (which TRACE32/OpenOCD's section table omits).
+    let (sym, offset) = parse_symbol_offset(&location)?;
+    for (_, path) in configured_images(config) {
+        if let Ok(Some((base, is_abs))) = find_named_symbol(path, sym)
+            && is_abs
+        {
+            return Ok(format!("AD:0x{:08X}", base + offset));
+        }
+    }
+    Ok(location)
+}
+
+/// Resolve an address, `[image:]symbol[+offset]`, or multi-image selector (`0..2:MAILBOX+0x3c`)
+/// into `(optional label, physical address)` pairs.
+fn resolve_ram_targets(config: &Config, spec: &str) -> Result<Vec<(Option<String>, u64)>, String> {
+    if let Some(address) = probecore::target::TargetAddress::parse(spec) {
+        if address.is_coprocessor() {
+            return Err(format!(
+                "{spec} is a coprocessor register; use 'mem {spec}' instead of 'ram'"
+            ));
+        }
+        return Ok(vec![(None, address.value)]);
+    }
+    if let Some(address) =
+        probecore::text::parse_int_auto(spec).and_then(|value| u64::try_from(value).ok())
+    {
+        return Ok(vec![(None, address)]);
+    }
+    let images = configured_images(config);
+    if let Some((scope, expr)) = spec.split_once(':') {
+        let names: Vec<String> = images.iter().map(|(name, _)| name.clone()).collect();
+        let indices = rustvisor_debug::fdx::resolve_targets(scope, &names)?;
+        let (sym, offset) = parse_symbol_offset(expr)?;
+        if sym.is_empty() {
+            return Err(format!("missing symbol after ':' in {spec:?}"));
+        }
+        let mut out = Vec::with_capacity(indices.len());
+        for idx in indices {
+            let (image_name, path) = &images[idx];
+            let (base, _) = find_named_symbol(path, sym)?
+                .ok_or_else(|| format!("{sym} is not in the symbol table of {}", path.display()))?;
+            let label = if offset == 0 {
+                format!("{image_name}:{sym}")
+            } else {
+                format!("{image_name}:{sym}+0x{offset:X}")
+            };
+            out.push((Some(label), base + offset));
+        }
+        return Ok(out);
+    }
+    let (sym, offset) = parse_symbol_offset(spec)?;
+    if sym.is_empty() {
+        return Err("location cannot be empty".into());
+    }
+    let mut matches = Vec::new();
+    for (image_name, path) in images {
+        if let Ok(Some((base, _))) = find_named_symbol(path, sym) {
+            matches.push((image_name, base + offset));
+        }
+    }
+    if matches.is_empty() {
+        return Err(format!(
+            "{spec} is neither an address nor a symbol of the images"
+        ));
+    }
+    let mut distinct = Vec::new();
+    for (_, addr) in &matches {
+        if !distinct.contains(addr) {
+            distinct.push(*addr);
+        }
+    }
+    if distinct.len() > 1 {
+        let list: Vec<String> = matches
+            .iter()
+            .map(|(name, addr)| format!("{name}: 0x{addr:08X}"))
+            .collect();
+        return Err(format!(
+            "{sym} has different addresses across images ({}); qualify it as guest0:{spec} or \
+             0..2:{spec}",
+            list.join(", ")
+        ));
+    }
+    Ok(vec![(Some(spec.to_string()), distinct[0])])
+}
+
+enum RamMode {
+    Read(u32),
+    Write(Vec<u32>),
+}
+
+fn parse_ram_args(
+    location: String,
+    args: Vec<String>,
+    write: Vec<u32>,
+) -> Result<(String, RamMode), String> {
+    if let Some((loc, rhs)) = location.split_once('=') {
+        if !write.is_empty() {
+            return Err("cannot combine '=' and --write".into());
+        }
+        let loc = loc.trim().to_string();
+        let mut raw_values = Vec::new();
+        if !rhs.trim().is_empty() {
+            raw_values.push(rhs.trim().to_string());
+        }
+        raw_values.extend(args);
+        if raw_values.is_empty() {
+            return Err("missing value after '='".into());
+        }
+        let words = raw_values
+            .iter()
+            .map(|v| parse_word(v))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok((loc, RamMode::Write(words)));
+    }
+    if let Some(first) = args.first()
+        && first.starts_with('=')
+    {
+        if !write.is_empty() {
+            return Err("cannot combine '=' and --write".into());
+        }
+        let mut raw_values = Vec::new();
+        let tail = first.trim_start_matches('=').trim();
+        if !tail.is_empty() {
+            raw_values.push(tail.to_string());
+        }
+        raw_values.extend(args.into_iter().skip(1));
+        if raw_values.is_empty() {
+            return Err("missing value after '='".into());
+        }
+        let words = raw_values
+            .iter()
+            .map(|v| parse_word(v))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok((location, RamMode::Write(words)));
+    }
+    if !write.is_empty() {
+        if !args.is_empty() {
+            return Err("count cannot be combined with --write".into());
+        }
+        return Ok((location, RamMode::Write(write)));
+    }
+    match args.as_slice() {
+        [] => Ok((location, RamMode::Read(1))),
+        [count_str] => {
+            let count = probecore::text::parse_int_auto(count_str)
+                .and_then(|v| u32::try_from(v).ok())
+                .ok_or_else(|| {
+                    format!(
+                        "invalid word count {count_str:?} (for writes, use '= VALUE...' or \
+                         '--write VALUE...')"
+                    )
+                })?;
+            Ok((location, RamMode::Read(count)))
+        }
+        [_, extra, ..] => Err(format!(
+            "unexpected argument {extra:?} (for writes, use '= VALUE...' or '--write VALUE...')"
+        )),
+    }
+}
+
+fn ascii_tag(words: &[u32]) -> Option<String> {
+    let mut has_tag = false;
+    let mut out = String::with_capacity(words.len() * 4);
+    for &w in words {
+        let bytes = w.to_be_bytes();
+        if bytes.iter().all(|&b| (0x20..=0x7E).contains(&b))
+            && bytes.iter().any(|&b| (0x21..=0x7E).contains(&b))
+        {
+            has_tag = true;
+            for b in bytes {
+                out.push(b as char);
+            }
+        } else {
+            out.push_str("....");
+        }
+    }
+    has_tag.then_some(out)
+}
+
 /// `rvdbg ram`: words of RAM in bulk while the cores run.
-fn ram(env: &mut Env, location: String, count: u32, write: Vec<u32>) -> Result<u8, String> {
+fn ram(env: &mut Env, location: String, args: Vec<String>, write: Vec<u32>) -> Result<u8, String> {
     let config = env.config;
     let json = env.json;
-    let (address, symbol) = match probecore::text::parse_int_auto(&location)
-        .and_then(|value| u64::try_from(value).ok())
-    {
-        Some(address) => (address, None),
-        None => {
-            let address = inspect::symbols(config)
-                .range(&location)
-                .map(|(start, _)| start)
-                .ok_or_else(|| {
-                    format!("{location} is neither an address nor a symbol of the images")
-                })?;
-            (address, Some(location))
+    let (location, mode) = parse_ram_args(location, args, write)?;
+    let targets = resolve_ram_targets(config, &location)?;
+    for (_, address) in &targets {
+        if address % 4 != 0 {
+            return Err(format!("0x{address:X} is not word-aligned"));
         }
-    };
-    if address % 4 != 0 {
-        return Err(format!("0x{address:X} is not word-aligned"));
     }
-    let result = env.with_ram(|memory, _| {
-        if !write.is_empty() {
-            for (index, value) in write.iter().enumerate() {
-                memory
-                    .write_u32(address + 4 * index as u64, *value)
-                    .map_err(|error| format!("cannot write 0x{address:08X}: {error}"))?;
+    let result = env.with_ram(|memory, _| match &mode {
+        RamMode::Write(words) => {
+            for (_, address) in &targets {
+                for (index, value) in words.iter().enumerate() {
+                    memory
+                        .write_u32(address + 4 * index as u64, *value)
+                        .map_err(|error| format!("cannot write 0x{address:08X}: {error}"))?;
+                }
             }
-            return Ok(inspect::Outcome {
-                text: format!("wrote {} word(s) at 0x{address:08X}", write.len()),
-                json: serde_json::json!({
+            if targets.len() == 1 {
+                let (symbol, address) = &targets[0];
+                return Ok(inspect::Outcome {
+                    text: format!("wrote {} word(s) at 0x{address:08X}", words.len()),
+                    json: serde_json::json!({
+                        "symbol": symbol,
+                        "address": format!("0x{address:08X}"),
+                        "written": words.len(),
+                    }),
+                    code: 0,
+                });
+            }
+            let summary: Vec<String> = targets
+                .iter()
+                .map(|(label, addr)| {
+                    format!("{} (0x{addr:08X})", label.as_deref().unwrap_or("addr"))
+                })
+                .collect();
+            let json_targets: Vec<_> = targets
+                .iter()
+                .map(|(symbol, address)| {
+                    serde_json::json!({
+                        "symbol": symbol,
+                        "address": format!("0x{address:08X}"),
+                        "written": words.len(),
+                    })
+                })
+                .collect();
+            Ok(inspect::Outcome {
+                text: format!(
+                    "wrote {} word(s) to {} target(s): {}",
+                    words.len(),
+                    targets.len(),
+                    summary.join(", ")
+                ),
+                json: serde_json::json!({ "targets": json_targets }),
+                code: 0,
+            })
+        }
+        RamMode::Read(count) => {
+            if *count == 0 || *count > RAM_MAX_WORDS {
+                return Err(format!("count must be between 1 and {RAM_MAX_WORDS}"));
+            }
+            if targets.len() == 1 {
+                let (symbol, address) = &targets[0];
+                let words = memory
+                    .read_u32s(*address, *count as usize)
+                    .map_err(|error| format!("cannot read 0x{address:08X}: {error}"))?;
+                let text = format_ram_lines(*address, &words, None);
+                return Ok(inspect::Outcome {
+                    text,
+                    json: serde_json::json!({
+                        "symbol": symbol,
+                        "address": format!("0x{address:08X}"),
+                        "words": words,
+                        "hex": words.iter().map(|w| format!("0x{w:08X}")).collect::<Vec<_>>(),
+                    }),
+                    code: 0,
+                });
+            }
+            let mut all_lines = Vec::new();
+            let mut json_targets = Vec::new();
+            for (symbol, address) in &targets {
+                let words = memory
+                    .read_u32s(*address, *count as usize)
+                    .map_err(|error| format!("cannot read 0x{address:08X}: {error}"))?;
+                all_lines.push(format_ram_lines(*address, &words, symbol.as_deref()));
+                json_targets.push(serde_json::json!({
                     "symbol": symbol,
                     "address": format!("0x{address:08X}"),
-                    "written": write.len(),
-                }),
+                    "words": words,
+                    "hex": words.iter().map(|w| format!("0x{w:08X}")).collect::<Vec<_>>(),
+                }));
+            }
+            Ok(inspect::Outcome {
+                text: all_lines.join("\n"),
+                json: serde_json::json!({ "targets": json_targets }),
                 code: 0,
-            });
-        }
-        if count == 0 || count > RAM_MAX_WORDS {
-            return Err(format!("count must be between 1 and {RAM_MAX_WORDS}"));
-        }
-        let words = memory
-            .read_u32s(address, count as usize)
-            .map_err(|error| format!("cannot read 0x{address:08X}: {error}"))?;
-        let text = words
-            .chunks(4)
-            .enumerate()
-            .map(|(row, chunk)| {
-                let values: Vec<String> = chunk.iter().map(|w| format!("{w:08X}")).collect();
-                format!("0x{:08X}  {}", address + 16 * row as u64, values.join(" "))
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok(inspect::Outcome {
-            text,
-            json: serde_json::json!({
-                "symbol": symbol,
-                "address": format!("0x{address:08X}"),
-                "words": words,
-                "hex": words.iter().map(|w| format!("0x{w:08X}")).collect::<Vec<_>>(),
-            }),
-            code: 0,
-        })
+        }
     });
     inspect::emit("ram", json, result)
+}
+
+fn format_ram_lines(address: u64, words: &[u32], prefix: Option<&str>) -> String {
+    words
+        .chunks(4)
+        .enumerate()
+        .map(|(row, chunk)| {
+            let values: Vec<String> = chunk.iter().map(|w| format!("{w:08X}")).collect();
+            let ascii = ascii_tag(chunk)
+                .map(|tag| format!("  |{tag}|"))
+                .unwrap_or_default();
+            let head = prefix
+                .map(|label| format!("{label:<22} "))
+                .unwrap_or_default();
+            format!(
+                "{head}0x{:08X}  {}{ascii}",
+                address + 16 * row as u64,
+                values.join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The most words one `rvdbg ram` reads: 4 MiB.
 const RAM_MAX_WORDS: u32 = 1 << 20;
 
 fn parse_word(text: &str) -> Result<u32, String> {
-    probecore::text::parse_int_auto(text)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| format!("invalid 32-bit value: {text}"))
+    if let Some(value) =
+        probecore::text::parse_int_auto(text).and_then(|value| u32::try_from(value).ok())
+    {
+        return Ok(value);
+    }
+    let ascii = text
+        .strip_prefix("ascii:")
+        .or_else(|| text.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')));
+    let bytes = match ascii {
+        Some(tag) => Some(tag.as_bytes()),
+        None if !text.as_bytes().first().is_some_and(u8::is_ascii_digit) => Some(text.as_bytes()),
+        None => None,
+    };
+    if let Some(bytes) = bytes
+        && bytes.len() == 4
+        && bytes.iter().all(|&b| (0x20..=0x7E).contains(&b))
+    {
+        return Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+    }
+    Err(format!(
+        "invalid 32-bit value {text:?}: pass a 32-bit integer (e.g. 0x474F474F) or a \
+         4-character ASCII tag (e.g. GOGO, DONE)"
+    ))
 }
 
 fn parse_address(text: &str) -> Result<u64, String> {
@@ -1883,5 +2357,90 @@ mod tests {
             }
             _ => panic!("expected run-until"),
         }
+    }
+
+    #[test]
+    fn ram_accepts_ascii_tags_equals_syntax_and_formats_ascii() {
+        assert_eq!(parse_word("GOGO").unwrap(), 0x474F_474F);
+        assert_eq!(parse_word("DONE").unwrap(), 0x444F_4E45);
+        assert_eq!(parse_word("ascii:1234").unwrap(), 0x3132_3334);
+        assert_eq!(parse_word("'ABCD'").unwrap(), 0x4142_4344);
+        assert_eq!(parse_word("1234").unwrap(), 1234);
+        assert!(parse_word("GO").is_err());
+
+        let (loc, mode) = parse_ram_args(
+            "0..2:MAILBOX+0x3c".into(),
+            vec!["=".into(), "GOGO".into()],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(loc, "0..2:MAILBOX+0x3c");
+        match mode {
+            RamMode::Write(words) => assert_eq!(words, [0x474F_474F]),
+            RamMode::Read(_) => panic!("expected write"),
+        }
+
+        let (loc, mode) = parse_ram_args("0x6001003C=DONE".into(), Vec::new(), Vec::new()).unwrap();
+        assert_eq!(loc, "0x6001003C");
+        match mode {
+            RamMode::Write(words) => assert_eq!(words, [0x444F_4E45]),
+            RamMode::Read(_) => panic!("expected write"),
+        }
+
+        assert_eq!(
+            format_ram_lines(0x6001_003C, &[0x444F_4E45], None),
+            "0x6001003C  444F4E45  |DONE|"
+        );
+        assert_eq!(
+            format_ram_lines(0x6001_0000, &[0x0000_0000], None),
+            "0x60010000  00000000"
+        );
+    }
+
+    #[test]
+    fn swtrace_accepts_named_guests_and_optional_html_path() {
+        let cli = Cli::try_parse_from(["rvdbg", "swtrace", "--guest", "guest0", "--open"]).unwrap();
+        let Commands::Swtrace(args) = cli.command.unwrap() else {
+            panic!("expected swtrace");
+        };
+        assert_eq!(args.guest, ["guest0"]);
+        assert!(args.open);
+        assert_eq!(args.html, None);
+
+        let cli = Cli::try_parse_from(["rvdbg", "swtrace", "--html", "--json"]).unwrap();
+        assert!(cli.json);
+        let Commands::Swtrace(args) = cli.command.unwrap() else {
+            panic!("expected swtrace");
+        };
+        assert_eq!(args.html, Some(PathBuf::from("latest")));
+    }
+
+    #[test]
+    fn resolve_mem_location_prefixes_ad_for_resolved_addresses() {
+        let config = config::Config {
+            file: PathBuf::from("rvdbg.toml"),
+            root: PathBuf::from("."),
+            program: String::new(),
+            elf: PathBuf::from("nonexistent-el2.elf"),
+            extra_elf: Vec::new(),
+            images_from: config::ImagesFrom::Config,
+            backend: None,
+            fdx_symbol: "RUSTVISOR_FDX".into(),
+            swtrace_map: rustvisor_debug::timeline::Map::default(),
+            trace32: toml::Table::new(),
+            openocd: None,
+        };
+        assert_eq!(
+            resolve_mem_location(&config, "0x6001003c".into()).unwrap(),
+            "AD:0x6001003C"
+        );
+        assert_eq!(
+            resolve_mem_location(&config, "AD:0x6001003C".into()).unwrap(),
+            "AD:0x6001003C"
+        );
+        assert_eq!(
+            resolve_mem_location(&config, "C15:0x100".into()).unwrap(),
+            "C15:0x100"
+        );
     }
 }

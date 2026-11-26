@@ -42,6 +42,8 @@ use crate::EXIT_FAILED;
 pub(crate) const POLL: Duration = Duration::from_millis(20);
 /// How often a closed link is looked at again when several are watched.
 const REOPEN_POLL: Duration = Duration::from_millis(200);
+/// How often the persistent panel checks `RUSTVISOR_STOP_RECORDS`.
+const STOP_POLL: Duration = Duration::from_millis(250);
 /// A packet still unread after this is reported.
 const UNREAD_AFTER: Duration = Duration::from_secs(1);
 /// ... and again after this.
@@ -383,8 +385,8 @@ enum Action {
     Nothing,
     /// Leave `fdx`.
     Quit,
-    /// A packet for this link.
-    Send(usize, String),
+    /// A packet for one or more links.
+    Send(Vec<usize>, String),
     /// The link's log.
     Last(usize),
     Help,
@@ -396,32 +398,86 @@ enum Action {
 
 /// The local commands, for `:help`.
 const LOCAL_HELP: &str = ":q (or exit, quit, Ctrl-C) leaves fdx; :last lists what this session \
-                          received on the link; :to <name> talks to another link and \
-                          @<name> <packet> sends one packet to it (--all); ::<text> sends \
-                          :<text>";
+                          received on the link; :to <name> talks to another link, \
+                          @<name|0..2|0,2|all> <packet> sends to one or more links, \
+                          :send <text> sends literally, ::<text> sends :<text>, @@<text> sends @<text>";
+
+/// Known `rvdbg` commands that are very unlikely to be intended as bare FDX packets
+/// (note: `help` is intentionally omitted because targets serve `help`).
+const RVDBG_ONLY_WORDS: &[&str] = &[
+    "status",
+    "halt",
+    "go",
+    "reset",
+    "restart",
+    "flash",
+    "load",
+    "verify",
+    "cores",
+    "images",
+    "swtrace",
+    "ram",
+    "mem",
+    "reg",
+    "fault",
+    "check",
+    "clock",
+    "rtt",
+    "fdx",
+    "run-until",
+    "attach",
+    "down",
+    "open",
+    "chips",
+    "vscode",
+    "rustrover",
+    "source",
+    "backend",
+    "reconnect",
+    "clear",
+];
 
 /// What `line`, typed while talking to `current`, asks for. `names` are
-/// the links' names; `@` and `:to` only when several are watched.
-fn parse(line: &str, names: &[String], current: usize, several: bool) -> Action {
+/// the links' names; `target_words` are words seen in this link's `help` reply.
+fn parse(
+    line: &str,
+    names: &[String],
+    current: usize,
+    several: bool,
+    target_words: &[String],
+) -> Action {
     let line = line.trim_end_matches(['\r', '\n']);
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return Action::Nothing;
     }
-    let find = |name: &str| names.iter().position(|candidate| candidate == name);
-    let unknown =
-        |name: &str| Action::Refused(format!("no link {name:?}; links: {}", names.join(" ")));
     if let Some(rest) = line.strip_prefix("::") {
-        return Action::Send(current, format!(":{rest}"));
+        return Action::Send(vec![current], format!(":{rest}"));
+    }
+    if let Some(rest) = line.strip_prefix("@@") {
+        return Action::Send(vec![current], format!("@{rest}"));
     }
     if let Some(command) = trimmed.strip_prefix(':') {
+        if let Some(rest) = command.strip_prefix("send ") {
+            return if rest.is_empty() {
+                Action::Refused(format!("usage: :send <packet>; {LOCAL_HELP}"))
+            } else {
+                Action::Send(vec![current], rest.to_string())
+            };
+        }
         let mut words = command.split_whitespace();
         return match (words.next(), words.next(), words.next()) {
             (Some("q" | "quit"), None, _) => Action::Quit,
             (Some("last"), None, _) => Action::Last(current),
             (Some("help"), None, _) => Action::Help,
-            (Some("to"), Some(name), None) if several => {
-                find(name).map_or_else(|| unknown(name), Action::To)
+            (Some("to"), Some(spec), None) if several => {
+                match rustvisor_debug::fdx::resolve_targets(spec, names) {
+                    Ok(indices) if indices.len() == 1 => Action::To(indices[0]),
+                    Ok(_) => {
+                        Action::Refused("name a single link after :to (e.g. :to guest0)".into())
+                    }
+                    Err(error) => Action::Refused(error),
+                }
             }
             _ => Action::Refused(format!("unknown :{command}; {LOCAL_HELP}")),
         };
@@ -435,15 +491,40 @@ fn parse(line: &str, names: &[String], current: usize, several: bool) -> Action 
              :q (or Ctrl-C) goes back to rvdbg"
         ));
     }
-    if several && let Some(rest) = line.strip_prefix('@') {
-        let (name, packet) = rest.split_once(' ').unwrap_or((rest, ""));
-        return match find(name) {
-            Some(index) if packet.is_empty() => Action::To(index),
-            Some(index) => Action::Send(index, packet.to_string()),
-            None => unknown(name),
+    if trimmed.starts_with('!') {
+        return Action::Refused(format!(
+            "not sent: {trimmed:?} looks like a TUI command escape; use :q or Ctrl-C to leave fdx"
+        ));
+    }
+    if let Some(rest) = trimmed.strip_prefix('@') {
+        let (spec, packet) = match rest.split_once(char::is_whitespace) {
+            Some((spec, packet)) => (spec, packet.trim_start()),
+            None => (rest, ""),
+        };
+        return match rustvisor_debug::fdx::resolve_targets(spec, names) {
+            Ok(indices) if packet.is_empty() => {
+                if indices.len() == 1 {
+                    Action::To(indices[0])
+                } else {
+                    Action::Refused(format!(
+                        "name a single link to switch to, or pass a packet after @{spec}"
+                    ))
+                }
+            }
+            Ok(indices) => Action::Send(indices, packet.to_string()),
+            Err(error) => Action::Refused(error),
         };
     }
-    Action::Send(current, line.to_string())
+    if let Some(first_word) = trimmed.split_whitespace().next()
+        && RVDBG_ONLY_WORDS.contains(&first_word)
+        && !target_words.iter().any(|w| w == first_word)
+    {
+        return Action::Refused(format!(
+            "not sent: {trimmed:?} is an rvdbg command; use '!{trimmed}' (or Shift+Tab / :q) \
+             to run it, or ':send {trimmed}' to send literally"
+        ));
+    }
+    Action::Send(vec![current], line.to_string())
 }
 
 /// The words of one line of a `help` reply that are worth completing:
@@ -536,6 +617,9 @@ pub(crate) struct Panel {
     selected: String,
     status: Option<(String, String)>,
     retry_after: Instant,
+    next_stop_poll: Instant,
+    reported_stops: Vec<Option<String>>,
+    awaiting_boot: bool,
     ui: crate::tui::CommandUi,
 }
 
@@ -545,20 +629,26 @@ impl Panel {
         options: Options,
         history: &History,
         ui: crate::tui::CommandUi,
+        focus: bool,
     ) -> Result<Self, String> {
         let selected = options.targets[0].name.clone();
         ui.fdx_open(
             selected.clone(),
             options.history_file.clone(),
             selection.all || options.targets.len() > 1,
+            focus,
         )?;
+        let now = Instant::now();
         let mut panel = Self {
             selection,
             terminal: None,
             diagnosis: Diagnosis::default(),
             selected,
             status: None,
-            retry_after: Instant::now(),
+            retry_after: now,
+            next_stop_poll: now,
+            reported_stops: Vec::new(),
+            awaiting_boot: false,
             ui,
         };
         panel.configure(Ok(options));
@@ -569,7 +659,11 @@ impl Panel {
     }
 
     pub fn configure(&mut self, options: Result<Options, String>) {
-        self.retry_after = Instant::now();
+        let now = Instant::now();
+        self.retry_after = now;
+        self.next_stop_poll = now;
+        self.reported_stops.clear();
+        self.awaiting_boot = false;
         self.terminal = match options {
             Ok(options) => {
                 self.diagnosis = options.diagnosis;
@@ -595,10 +689,18 @@ impl Panel {
     }
 
     pub fn boundary(&mut self, command: &str) {
-        self.retry_after = Instant::now();
+        let now = Instant::now();
+        self.retry_after = now;
+        self.next_stop_poll = now;
+        if command == "reset" {
+            // Hold off alerting old pre-reset stop records in RAM until the target boots again.
+            self.awaiting_boot = true;
+        } else {
+            self.awaiting_boot = false;
+            self.reported_stops.clear();
+        }
         let mut discarded = 0;
         if let Some(terminal) = &mut self.terminal {
-            let now = Instant::now();
             for slot in &mut terminal.slots {
                 discarded += slot.queue.len();
                 *slot = Slot::new(&slot.target, now);
@@ -609,6 +711,13 @@ impl Panel {
             "--- {command} · discarded {discarded} queued packet(s) ---"
         ));
         self.update_status();
+    }
+
+    pub fn on_target_started(&mut self) {
+        self.awaiting_boot = false;
+        self.reported_stops.clear();
+        self.next_stop_poll = Instant::now();
+        self.ui.stop_alert(None);
     }
 
     pub fn ready_to_poll(&self) -> bool {
@@ -655,8 +764,9 @@ impl Panel {
     }
 
     pub fn poll(&mut self, memory: &mut impl Memory, history: &mut History) -> Result<(), String> {
+        let now = Instant::now();
         if let Some(terminal) = &mut self.terminal {
-            terminal.poll(memory, &self.diagnosis, history, Instant::now())?;
+            terminal.poll(memory, &self.diagnosis, history, now)?;
             let words = terminal
                 .words
                 .lock()
@@ -668,7 +778,51 @@ impl Panel {
             }
             self.update_status();
         }
+        if self.terminal.is_some() && now >= self.next_stop_poll {
+            self.next_stop_poll = now + STOP_POLL;
+            self.poll_stops(memory);
+        }
         Ok(())
+    }
+
+    fn poll_stops(&mut self, memory: &mut impl Memory) {
+        let Some(slots) = self.diagnosis.stops else {
+            return;
+        };
+        let Ok(records) = stop::read(memory, slots) else {
+            return;
+        };
+        if self.awaiting_boot {
+            if records.iter().any(|r| matches!(r, stop::Record::Empty)) {
+                self.awaiting_boot = false;
+                self.reported_stops.clear();
+            } else {
+                return;
+            }
+        }
+        if self.reported_stops.len() < records.len() {
+            self.reported_stops.resize(records.len(), None);
+        }
+        for (slot_idx, record) in records.iter().enumerate() {
+            match record {
+                stop::Record::Complete(rec) => {
+                    let summary = format!(
+                        "{} stopped: {}",
+                        rec.core,
+                        rec.summary(&|addr| self.diagnosis.symbol(addr))
+                    );
+                    if self.reported_stops[slot_idx].as_deref() != Some(summary.as_str()) {
+                        self.reported_stops[slot_idx] = Some(summary.clone());
+                        self.ui.fdx_line(format!("[stop] {summary}"));
+                        self.ui.stop_alert(Some(format!("{} stopped", rec.core)));
+                    }
+                }
+                stop::Record::Empty | stop::Record::Invalid(_) => {
+                    self.reported_stops[slot_idx] = None;
+                }
+                stop::Record::Incomplete => {}
+            }
+        }
     }
 
     pub fn failed(&mut self, error: String) {
@@ -877,7 +1031,13 @@ impl<O: Out> Terminal<O> {
     fn line(&mut self, target: Option<usize>, text: &str, history: &History, now: Instant) -> Flow {
         let names = self.names();
         let current = target.unwrap_or(self.current);
-        match parse(text, &names, current, self.several()) {
+        let known_words = self
+            .words
+            .lock()
+            .ok()
+            .and_then(|all| all.get(current).cloned())
+            .unwrap_or_default();
+        match parse(text, &names, current, self.several(), &known_words) {
             Action::Nothing => {}
             Action::Quit => return Flow::Quit,
             Action::Help => self.note(LOCAL_HELP.to_string()),
@@ -897,29 +1057,33 @@ impl<O: Out> Terminal<O> {
                     self.note(format!("{on}< {packet} ({})", ago(at, now)));
                 }
             }
-            Action::Send(index, packet) => {
-                if self.slots[index].queue.len() >= 32 {
-                    self.warn("not queued: the link's input queue is full".to_string());
-                    return Flow::Continue;
+            Action::Send(indices, packet) => {
+                for index in indices {
+                    if self.slots[index].queue.len() >= 32 {
+                        let on = self.on(index);
+                        self.warn(format!("{on}not queued: the link's input queue is full"));
+                        continue;
+                    }
+                    if let Some(link) = self.slots[index].link
+                        && packet.len() > link.max_payload()
+                    {
+                        let max = link.max_payload();
+                        let on = self.on(index);
+                        self.warn(format!(
+                            "{on}not sent: {} bytes, the link takes up to {max}",
+                            packet.len()
+                        ));
+                        continue;
+                    }
+                    if packet == "help" {
+                        self.help_from = Some((index, now));
+                    }
+                    if self.slots[index].link.is_none() {
+                        let on = self.on(index);
+                        self.note(format!("{on}queued until the link opens"));
+                    }
+                    self.slots[index].queue.push_back(packet.clone());
                 }
-                if let Some(link) = self.slots[index].link
-                    && packet.len() > link.max_payload()
-                {
-                    let max = link.max_payload();
-                    self.warn(format!(
-                        "not sent: {} bytes, the link takes up to {max}",
-                        packet.len()
-                    ));
-                    return Flow::Continue;
-                }
-                if packet == "help" {
-                    self.help_from = Some((index, now));
-                }
-                if self.slots[index].link.is_none() {
-                    let on = self.on(index);
-                    self.note(format!("{on}queued until the link opens"));
-                }
-                self.slots[index].queue.push_back(packet);
             }
         }
         Flow::Continue
@@ -1192,7 +1356,9 @@ impl rustyline::completion::Completer for FdxHelper {
         } else if before.starts_with(":to ") && start == 4 {
             self.names.clone()
         } else if start == 0 && word.starts_with(':') {
-            [":q", ":last", ":help", ":to"].map(String::from).to_vec()
+            [":q", ":last", ":help", ":to", ":send"]
+                .map(String::from)
+                .to_vec()
         } else {
             let index = self.current.load(Ordering::SeqCst);
             self.words
@@ -1245,7 +1411,7 @@ fn spawn_reader(
                         let _ = editor.append_history(path);
                     }
                 }
-                let action = parse(text, &names, index, several);
+                let action = parse(text, &names, index, several, &[]);
                 if let Action::To(to) = action {
                     current.store(to, Ordering::SeqCst);
                 }
@@ -1608,38 +1774,80 @@ mod tests {
 
     #[test]
     fn local_commands_and_options_are_not_sent() {
-        let names = vec!["el2".to_string(), "guest0".to_string()];
-        assert_eq!(parse("exit", &names, 0, false), Action::Quit);
-        assert_eq!(parse(" quit ", &names, 0, false), Action::Quit);
-        assert_eq!(parse(":q", &names, 0, false), Action::Quit);
-        assert_eq!(parse(":last", &names, 1, true), Action::Last(1));
+        let names = vec![
+            "el2".to_string(),
+            "guest0".to_string(),
+            "guest1".to_string(),
+        ];
+        assert_eq!(parse("exit", &names, 0, false, &[]), Action::Quit);
+        assert_eq!(parse(" quit ", &names, 0, false, &[]), Action::Quit);
+        assert_eq!(parse(":q", &names, 0, false, &[]), Action::Quit);
+        assert_eq!(parse(":last", &names, 1, true, &[]), Action::Last(1));
         assert!(matches!(
-            parse("--guest 0", &names, 0, false),
+            parse("--guest 0", &names, 0, false, &[]),
             Action::Refused(_)
         ));
-        assert_eq!(parse("::x", &names, 0, false), Action::Send(0, ":x".into()));
-        assert_eq!(parse("", &names, 0, false), Action::Nothing);
-        assert_eq!(
-            parse("run timer", &names, 1, true),
-            Action::Send(1, "run timer".into())
-        );
-        // @ and :to only when several links are watched.
-        assert_eq!(
-            parse("@guest0 run timer", &names, 0, true),
-            Action::Send(1, "run timer".into())
-        );
-        assert_eq!(parse("@guest0", &names, 0, true), Action::To(1));
-        assert_eq!(parse(":to el2", &names, 1, true), Action::To(0));
         assert!(matches!(
-            parse("@guest9 x", &names, 0, true),
+            parse("!status", &names, 0, false, &[]),
             Action::Refused(_)
         ));
         assert_eq!(
-            parse("@x y", &names, 0, false),
-            Action::Send(0, "@x y".into())
+            parse("::x", &names, 0, false, &[]),
+            Action::Send(vec![0], ":x".into())
         );
+        assert_eq!(
+            parse("@@x y", &names, 0, false, &[]),
+            Action::Send(vec![0], "@x y".into())
+        );
+        assert_eq!(
+            parse(":send cores", &names, 0, false, &[]),
+            Action::Send(vec![0], "cores".into())
+        );
+        assert_eq!(parse("", &names, 0, false, &[]), Action::Nothing);
+        assert_eq!(
+            parse("run timer", &names, 1, true, &[]),
+            Action::Send(vec![1], "run timer".into())
+        );
+        // Mis-typed rvdbg commands are blocked unless known to the target's help.
         assert!(matches!(
-            parse(":to el2", &names, 0, false),
+            parse("cores", &names, 0, true, &[]),
+            Action::Refused(_)
+        ));
+        assert_eq!(
+            parse("cores", &names, 0, true, &["cores".to_string()]),
+            Action::Send(vec![0], "cores".into())
+        );
+        // Multi-target @ selectors, short numbers, and ranges.
+        assert_eq!(
+            parse("@guest0 run timer", &names, 0, true, &[]),
+            Action::Send(vec![1], "run timer".into())
+        );
+        assert_eq!(
+            parse("@0..1 run timer", &names, 0, true, &[]),
+            Action::Send(vec![1, 2], "run timer".into())
+        );
+        assert_eq!(
+            parse("@el2,1 ping", &names, 0, true, &[]),
+            Action::Send(vec![0, 2], "ping".into())
+        );
+        assert_eq!(parse("@guest0", &names, 0, true, &[]), Action::To(1));
+        assert_eq!(parse(":to el2", &names, 1, true, &[]), Action::To(0));
+        assert!(matches!(
+            parse("@guest9 x", &names, 0, true, &[]),
+            Action::Refused(_)
+        ));
+        let single = vec!["el2".to_string()];
+        assert_eq!(
+            parse("@el2 help", &single, 0, false, &[]),
+            Action::Send(vec![0], "help".into())
+        );
+        let err = match parse("@guest0 run timer", &single, 0, false, &[]) {
+            Action::Refused(msg) => msg,
+            other => panic!("expected refused, got {other:?}"),
+        };
+        assert!(err.contains("only el2 is watched"), "{err}");
+        assert!(matches!(
+            parse(":to el2", &names, 0, false, &[]),
             Action::Refused(_)
         ));
     }
@@ -1803,5 +2011,74 @@ mod tests {
         let text = lines.0.join("\n");
         assert!(text.contains("[el2] < ok ping"), "{text}");
         assert!(text.contains("guest1: waiting for the target"), "{text}");
+    }
+
+    #[test]
+    fn panel_poll_stops_emits_alert_once_until_cleared_by_boot() {
+        let mut board = Board::new();
+        board.bytes.resize(0x200, 0);
+        let stop_addr = BASE + 0x100;
+        let (tx, rx) = std::sync::mpsc::sync_channel(32);
+        let ui = crate::tui::CommandUi::for_test(tx);
+        let mut opts = options(&[], &[]);
+        opts.diagnosis.stops = Some(stop::Slots {
+            address: stop_addr,
+            count: 1,
+        });
+        let mut panel = Panel::new(
+            crate::FdxArgs {
+                guest: None,
+                all: false,
+                symbol: None,
+                address: None,
+                send: Vec::new(),
+                expect: Vec::new(),
+                timeout: 1.0,
+                close: false,
+            },
+            opts,
+            &History::default(),
+            ui,
+            true,
+        )
+        .unwrap();
+        // Write a complete StopRecord (Boot NotPrimary on C0C1).
+        board.put_word(stop_addr, stop::MAGIC);
+        board.put_word(stop_addr + 4, 1); // Boot
+        board.put_word(stop_addr + 8, 0x0001); // C0C1
+        board.put_word(stop_addr + 12, 1); // NotPrimary
+        panel.poll_stops(&mut board);
+        panel.poll_stops(&mut board); // Duplicate poll must not re-alert.
+        let mut messages = Vec::new();
+        while let Ok(msg) = rx.recv_timeout(Duration::from_millis(50)) {
+            messages.push(msg);
+        }
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.contains("[stop] C0C1 stopped"))
+                .count(),
+            1,
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m == "alert:C0C1 stopped"),
+            "{messages:?}"
+        );
+
+        // Reset holds off stale record until target boots again.
+        panel.boundary("reset");
+        panel.poll_stops(&mut board);
+        while let Ok(msg) = rx.recv_timeout(Duration::from_millis(50)) {
+            assert!(!msg.starts_with("alert:"), "stale alert after reset: {msg}");
+        }
+        panel.on_target_started();
+        panel.poll_stops(&mut board);
+        let after_boot: Vec<_> =
+            std::iter::from_fn(|| rx.recv_timeout(Duration::from_millis(50)).ok()).collect();
+        assert!(
+            after_boot.iter().any(|m| m == "alert:C0C1 stopped"),
+            "{after_boot:?}"
+        );
     }
 }

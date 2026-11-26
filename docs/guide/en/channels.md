@@ -48,9 +48,9 @@ rvdbg fdx --all
 
 The first command uses the primary ELF, named `el2`. `--guest 0` (or `--guest guest0`) means the first `project.extra_elf` entry, not VMID 0 or hardware core 0. `--all` watches every image's link at once. In interactive mode each input line is one packet, and received packets print one per line. On a terminal the input line has history and Tab completion (the words of the target's reply to `help`), received packets start with `< ` and are printed above the line being typed; through a pipe the lines are the bare packets. The terminal follows a link reopened after target reset.
 
-In the interactive `rvdbg` TUI, `fdx` opens a persistent FDX monitor (a right-hand split pane on wide fullscreen terminals, or a collapsible preview bar toggled with `Ctrl+O`). Press `Shift+Tab` (or `F6`) to switch the composer between debugger commands and FDX packets, or prefix a line with `!` in FDX mode to run a debugger command without leaving FDX. The monitor and debugger commands share the same probe session. Polling pauses during commands such as `run-until` and resumes when the command returns. Commands such as `reset` and `flash` discard packets the pane has yet to write and mark the boundary. A normal `reset` also marks the watched links it has verified open as closed, and the monitor resumes exchanging packets when firmware reopens them.
+In the interactive `rvdbg` TUI, you can send FDX packets directly from command mode via `@el2 …`, `@0 …`, `@0..2 …`, or `@3,4 …` (auto-opening the FDX pane without stealing command focus), or open/focus it via `fdx` / `fdx --all` / `Shift+Tab` (`F6`). The monitor (right-hand split pane on wide fullscreen terminals, or collapsible `Ctrl+O` drawer) polls `RUSTVISOR_STOP_RECORDS` every 250 ms for live `[stop]` alerts, guards against mis-typed `rvdbg` commands (`!cmd` runs a debugger command; `:send <text>` sends literally), pauses during `run-until`, discards queued packets and closes open links on `reset`/`restart`, and resumes when firmware reopens them.
 
-With `--all` each packet carries its link's name (`[guest0] < ready`) and the prompt names the link input goes to (`el2> `). `@guest1 run timer` sends one packet to another link, `:to guest1` switches.
+With `--all` (or `@` in a multi-image session), each packet carries its link's name (`[guest0] < ready`) and the prompt names the link input goes to (`el2 ›`). `@guest1 run timer`, `@0..2 …`, or `@3,4 …` send to one or more links; `:to guest1` switches.
 
 Lines that are not packets:
 
@@ -59,8 +59,8 @@ Lines that are not packets:
 | `:q`, `exit`, `quit`, Ctrl-C | Back to rvdbg |
 | `:last` | What this session received on the link |
 | `:help` | These commands |
-| `::text` | Sends `:text` |
-| `--…` | Not sent: it looks like an rvdbg option |
+| `:send text`, `::text`, `@@text` | Sends `text`, `:text`, `@text` literally |
+| `--…`, `!…`, known `rvdbg` commands | Not sent: guarded to avoid stuffing target buffers |
 
 The terminal also says what it sees: a packet the target has not read after 1 s (it may no longer serve that link), a packet read but not answered after 2 s, and, when a link is entered again in the same session, the packets received on it before, e.g. `< ready (35 s ago); the target may be waiting for a command`. A link that stays closed for 3 s gets a diagnosis read without halting: the other links' state and the hypervisor's stop records (see [`rvdbg cores`](inspection.md)).
 

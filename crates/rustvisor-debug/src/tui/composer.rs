@@ -137,14 +137,6 @@ impl Composer {
         self.text.split('\n').count().clamp(1, MAX_VISIBLE_LINES)
     }
 
-    pub(super) fn cursor_at_end(&self) -> bool {
-        self.cursor == self.text.len()
-    }
-
-    pub(super) fn is_single_line(&self) -> bool {
-        !self.text.contains('\n')
-    }
-
     pub(super) fn handle_key(&mut self, key: KeyEvent) -> ComposerAction {
         if self.search.is_some() {
             return self.handle_search_key(key);

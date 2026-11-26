@@ -96,15 +96,15 @@ rvdbg vscode                 # 或：rvdbg rustrover（TRACE32）
 | `cores` | 核运行时读出每个核的 stop record（`RUSTVISOR_STOP_RECORDS`）和每个镜像的 FDX 链接 | 经 `AD:` | 经 MEM-AP |
 | `images` | 镜像列表、来源、FDX 链接以及链接是否打开 | 支持 | 支持 |
 | `fault` | AArch32 Hyp 异常报告 | 还有 `--trace [N]` | 同样的报告；核必须停在 Hyp 模式 |
-| `mem <地址\|符号> [n]` | 读 32 位字 | 支持 | 经 MEM-AP，符号来自 ELF |
-| `ram <地址\|符号> [n]`、`ram … --write v…` | 核运行时批量读写普通 RAM（不能用于 MMIO） | 经 `AD:` | 经 MEM-AP |
+| `mem <地址\|符号> [n]` | 读 32 位字（支持 `<镜像>:符号+偏移`） | 支持 | 经 MEM-AP，符号来自 ELF |
+| `ram <地址\|符号> [n]`、`ram … = v…` / `--write v…` | 核运行时批量读写普通 RAM（不能用于 MMIO）；支持 `<镜像范围>:符号+偏移`、4 字节 ASCII 标签（`GOGO`/`DONE`）及读回 ASCII 旁注 | 经 `AD:` | 经 MEM-AP |
 | `verify [ELF]` | 目标内存和镜像比对 | 还有 `--t32` | 经 MEM-AP |
 | `check 文件` | 按检查文件比对期望值 | 所有读取方式 | `addr`、`core`、`clock` 读取 |
 | `clock` | 带频率的时钟树 | 还有 `--html` | 支持 |
 | `rtt` | 通道 0 上的 SEGGER RTT 终端 | 支持 | 经 MEM-AP，核照常运行 |
 | `fdx` | 镜像的 FDX 链接：一行一个包，或用 `--send`/`--expect`、`--close`；`--all` 在一个终端里用所有镜像的链接 | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
-| `swtrace` | 软件 trace 记录（`RUSTVISOR_TRACE`）：读空、把 IPC 发送和接收配对、按方向统计延迟，可加 `--csv`、`--html` 时间线；`--from` 读 CSV，不需要探头 | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
-| `reset` | 复位并停在复位向量；关闭每个镜像的 FDX 链接（`--keep-links` 保留） | 支持 | `reset halt` |
+| `swtrace` | 软件 trace 记录（`RUSTVISOR_TRACE`）：读空、配对 IPC 延迟、自动备份 `.rvdbg/swtrace/latest.csv`，可加 `--csv`、`--html [文件]`、`--open`；`--from [CSV\|latest]` 不需要探头 | 经 `AD:`，核照常运行 | 经 MEM-AP，核照常运行 |
+| `reset`、`restart` | 复位并停在复位向量，关闭每个镜像的 FDX 链接（`--keep-links` 保留）；`reset --go` / `restart` 紧接着恢复运行 | 支持 | `reset halt` |
 | `attach` | 连上目标但不复位 | `SYStem.Mode Attach` | 支持 |
 | `run-until <符号\|地址>` | 让停着的核运行到某个符号或地址 | 片上断点 | 硬件断点 |
 | `open`、`chips`、`reg`、`eval`、`cmd`、`watch`、`trace`、`do`、`down` | PowerView、烧录脚本、PER 文件、PRACTICE、trace | 支持 | — |
@@ -148,10 +148,10 @@ rvdbg [openocd halted]> quit
 
 在交互终端里直接运行裸 `rvdbg` 默认进入全屏无闪烁 TUI（如需内联滚动模式，使用 `rvdbg --inline`，或在会话中按 `Alt+F`、输入 `/inline` / `/fullscreen` 随时无损切换）。
 
-- 直接输入命令即可获得行内暗色补全提示与 `Tab` 补全（命令名、子命令 `--flag`、`mem`/`ram`/`run-until` 的 ELF 符号及本地路径）；输入 `/` 打开模糊命令菜单与交互选择器（`/images`、`/backend`、`/fdx`、`/copy`、`/clear`、`/mouse`），无必填参数的斜杠命令按一次 `Enter` 即可执行。
+- 直接输入命令即可获得行内暗色补全提示与 `Tab` 补全（命令名、子命令 `--flag`、`@目标`、`mem`/`ram`/`run-until` 的 `[镜像:]符号` 含 `SHN_ABS` 符号及镜像目录，多行输入时同样有效）；输入 `/` 打开模糊命令菜单与交互选择器（`/images`、`/backend`、`/fdx`、`/copy`、`/clear`、`/mouse`），无必填参数的斜杠命令按一次 `Enter` 即可执行。
 - 支持多行粘贴与 `Ctrl+J` / `Shift+Enter` 换行、`Ctrl+R` 历史检索、`Ctrl+C` 清空草稿或中断长命令；空行连按两次 `Ctrl+D`（或输入 `quit`）退出。
 - `rtt` 打开双向 RTT 控制台，按键直通目标，`Ctrl+C` 返回命令模式。
-- `fdx` / `fdx --all` 打开常驻 FDX 监控（全屏宽屏下位于右侧分栏，窄屏或内联模式下位于输入框上方，可用 `Ctrl+O` 折叠/展开）。按 `Shift+Tab`（或 `F6`）在 `rvdbg` 命令与 FDX 通道输入间切换；FDX 模式下可用 `!halt` 等 `!` 前缀直接执行单条调试命令。`run-until` 期间自动暂停轮询，`reset` 自动关闭已打开的链路并丢弃未发队列，固件重新打开链路后自动恢复。
+- 在命令模式下可直接用 `@el2 …`、`@0 …`、`@0..2 …`、`@3,4 …` 发送 FDX 包（未开面板时自动打开右侧分栏且不抢焦点），也可以用 `fdx` / `fdx --all` / `Shift+Tab`（`F6`）切入 FDX 模式。面板（宽屏右侧分栏，窄屏或内联模式下顶部 `Ctrl+O` 抽屉）还会每 250 ms 轮询 `RUSTVISOR_STOP_RECORDS` 主动提示 `[stop]` 异常，并拦截误敲的 `rvdbg` 命令（`:send` 可强制发送，`!cmd` 单条执行）；`run-until` 期间暂停，`reset`/`restart` 自动关闭链路并在重启后恢复。
 - 在管道、`rvdbg --json` 或 `TERM=dumb` 环境下自动走纯文本逐行流模式。
 
 ## 配置
@@ -270,10 +270,11 @@ EXTRA_ELF="build/guest.elf build/other.elf" rvdbg flash
 EXTRA_ELF= rvdbg flash      # 只烧 elf；用 TRACE32 时其他镜像所在的扇区会被擦掉
 ```
 
-`--images 目录` 从一个构建目录取镜像，不用 `rvdbg.toml` 里的：`hypervisor`（或目录里唯一的其他 ELF）作为 `elf`，再按顺序把 `guest0.elf`、`guest1.elf`…… 作为 `extra_elf`。`rvdbg images` 列出命令会用哪些镜像、它们从哪里来。
+`--images 目录` 从一个构建目录取镜像，不用 `rvdbg.toml` 里的：`hypervisor`（或目录里唯一的其他 ELF）作为 `elf`，再按顺序把 `guest0.elf`、`guest1.elf`…… 作为 `extra_elf`。`目录` 也支持填 `target/board-tests/` 下的短名（如 `inject-five`）或 `latest`（最新构建目录）。`rvdbg images` 列出命令会用哪些镜像、它们从哪里来。
 
 ```sh
-rvdbg --images target/board-tests/latency/<run>/00-inject-five flash
+rvdbg --images inject-five flash
+rvdbg --images latest
 ```
 
 ## 在 IDE 或 GDB 里调试
@@ -348,10 +349,12 @@ rustvisor-sdk 的 `rustvisor-swtrace` 把 16 字节的记录（格式见它的 `
 
 ```sh
 rvdbg swtrace --json
-rvdbg swtrace --guest 0 --guest 1 --csv trace.csv
-rvdbg swtrace --csv run.csv --html run.html
-rvdbg swtrace --from run.csv --html run.html --map C0C0=VM1 --map guest0=VM1:C0C0
+rvdbg swtrace --guest guest0 --guest 1 --csv trace.csv
+rvdbg swtrace --html --open
+rvdbg swtrace --from latest --open --map C0C0=VM1 --map guest0=VM1:C0C0
 ```
+
+从板子读出记录且未显式传 `--csv` 时，会自动备份一份原始 CSV 到 `.rvdbg/swtrace/latest.csv`，之后可用 `rvdbg swtrace --from latest` 重绘。`--html` 省略文件名时写到 `.rvdbg/swtrace/latest.html`，`--open` 会直接用系统浏览器打开。
 
 ## 查看目标
 

@@ -73,6 +73,7 @@ enum Message {
         target: String,
         path: Option<PathBuf>,
         all: bool,
+        focus: bool,
     },
     FdxStatus {
         target: String,
@@ -82,6 +83,7 @@ enum Message {
     FdxLine(String),
     FdxBoundary(String),
     FdxClosed,
+    StopAlert(Option<String>),
     Finished {
         status: Status,
         code: u8,
@@ -99,6 +101,25 @@ enum Request {
 pub(crate) struct CommandUi(SyncSender<Message>);
 
 impl CommandUi {
+    #[cfg(test)]
+    pub(crate) fn for_test(sender: SyncSender<String>) -> Self {
+        let (tx, rx) = mpsc::sync_channel(64);
+        std::thread::spawn(move || {
+            while let Ok(msg) = rx.recv() {
+                let mapped = match msg {
+                    Message::FdxLine(line) => line,
+                    Message::StopAlert(Some(alert)) => format!("alert:{alert}"),
+                    Message::StopAlert(None) => "alert:none".into(),
+                    _ => continue,
+                };
+                if sender.send(mapped).is_err() {
+                    break;
+                }
+            }
+        });
+        Self(tx)
+    }
+
     fn send(&self, message: Message) -> Result<(), String> {
         self.0.send(message).map_err(|_| "terminal closed".into())
     }
@@ -116,8 +137,19 @@ impl CommandUi {
         Ok(receiver)
     }
 
-    pub fn fdx_open(&self, target: String, path: Option<PathBuf>, all: bool) -> Result<(), String> {
-        self.send(Message::FdxOpen { target, path, all })
+    pub fn fdx_open(
+        &self,
+        target: String,
+        path: Option<PathBuf>,
+        all: bool,
+        focus: bool,
+    ) -> Result<(), String> {
+        self.send(Message::FdxOpen {
+            target,
+            path,
+            all,
+            focus,
+        })
     }
 
     pub fn fdx_status(&self, target: String, status: String) {
@@ -138,6 +170,10 @@ impl CommandUi {
 
     pub fn fdx_closed(&self) {
         let _ = self.send(Message::FdxClosed);
+    }
+
+    pub fn stop_alert(&self, alert: Option<String>) {
+        let _ = self.send(Message::StopAlert(alert));
     }
 }
 
@@ -287,6 +323,7 @@ struct App {
     rtt: Option<SyncSender<Vec<u8>>>,
     rtt_partial: Vec<u8>,
     toast: Option<Toast>,
+    stop_alert: Option<String>,
     spinner_frame: usize,
     last_fdx_rect: Rect,
 }
@@ -332,6 +369,7 @@ impl App {
             rtt: None,
             rtt_partial: Vec::new(),
             toast: None,
+            stop_alert: None,
             spinner_frame: 0,
             last_fdx_rect: Rect::default(),
         }
@@ -423,14 +461,21 @@ impl App {
                 self.popup = None;
                 self.picker = None;
             }
-            Message::FdxOpen { target, path, all } => {
+            Message::FdxOpen {
+                target,
+                path,
+                all,
+                focus,
+            } => {
                 self.fdx.open(target);
                 self.fdx_composer = Composer::new(path);
-                self.mode = if all {
-                    InputMode::FdxAll
-                } else {
-                    InputMode::FdxSingle
-                };
+                if focus {
+                    self.mode = if all {
+                        InputMode::FdxAll
+                    } else {
+                        InputMode::FdxSingle
+                    };
+                }
                 self.popup = None;
                 self.picker = None;
             }
@@ -449,13 +494,27 @@ impl App {
             }
             Message::FdxBoundary(line) => {
                 self.fdx_composer.clear();
+                if line.contains("reset")
+                    || line.contains("restart")
+                    || line.contains("flash")
+                    || line.contains("images")
+                {
+                    self.stop_alert = None;
+                }
                 let focused = self.mode != InputMode::Command;
                 self.fdx.push_line(&line, self.theme, true, focused);
             }
             Message::FdxClosed => {
                 self.fdx.close();
+                self.stop_alert = None;
                 self.mode = InputMode::Command;
                 self.popup = None;
+            }
+            Message::StopAlert(alert) => {
+                if let Some(msg) = &alert {
+                    self.set_toast(format!("! {msg} (check FDX panel or run cores)"));
+                }
+                self.stop_alert = alert;
             }
             Message::Finished { status, code, flow } => {
                 self.flush_rtt();
@@ -903,6 +962,9 @@ impl App {
                 &self.specs,
                 &self.symbols,
                 &links,
+                &self.fdx.target_words,
+                self.status.image_paths.len(),
+                &self.config.root,
                 &self.cwd,
             )
         } else {
@@ -1545,11 +1607,7 @@ impl App {
             return None;
         }
         let prompt_w = prompt.width() as u16;
-        let ghost = if !is_rtt
-            && self.mode == InputMode::Command
-            && self.composer.search.is_none()
-            && self.composer.is_single_line()
-            && self.composer.cursor_at_end()
+        let ghost = if !is_rtt && self.mode == InputMode::Command && self.composer.search.is_none()
         {
             complete::ghost_suffix(&self.composer.text, self.composer.cursor, &self.specs)
         } else {
@@ -1578,7 +1636,7 @@ impl App {
                 ));
             } else {
                 spans.push(Span::raw(text.as_str()));
-                if idx == 0
+                if idx == usize::from(vis.cursor_row)
                     && let Some(suffix) = &ghost
                 {
                     spans.push(Span::styled(suffix.as_str(), self.theme.dim()));
@@ -1607,6 +1665,9 @@ impl App {
                 format!(" · exit {}", self.last_code),
                 self.theme.red(),
             ));
+        }
+        if let Some(alert) = &self.stop_alert {
+            left.push(Span::styled(format!(" · ! {alert}"), self.theme.error()));
         }
         if self.fdx.active {
             let (open, total) = self.fdx.open_counts();

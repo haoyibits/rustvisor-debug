@@ -33,14 +33,15 @@ rvdbg cores
 
 | Command | Intended object | Units and restrictions |
 | --- | --- | --- |
-| `mem <address-or-symbol> [count]` | A few memory words, TRACE32 address classes, supported coprocessor addresses | Defaults to one 32-bit word |
-| `ram <address-or-symbol> [count]` | Known valid ordinary RAM | Bulk aligned 32-bit words; never MMIO/coprocessors |
-| `ram <address-or-symbol> --write <values…>` | Write ordinary RAM | Changes target memory; confirm ownership/address |
+| `mem <address-or-symbol> [count]` | A few memory words (supports `<image>:symbol+offset`), TRACE32 address classes, supported coprocessor addresses | Defaults to one 32-bit word |
+| `ram <address-or-symbol> [count]` | Known valid ordinary RAM (supports `<image-scope>:symbol+offset` and `SHN_ABS` symbols) | Bulk aligned 32-bit words with inline ASCII column (`\|DONE\|`); never MMIO/coprocessors |
+| `ram <address-or-symbol> = <values…>` (or `--write <values…>`) | Write 32-bit words or 4-byte ASCII tags (e.g. `GOGO`) to ordinary RAM | Changes target memory; confirm ownership/address |
 | `reg <names…>` | TRACE32 PER registers/fields | Case-sensitive; full path may be necessary |
 
 ```sh
 rvdbg mem my_buffer 4
-rvdbg ram my_buffer 64 --json
+rvdbg ram 0..2:MAILBOX+0x3c
+rvdbg ram 0..2:MAILBOX+0x3c = GOGO
 rvdbg --backend trace32 reg HSR HSCTLR.C
 ```
 

@@ -12,7 +12,8 @@ Start with a deployed program. Confirm [local and target contents match](flashin
 | `rvdbg attach` | Connect without reset, preserving running/halted state |
 | `rvdbg halt` | Halt the selected core |
 | `rvdbg go` | Resume the selected core; a running core is left alone (`already running`) |
-| `rvdbg reset` | Reset the chip and halt at the reset vector, then mark every image's FDX link closed (`--keep-links` leaves them) |
+| `rvdbg reset` | Reset the chip and halt at the reset vector, then mark every image's FDX link closed (`--keep-links` leaves them; `--go` resumes immediately) |
+| `rvdbg restart` | Shortcut for `reset --go` (reset, close FDX links, and start running) |
 | `rvdbg run-until <symbol-or-address>` | Run a halted core to a temporary hardware breakpoint |
 | `rvdbg down` | TRACE32 `SYStem.Down` |
 
@@ -101,7 +102,7 @@ fdx --send "lab five inject trace" --expect ready --expect "ok lab"
 fdx --guest 0 --send "run timer" --expect ready --expect "ok timer"
 ```
 
-`images <dir>` switches the session to the images of a directory (see [configuration](configuration.md)). A line that starts with an option, such as `--close`, is refused with a hint (`fdx --close`).
+`images <dir|name|latest>` switches the session to another image directory (see [configuration](configuration.md)), and `@el2 …` / `@0..2 …` send FDX packets directly from command mode. A line that starts with an option, such as `--close`, is refused with a hint (`fdx --close`).
 
 A StellarLINK session keeps one OpenOCD shared by commands and GDB. TRACE32 inspection, `ram` and `fdx` share a lazily established connection. Failure drops it; the next command reconnects, without replaying the failed command. `flash`, `load` and `open` manage connections separately.
 

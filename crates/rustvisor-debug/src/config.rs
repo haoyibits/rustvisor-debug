@@ -52,8 +52,9 @@
 //! `[rtt]` and `[trace32...]` tables in trace32.toml's shape, so the keys,
 //! defaults and environment overrides are tracebridge's.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 use toml::{Table, Value};
 
@@ -200,6 +201,205 @@ fn is_elf(path: &Path) -> bool {
         .and_then(|mut file| file.read_exact(&mut magic))
         .is_ok()
         && magic == *b"\x7FELF"
+}
+
+/// A discovered bundle of images (`hypervisor` + `guest*.elf`) on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredImages {
+    pub dir: PathBuf,
+    pub count: usize,
+    pub modified: Option<SystemTime>,
+}
+
+const DISCOVERY_LIMIT: usize = 48;
+
+/// Discover image directories under `root` (including `target/board-tests/...`,
+/// pruning Cargo's own `deps`/`incremental`/`debug/build`/`release/build`) and `cwd`,
+/// sorted newest first.
+pub fn discover_image_dirs(root: &Path, cwd: &Path) -> Vec<DiscoveredImages> {
+    let mut visited = BTreeSet::new();
+    let mut found = Vec::new();
+    let target_dir = root.join("target");
+    if target_dir.is_dir() {
+        scan_dir_tree(&target_dir, 1, 5, true, &mut visited, &mut found);
+    }
+    scan_dir_tree(root, 0, 4, false, &mut visited, &mut found);
+    if cwd != root {
+        scan_dir_tree(cwd, 0, 4, false, &mut visited, &mut found);
+    }
+    found.sort_by(|a, b| match (b.modified, a.modified) {
+        (Some(bm), Some(am)) => bm.cmp(&am).then_with(|| a.dir.cmp(&b.dir)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.dir.cmp(&b.dir),
+    });
+    found.truncate(DISCOVERY_LIMIT);
+    found
+}
+
+fn scan_dir_tree(
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    in_target: bool,
+    visited: &mut BTreeSet<PathBuf>,
+    found: &mut Vec<DiscoveredImages>,
+) {
+    if depth > max_depth || !visited.insert(dir.to_path_buf()) {
+        return;
+    }
+    if depth >= 1
+        && let Ok((elf, extra)) = images_in(dir)
+    {
+        let mut modified = std::fs::metadata(dir).and_then(|m| m.modified()).ok();
+        for file in std::iter::once(&elf).chain(extra.iter()) {
+            if let Ok(mtime) = std::fs::metadata(file).and_then(|m| m.modified()) {
+                modified = Some(modified.map_or(mtime, |cur| cur.max(mtime)));
+            }
+        }
+        found.push(DiscoveredImages {
+            dir: dir.to_path_buf(),
+            count: 1 + extra.len(),
+            modified,
+        });
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let parent_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let mut subdirs: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            if !path.is_dir() {
+                return false;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                return false;
+            };
+            if name.starts_with('.') || name == "node_modules" {
+                return false;
+            }
+            if !in_target && name == "target" {
+                return false;
+            }
+            if in_target {
+                if matches!(
+                    name,
+                    "deps" | "incremental" | "examples" | "doc" | "package" | "tmp"
+                ) {
+                    return false;
+                }
+                if name == "build" && matches!(parent_name, "debug" | "release") {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+    subdirs.sort();
+    for sub in subdirs {
+        scan_dir_tree(&sub, depth + 1, max_depth, in_target, visited, found);
+    }
+}
+
+fn has_build_component(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, Component::Normal(name) if name == "build"))
+}
+
+fn format_relative(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn pick_discovered(
+    matches: &[DiscoveredImages],
+    query: &str,
+    root: &Path,
+    allow_same_leaf: bool,
+) -> Result<PathBuf, String> {
+    if matches.len() == 1 {
+        return Ok(matches[0].dir.clone());
+    }
+    let built: Vec<&DiscoveredImages> = matches
+        .iter()
+        .filter(|m| has_build_component(&m.dir))
+        .collect();
+    if built.len() == 1 {
+        return Ok(built[0].dir.clone());
+    }
+    if allow_same_leaf {
+        let first_leaf = matches[0].dir.file_name();
+        if first_leaf.is_some() && matches.iter().all(|m| m.dir.file_name() == first_leaf) {
+            return Ok(matches[0].dir.clone());
+        }
+    }
+    let listed: Vec<String> = matches
+        .iter()
+        .take(5)
+        .map(|m| format_relative(&m.dir, root))
+        .collect();
+    let suffix = if matches.len() > 5 {
+        format!(" (and {} more)", matches.len() - 5)
+    } else {
+        String::new()
+    };
+    Err(format!(
+        "'{query}' matches multiple image directories: {}{suffix}",
+        listed.join(", ")
+    ))
+}
+
+/// Resolve an `--images` / `images` argument: an explicit directory path, `"latest"`,
+/// a component suffix (`latency/inject-five`, `inject-five`), or a unique substring.
+pub fn resolve_images_dir(spec: &Path, cwd: &Path, root: &Path) -> Result<PathBuf, String> {
+    let direct_cwd = cwd.join(spec);
+    if direct_cwd.is_dir() {
+        return Ok(direct_cwd);
+    }
+    if cwd != root {
+        let direct_root = root.join(spec);
+        if direct_root.is_dir() {
+            return Ok(direct_root);
+        }
+    }
+    let found = discover_image_dirs(root, cwd);
+    let query = spec.to_string_lossy();
+    if query == "latest" {
+        return found.into_iter().next().map(|d| d.dir).ok_or_else(|| {
+            format!(
+                "no built image directories found under {}; build images first (e.g. cargo board build)",
+                root.display()
+            )
+        });
+    }
+    let suffix_matches: Vec<DiscoveredImages> = found
+        .iter()
+        .filter(|d| d.dir.ends_with(spec))
+        .cloned()
+        .collect();
+    if !suffix_matches.is_empty() {
+        return pick_discovered(&suffix_matches, &query, root, false);
+    }
+    let substr_matches: Vec<DiscoveredImages> = found
+        .iter()
+        .filter(|d| format_relative(&d.dir, root).contains(query.as_ref()))
+        .cloned()
+        .collect();
+    if !substr_matches.is_empty() {
+        return pick_discovered(&substr_matches, &query, root, true);
+    }
+    if spec.components().count() == 1 {
+        return Err(format!(
+            "no image directory matching '{query}' under {}",
+            root.display()
+        ));
+    }
+    Ok(direct_cwd)
 }
 
 impl Config {
@@ -963,5 +1163,43 @@ mod tests {
                 .unwrap_err()
                 .starts_with("no rvdbg.toml found")
         );
+    }
+
+    #[test]
+    fn image_discovery_finds_board_tests_under_target_and_resolves_short_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let case_a = root.join("target/board-tests/build/latency/inject-five");
+        let case_b = root.join("target/board-tests/build/smoke/ipc-poll");
+        let cargo_build = root.join("target/release/build/foo-1234/out");
+        for path in [&case_a, &case_b, &cargo_build] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        for name in ["hypervisor", "guest0.elf"] {
+            std::fs::write(case_a.join(name), b"\x7FELF").unwrap();
+            std::fs::write(case_b.join(name), b"\x7FELF").unwrap();
+        }
+        // Cargo's release/build/... should be pruned even if it contains an ELF.
+        std::fs::write(cargo_build.join("hypervisor"), b"\x7FELF").unwrap();
+
+        let found = discover_image_dirs(root, root);
+        let dirs: Vec<&Path> = found.iter().map(|d| d.dir.as_path()).collect();
+        assert!(dirs.contains(&case_a.as_path()), "{dirs:?}");
+        assert!(dirs.contains(&case_b.as_path()), "{dirs:?}");
+        assert!(!dirs.contains(&cargo_build.as_path()), "{dirs:?}");
+
+        assert_eq!(
+            resolve_images_dir(Path::new("inject-five"), root, root).unwrap(),
+            case_a
+        );
+        assert_eq!(
+            resolve_images_dir(Path::new("smoke/ipc-poll"), root, root).unwrap(),
+            case_b
+        );
+        assert!(resolve_images_dir(Path::new("latest"), root, root).is_ok());
+
+        // Ambiguous substring reports candidates.
+        let err = resolve_images_dir(Path::new("board-tests"), root, root).unwrap_err();
+        assert!(err.contains("multiple image directories"), "{err}");
     }
 }

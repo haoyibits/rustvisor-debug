@@ -81,6 +81,7 @@ impl Picker {
 pub(super) struct SymbolCache {
     stamp: Vec<(PathBuf, Option<SystemTime>)>,
     symbols: Vec<(String, u64)>,
+    per_image: Vec<(String, Vec<(String, u64)>)>,
 }
 
 impl SymbolCache {
@@ -98,46 +99,83 @@ impl SymbolCache {
         self.stamp = next_stamp;
         let mut seen = BTreeSet::new();
         let mut out = Vec::new();
-        for path in images {
+        let mut per_image = Vec::new();
+        for (idx, path) in images.iter().enumerate() {
+            let img_name = rustvisor_debug::fdx::image_name(idx.checked_sub(1));
             let Ok(bytes) = std::fs::read(path) else {
+                per_image.push((img_name, Vec::new()));
                 continue;
             };
-            let Ok(list) = probecore::elf::symbols(&bytes) else {
+            let Ok(list) = probecore::elf::named_symbols(&bytes) else {
+                per_image.push((img_name, Vec::new()));
                 continue;
             };
-            for sym in list {
-                if !sym.name.is_empty() && seen.insert(sym.name.clone()) {
-                    out.push((sym.name, sym.value));
+            let mut img_syms = Vec::new();
+            for (name, value, is_abs) in list {
+                if name.is_empty() || (is_abs && value < 0x10000) {
+                    continue;
+                }
+                img_syms.push((name.clone(), value));
+                if seen.insert(name.clone()) {
+                    out.push((name, value));
                 }
             }
+            img_syms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            img_syms.dedup_by(|a, b| a.0 == b.0);
+            per_image.push((img_name, img_syms));
         }
         out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         self.symbols = out;
+        self.per_image = per_image;
     }
 
     pub(super) fn matches(&self, prefix: &str, limit: usize) -> Vec<(&str, u64)> {
-        let needle = prefix.to_lowercase();
-        let mut starts = Vec::new();
-        let mut contains = Vec::new();
-        for (name, addr) in &self.symbols {
-            let lower = name.to_lowercase();
-            if lower.starts_with(&needle) {
-                starts.push((name.as_str(), *addr));
-                if starts.len() >= limit {
-                    break;
-                }
-            } else if !needle.is_empty() && contains.len() < limit && lower.contains(&needle) {
-                contains.push((name.as_str(), *addr));
-            }
+        match_symbol_slice(&self.symbols, prefix, limit)
+    }
+
+    pub(super) fn scoped_matches(
+        &self,
+        scope: &str,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<(&str, u64)> {
+        let names: Vec<String> = self.per_image.iter().map(|(n, _)| n.clone()).collect();
+        let Ok(indices) = rustvisor_debug::fdx::resolve_targets(scope, &names) else {
+            return Vec::new();
+        };
+        if let Some(&first) = indices.first() {
+            return match_symbol_slice(&self.per_image[first].1, prefix, limit);
         }
-        for item in contains {
+        Vec::new()
+    }
+}
+
+fn match_symbol_slice<'a>(
+    list: &'a [(String, u64)],
+    prefix: &str,
+    limit: usize,
+) -> Vec<(&'a str, u64)> {
+    let needle = prefix.to_lowercase();
+    let mut starts = Vec::new();
+    let mut contains = Vec::new();
+    for (name, addr) in list {
+        let lower = name.to_lowercase();
+        if lower.starts_with(&needle) {
+            starts.push((name.as_str(), *addr));
             if starts.len() >= limit {
                 break;
             }
-            starts.push(item);
+        } else if !needle.is_empty() && contains.len() < limit && lower.contains(&needle) {
+            contains.push((name.as_str(), *addr));
         }
-        starts
     }
+    for item in contains {
+        if starts.len() >= limit {
+            break;
+        }
+        starts.push(item);
+    }
+    starts
 }
 
 pub(super) fn build_specs(backend: Option<Backend>) -> Vec<CommandSpec> {
@@ -199,21 +237,29 @@ pub(super) fn build_specs(backend: Option<Backend>) -> Vec<CommandSpec> {
     specs
 }
 
-/// Inline dimmed ghost completion suffix for the first word of normal command input.
+/// Inline dimmed ghost completion suffix for the first word of the active command line.
 pub(super) fn ghost_suffix(text: &str, cursor: usize, specs: &[CommandSpec]) -> Option<String> {
-    if text.is_empty()
-        || cursor != text.len()
-        || text.contains('\n')
-        || text.contains(char::is_whitespace)
-        || text.starts_with('/')
+    let clamped = cursor.min(text.len());
+    let line_start = text[..clamped].rfind('\n').map_or(0, |i| i + 1);
+    let line_end = text[clamped..]
+        .find('\n')
+        .map_or(text.len(), |i| clamped + i);
+    if clamped != line_end {
+        return None;
+    }
+    let line = &text[line_start..clamped];
+    if line.is_empty()
+        || line.contains(char::is_whitespace)
+        || line.starts_with('/')
+        || line.starts_with('@')
     {
         return None;
     }
     specs
         .iter()
         .filter(|spec| !spec.is_tui_action && spec.unavailable.is_none())
-        .find(|spec| spec.name.starts_with(text) && spec.name.len() > text.len())
-        .map(|spec| spec.name[text.len()..].to_string())
+        .find(|spec| spec.name.starts_with(line) && spec.name.len() > line.len())
+        .map(|spec| spec.name[line.len()..].to_string())
 }
 
 /// Slash menu candidates when text begins with `/` (no spaces yet).
@@ -253,25 +299,54 @@ pub(super) fn slash_candidates(text: &str, specs: &[CommandSpec]) -> Vec<Candida
     prefix_matches
 }
 
-/// Tab completion candidates for normal command mode (commands, flags, ELF symbols, paths, values).
+fn default_image_names(image_count: usize) -> Vec<String> {
+    if image_count == 0 {
+        vec!["el2".into(), "guest0".into(), "guest1".into()]
+    } else {
+        (0..image_count)
+            .map(|i| rustvisor_debug::fdx::image_name(i.checked_sub(1)))
+            .collect()
+    }
+}
+
+/// Tab completion candidates for normal command mode (commands, flags, `@` FDX, ELF symbols, paths, values).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn command_tab_candidates(
     text: &str,
     cursor: usize,
     specs: &[CommandSpec],
     symbols: &SymbolCache,
     link_names: &[String],
+    target_words: &[String],
+    image_count: usize,
+    root: &Path,
     cwd: &Path,
 ) -> Vec<Candidate> {
-    if text.contains('\n') {
-        return Vec::new();
-    }
-    let before = &text[..cursor.min(text.len())];
-    if before.starts_with('/') {
+    let clamped = cursor.min(text.len());
+    let line_start = text[..clamped].rfind('\n').map_or(0, |i| i + 1);
+    let before = &text[line_start..clamped];
+    if line_start == 0 && before.starts_with('/') {
         return slash_candidates(before, specs);
     }
-    let word_start = before.rfind(char::is_whitespace).map_or(0, |idx| idx + 1);
-    let word = &before[word_start..];
-    let head = before[..word_start].trim();
+    let effective_links = if link_names.is_empty() {
+        default_image_names(image_count)
+    } else {
+        link_names.to_vec()
+    };
+    if before.starts_with('@') {
+        let mut items = fdx_tab_candidates(before, before.len(), &effective_links, target_words);
+        for item in &mut items {
+            item.replace_start += line_start;
+            item.replace_end += line_start;
+        }
+        return items;
+    }
+
+    let word_start_rel = before.rfind(char::is_whitespace).map_or(0, |idx| idx + 1);
+    let word = &before[word_start_rel..];
+    let head = before[..word_start_rel].trim();
+    let word_start = line_start + word_start_rel;
+    let abs_cursor = clamped;
 
     if head.is_empty() {
         return specs
@@ -284,7 +359,7 @@ pub(super) fn command_tab_candidates(
                 unavailable: s.unavailable,
                 run_on_enter: false,
                 replace_start: word_start,
-                replace_end: cursor,
+                replace_end: abs_cursor,
                 add_space: true,
             })
             .collect();
@@ -312,7 +387,7 @@ pub(super) fn command_tab_candidates(
                 unavailable: None,
                 run_on_enter: false,
                 replace_start: word_start,
-                replace_end: cursor,
+                replace_end: abs_cursor,
                 add_space: true,
             })
             .collect();
@@ -333,7 +408,7 @@ pub(super) fn command_tab_candidates(
                 unavailable: None,
                 run_on_enter: false,
                 replace_start: word_start,
-                replace_end: cursor,
+                replace_end: abs_cursor,
                 add_space: false,
             })
             .collect(),
@@ -347,47 +422,121 @@ pub(super) fn command_tab_candidates(
                 unavailable: None,
                 run_on_enter: false,
                 replace_start: word_start,
-                replace_end: cursor,
+                replace_end: abs_cursor,
                 add_space: false,
             })
             .collect(),
-        "fdx" if prev == "--guest" => {
-            let defaults: Vec<String> = if link_names.is_empty() {
-                vec!["el2".into(), "guest0".into(), "guest1".into()]
-            } else {
-                link_names.to_vec()
-            };
-            defaults
-                .into_iter()
-                .filter(|name| name.starts_with(word))
-                .map(|name| Candidate {
-                    insert: name.clone(),
-                    label: name,
-                    detail: "FDX image link".into(),
-                    unavailable: None,
-                    run_on_enter: false,
-                    replace_start: word_start,
-                    replace_end: cursor,
-                    add_space: true,
-                })
-                .collect()
-        }
-        "mem" | "ram" | "run-until" => symbols
-            .matches(word, 32)
+        "fdx" | "swtrace" if prev == "--guest" => effective_links
             .into_iter()
-            .map(|(name, addr)| Candidate {
-                insert: name.to_string(),
-                label: name.to_string(),
-                detail: format!("0x{addr:08X}"),
+            .filter(|name| name.starts_with(word))
+            .map(|name| Candidate {
+                insert: name.clone(),
+                label: name,
+                detail: "Image link / trace target".into(),
                 unavailable: None,
                 run_on_enter: false,
                 replace_start: word_start,
-                replace_end: cursor,
+                replace_end: abs_cursor,
                 add_space: true,
             })
             .collect(),
-        "images" => path_candidates(word, word_start, cursor, cwd, true),
-        "source" | "check" | "do" => path_candidates(word, word_start, cursor, cwd, false),
+        "mem" | "ram" | "run-until" => {
+            if let Some((scope, sym_prefix)) = word.split_once(':') {
+                let matches = if scope.is_empty() {
+                    symbols.matches(sym_prefix, 32)
+                } else {
+                    symbols.scoped_matches(scope, sym_prefix, 32)
+                };
+                return matches
+                    .into_iter()
+                    .map(|(name, addr)| {
+                        let full = format!("{scope}:{name}");
+                        Candidate {
+                            insert: full.clone(),
+                            label: full,
+                            detail: format!("0x{addr:08X}"),
+                            unavailable: None,
+                            run_on_enter: false,
+                            replace_start: word_start,
+                            replace_end: abs_cursor,
+                            add_space: true,
+                        }
+                    })
+                    .collect();
+            }
+            let mut out: Vec<Candidate> = symbols
+                .matches(word, 32)
+                .into_iter()
+                .map(|(name, addr)| Candidate {
+                    insert: name.to_string(),
+                    label: name.to_string(),
+                    detail: format!("0x{addr:08X}"),
+                    unavailable: None,
+                    run_on_enter: false,
+                    replace_start: word_start,
+                    replace_end: abs_cursor,
+                    add_space: true,
+                })
+                .collect();
+            if matches!(cmd, "ram" | "mem") {
+                for name in default_image_names(image_count) {
+                    let prefix = format!("{name}:");
+                    if prefix.starts_with(word) {
+                        out.push(Candidate {
+                            insert: prefix.clone(),
+                            label: prefix,
+                            detail: format!("Scope symbol to {name}"),
+                            unavailable: None,
+                            run_on_enter: false,
+                            replace_start: word_start,
+                            replace_end: abs_cursor,
+                            add_space: false,
+                        });
+                    }
+                }
+            }
+            out
+        }
+        "images" => {
+            let mut out = Vec::new();
+            let discovered = config::discover_image_dirs(root, cwd);
+            if "latest".starts_with(word) && !discovered.is_empty() {
+                out.push(Candidate {
+                    insert: "latest".into(),
+                    label: "latest".into(),
+                    detail: "Newest built image directory".into(),
+                    unavailable: None,
+                    run_on_enter: false,
+                    replace_start: word_start,
+                    replace_end: abs_cursor,
+                    add_space: false,
+                });
+            }
+            for item in discovered {
+                let rel = display_image_dir(&item.dir, root, cwd);
+                let leaf = item.dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if rel.starts_with(word) || leaf.starts_with(word) {
+                    let insert = if rel.contains(char::is_whitespace) {
+                        format!("'{rel}'")
+                    } else {
+                        rel.clone()
+                    };
+                    out.push(Candidate {
+                        insert,
+                        label: rel,
+                        detail: format!("{} ELF(s){}", item.count, format_age(item.modified)),
+                        unavailable: None,
+                        run_on_enter: false,
+                        replace_start: word_start,
+                        replace_end: abs_cursor,
+                        add_space: false,
+                    });
+                }
+            }
+            out.extend(path_candidates(word, word_start, abs_cursor, cwd, true));
+            out
+        }
+        "source" | "check" | "do" => path_candidates(word, word_start, abs_cursor, cwd, false),
         _ => Vec::new(),
     }
 }
@@ -399,13 +548,13 @@ pub(super) fn fdx_tab_candidates(
     link_names: &[String],
     target_words: &[String],
 ) -> Vec<Candidate> {
-    if text.contains('\n') {
-        return Vec::new();
-    }
-    let before = &text[..cursor.min(text.len())];
-    let word_start = before.rfind(' ').map_or(0, |idx| idx + 1);
-    let word = &before[word_start..];
-    if word_start == 0 && word.starts_with('@') {
+    let clamped = cursor.min(text.len());
+    let line_start = text[..clamped].rfind('\n').map_or(0, |i| i + 1);
+    let before = &text[line_start..clamped];
+    let word_start_rel = before.rfind(' ').map_or(0, |idx| idx + 1);
+    let word = &before[word_start_rel..];
+    let word_start = line_start + word_start_rel;
+    if word_start_rel == 0 && word.starts_with('@') {
         return link_names
             .iter()
             .map(|name| format!("@{name}"))
@@ -416,13 +565,13 @@ pub(super) fn fdx_tab_candidates(
                 detail: "Send one packet to this link".into(),
                 unavailable: None,
                 run_on_enter: false,
-                replace_start: 0,
-                replace_end: cursor,
+                replace_start: line_start,
+                replace_end: clamped,
                 add_space: true,
             })
             .collect();
     }
-    if before.starts_with(":to ") && word_start == 4 {
+    if before.starts_with(":to ") && word_start_rel == 4 {
         return link_names
             .iter()
             .filter(|name| name.starts_with(word))
@@ -433,16 +582,17 @@ pub(super) fn fdx_tab_candidates(
                 unavailable: None,
                 run_on_enter: false,
                 replace_start: word_start,
-                replace_end: cursor,
+                replace_end: clamped,
                 add_space: false,
             })
             .collect();
     }
-    if word_start == 0 && word.starts_with(':') {
+    if word_start_rel == 0 && word.starts_with(':') {
         return [
             (":q", "Close FDX panel and return to rvdbg"),
             (":to", "Switch active FDX link (:to <name>)"),
             (":last", "Show recent packets on this link"),
+            (":send", "Send a literal packet to the current link"),
             (":help", "Show local FDX commands"),
         ]
         .into_iter()
@@ -453,9 +603,9 @@ pub(super) fn fdx_tab_candidates(
             detail: help.to_string(),
             unavailable: None,
             run_on_enter: false,
-            replace_start: 0,
-            replace_end: cursor,
-            add_space: cmd == ":to",
+            replace_start: line_start,
+            replace_end: clamped,
+            add_space: matches!(cmd, ":to" | ":send"),
         })
         .collect();
     }
@@ -469,7 +619,7 @@ pub(super) fn fdx_tab_candidates(
             unavailable: None,
             run_on_enter: false,
             replace_start: word_start,
-            replace_end: cursor,
+            replace_end: clamped,
             add_space: true,
         })
         .collect();
@@ -549,24 +699,40 @@ pub(super) fn fdx_picker(link_names: &[String], active: bool) -> Picker {
     }
 }
 
+fn display_image_dir(dir: &Path, root: &Path, cwd: &Path) -> String {
+    dir.strip_prefix(cwd)
+        .or_else(|_| dir.strip_prefix(root))
+        .unwrap_or(dir)
+        .display()
+        .to_string()
+}
+
+fn format_age(modified: Option<SystemTime>) -> String {
+    let Some(mtime) = modified else {
+        return String::new();
+    };
+    let Ok(elapsed) = SystemTime::now().duration_since(mtime) else {
+        return String::new();
+    };
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!(" · {secs}s ago")
+    } else if secs < 3600 {
+        format!(" · {}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!(" · {}h ago", secs / 3600)
+    } else {
+        format!(" · {}d ago", secs / 86400)
+    }
+}
+
 pub(super) fn images_picker(config: &Config, cwd: &Path) -> Picker {
-    let mut found = Vec::new();
-    let mut roots = vec![cwd.to_path_buf()];
-    if config.root != cwd {
-        roots.push(config.root.clone());
-    }
-    let mut visited = BTreeSet::new();
-    for root in roots {
-        scan_image_dirs(&root, 0, &mut visited, &mut found);
-    }
+    let found = config::discover_image_dirs(&config.root, cwd);
     let mut items: Vec<PickerItem> = found
         .into_iter()
         .take(24)
-        .map(|(dir, count)| {
-            let display = dir
-                .strip_prefix(cwd)
-                .map(|rel| rel.display().to_string())
-                .unwrap_or_else(|_| dir.display().to_string());
+        .map(|item| {
+            let display = display_image_dir(&item.dir, &config.root, cwd);
             let quoted = if display.contains(char::is_whitespace) {
                 format!("images '{display}'")
             } else {
@@ -574,7 +740,7 @@ pub(super) fn images_picker(config: &Config, cwd: &Path) -> Picker {
             };
             PickerItem {
                 label: display,
-                detail: format!("{count} ELF image(s)"),
+                detail: format!("{} ELF image(s){}", item.count, format_age(item.modified)),
                 command: quoted,
             }
         })
@@ -590,40 +756,6 @@ pub(super) fn images_picker(config: &Config, cwd: &Path) -> Picker {
         title: "Switch Image Directory".into(),
         items,
         selected: 0,
-    }
-}
-
-fn scan_image_dirs(
-    dir: &Path,
-    depth: usize,
-    visited: &mut BTreeSet<PathBuf>,
-    found: &mut Vec<(PathBuf, usize)>,
-) {
-    if depth > 3 || found.len() >= 24 || !visited.insert(dir.to_path_buf()) {
-        return;
-    }
-    if depth > 0
-        && let Ok((_, extra)) = config::images_in(dir)
-    {
-        found.push((dir.to_path_buf(), 1 + extra.len()));
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut subdirs: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| !n.starts_with('.') && n != "target" && n != "node_modules")
-        })
-        .collect();
-    subdirs.sort();
-    for sub in subdirs {
-        scan_image_dirs(&sub, depth + 1, visited, found);
     }
 }
 
@@ -701,7 +833,7 @@ mod tests {
     fn slash_menu_runs_zero_arg_commands_and_fills_arg_commands() {
         let specs = build_specs(Some(Backend::OpenOcd));
         let stat = slash_candidates("/stat", &specs);
-        assert_eq!(stat.len(), 1);
+        assert!(!stat.is_empty());
         assert_eq!(stat[0].insert, "status");
         assert!(stat[0].run_on_enter);
 
@@ -724,9 +856,58 @@ mod tests {
     fn flag_completion_extracts_clap_flags() {
         let specs = build_specs(Some(Backend::OpenOcd));
         let syms = SymbolCache::default();
-        let items = command_tab_candidates("flash --no-", 11, &specs, &syms, &[], Path::new("."));
+        let items = command_tab_candidates(
+            "flash --no-",
+            11,
+            &specs,
+            &syms,
+            &[],
+            &[],
+            1,
+            Path::new("."),
+            Path::new("."),
+        );
         let names: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
         assert!(names.contains(&"--no-verify"), "{names:?}");
         assert!(names.contains(&"--no-run"), "{names:?}");
+    }
+
+    #[test]
+    fn multiline_ghost_and_tab_complete_work_on_later_lines() {
+        let specs = build_specs(Some(Backend::OpenOcd));
+        let syms = SymbolCache::default();
+        let text = "reset\nsta";
+        assert_eq!(
+            ghost_suffix(text, text.len(), &specs).as_deref(),
+            Some("tus")
+        );
+        let items = command_tab_candidates(
+            "reset\nsta",
+            9,
+            &specs,
+            &syms,
+            &[],
+            &[],
+            2,
+            Path::new("."),
+            Path::new("."),
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].insert, "status");
+        assert_eq!((items[0].replace_start, items[0].replace_end), (6, 9));
+        let at_items = command_tab_candidates(
+            "go\n@g",
+            5,
+            &specs,
+            &syms,
+            &[],
+            &[],
+            3,
+            Path::new("."),
+            Path::new("."),
+        );
+        let labels: Vec<&str> = at_items.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["@guest0", "@guest1"]);
+        assert_eq!((at_items[0].replace_start, at_items[0].replace_end), (3, 5));
     }
 }

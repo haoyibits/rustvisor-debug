@@ -348,8 +348,43 @@ class Tui:
         os.close(self.pty)
 
 
+def make_test_elf(symbols):
+    """Minimal ELF32 Arm file with defined .symtab entries (name, value, size)."""
+    strtab = bytearray(b"\x00")
+    symtab = bytearray(16)
+    for name, value, size in symbols:
+        off = len(strtab)
+        strtab.extend(name.encode() + b"\x00")
+        symtab.extend(struct.pack("<IIIBBH", off, value, size, 0x11, 0, 1))
+    header = bytearray(52)
+    header[0:4] = b"\x7fELF"
+    header[4] = 1
+    header[5] = 1
+    struct.pack_into("<H", header, 0x12, 40)
+    sym_off = len(header)
+    data = bytearray(header) + symtab
+    str_off = len(data)
+    data.extend(strtab)
+    shoff = len(data)
+    struct.pack_into("<I", data, 0x20, shoff)
+    struct.pack_into("<HHH", data, 0x2E, 40, 3, 0)
+    data.extend(bytes(40))
+    sh_sym = bytearray(40)
+    struct.pack_into("<IIIIII", sh_sym, 4, 2, 0, 0, sym_off, len(symtab), 2)
+    struct.pack_into("<I", sh_sym, 0x24, 16)
+    sh_str = bytearray(40)
+    struct.pack_into("<IIIII", sh_str, 4, 3, 0, 0, str_off, len(strtab))
+    data.extend(sh_sym + sh_str)
+    return bytes(data)
+
+
 def exercise(backend):
     with Probe(backend) as probe, tempfile.TemporaryDirectory() as directory:
+        Path(directory, "app.elf").write_bytes(make_test_elf([
+            ("RUSTVISOR_FDX", 0x3000, 0xC0),
+            ("RUSTVISOR_STOP_RECORDS", 0x3400, 0x40),
+            ("MAILBOX", 0x3800, 0x40),
+        ]))
         Path(directory, "rvdbg.toml").write_text(probe.config())
         # Bare `rvdbg` defaults to Fullscreen (Altscreen) TUI with zero CPR queries.
         tty = Tui(directory, backend)
@@ -370,10 +405,21 @@ def exercise(backend):
             idx = tty.send(b"/nonexistent\r")
             tty.expect("unknown command '/nonexistent'", idx)
 
-            # Normal Tab completion (without leading `/`) + inline ghost text works.
+            # Normal Tab completion (without leading `/`) + multiline Tab completion.
             idx = tty.send(b"stat\t\r")
             tty.expect("❯ status", idx)
             tty.expect("4000", idx)
+
+            # Multiline composer Tab completion on line 2.
+            idx = tty.send(b"help halt\x1b\rstat\t")
+            tty.expect("status", idx)
+            tty.send(b"\x03")
+
+            # RAM `=` write with 4-byte ASCII tag + `|GOGO|` readback.
+            idx = tty.send(b"ram MAILBOX+0x3c = GOGO\r")
+            tty.expect("wrote 1 word(s)", idx)
+            idx = tty.send(b"ram MAILBOX+0x3c\r")
+            tty.expect("|GOGO|", idx)
 
             # Multiline paste + resize.
             tty.resize(76, 20)
@@ -417,14 +463,20 @@ def exercise(backend):
             tty.until(lambda: probe.target.read(0x2100, 4) == b"xyz\n")
             tty.expect("/ menu", tty.send(b"\x03"))
 
-            # Persistent FDX split pane + Shift+Tab mode switch + Ctrl+O toggle + !cmd escape.
+            # Modeless `@el2` from rvdbg command mode opens the FDX split pane while keeping command focus.
             tty.resize(112, 30)
-            idx = tty.send(b"fdx --address 0x3000\r")
-            tty.expect("fdx:el2", idx)
-            tty.expect("fdx-out", idx)
-            tty.send(b"hello\r")
-            tty.until(lambda: probe.target.read(0x3008, 4) == struct.pack("<I", 57))
-            # Mock does not consume "hello", so next packet stays queued.
+            idx = tty.send(b"@el2 ping\r")
+            tty.expect("FDX", idx)
+            tty.expect("Tab complete", idx)
+            tty.until(lambda: probe.target.read(0x3008, 4) != struct.pack("<I", 63))
+            # Switch into FDX mode, test mis-type guard (`cores` is blocked), then test `!status` & `Ctrl+O`.
+            tty.expect("fdx:el2", tty.send(b"\x1b[Z"))
+            guard_at = tty.send(b"cores\r")
+            tty.expect("not sent", guard_at)
+            # Trigger a simulated stop record and verify live [stop] alert.
+            probe.target.write(0x3400, struct.pack("<IIII", 0x53540001, 1, 0x0001, 1))
+            tty.expect("C0C1 stopped", guard_at)
+            # Mock does not consume "ping", so next packet stays queued.
             tty.expect("stale-packet", tty.send(b"stale-packet\r"))
             # Escape into an rvdbg command directly from FDX mode via `!`.
             escape_at = tty.send(b"!status\r")
@@ -443,6 +495,11 @@ def exercise(backend):
             tty.expect("waiting for the target to open the link", reset_at)
             tty.expect("fresh-boot", tty.send(b"go\r"))
             assert probe.target.read(0x3008, 4) == struct.pack("<I", 63)
+
+            # `restart` resets, closes links, and immediately runs `go`.
+            restart_at = tty.send(b"restart\r")
+            tty.expect("closed 1 FDX link", restart_at)
+            tty.expect("fresh-boot", restart_at)
 
             tty.expect("halted", tty.send(b"halt\r"))
             tty.until(lambda: not probe.target.running)

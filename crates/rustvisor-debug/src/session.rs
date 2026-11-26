@@ -73,6 +73,7 @@ const GROUPS: &[(&str, &[(&str, Need)])] = &[
             ("halt", Need::Probe),
             ("go", Need::Probe),
             ("reset", Need::Probe),
+            ("restart", Need::Probe),
             ("attach", Need::Probe),
             ("run-until", Need::Probe),
             ("down", Need::Trace32),
@@ -507,6 +508,7 @@ impl Session {
         let mut env = Env {
             config: &self.config,
             flag: self.backend.or(self.flag),
+            selected: std::cell::Cell::new(Some(backend)),
             json: false,
             session: Some(SessionLink {
                 backend,
@@ -828,9 +830,14 @@ impl Session {
 
     /// `images <dir>`: the session's images from now on.
     fn switch_images(&mut self, dir: &str) {
-        let path = std::env::current_dir()
-            .map(|cwd| cwd.join(dir))
-            .unwrap_or_else(|_| PathBuf::from(dir));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| self.config.root.clone());
+        let path = match config::resolve_images_dir(Path::new(dir), &cwd, &self.config.root) {
+            Ok(path) => path,
+            Err(error) => {
+                self.error(&error);
+                return;
+            }
+        };
         match self.config.clone().with_images(&path) {
             Ok(config) => {
                 self.fdx_boundary("images");
@@ -857,6 +864,10 @@ impl Session {
             self.code = 130;
             self.error("interrupted");
             return Flow::Continue;
+        }
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with('@') {
+            return self.handle_at_fdx(trimmed_start.trim_end());
         }
         let args = match split_line(line) {
             Ok(args) => args,
@@ -1001,6 +1012,7 @@ impl Session {
                     options,
                     &self.history,
                     ui,
+                    true,
                 )?);
                 Ok(())
             }
@@ -1040,6 +1052,7 @@ impl Session {
                 if matches!(
                     command,
                     Commands::Reset { .. }
+                        | Commands::Restart { .. }
                         | Commands::Flash { .. }
                         | Commands::Load
                         | Commands::Attach
@@ -1053,6 +1066,7 @@ impl Session {
                 let mut env = Env {
                     config: &self.config,
                     flag: self.backend.or(self.flag),
+                    selected: std::cell::Cell::new(self.backend),
                     json,
                     session: self.backend.map(|backend| SessionLink {
                         backend,
@@ -1070,11 +1084,25 @@ impl Session {
                             || matches!(&command, Commands::Fdx(args) if !args.close);
                     ui.begin(&name, cancellable)?;
                 }
+                let started_target = matches!(
+                    command,
+                    Commands::Go
+                        | Commands::Reset { go: true, .. }
+                        | Commands::Restart { .. }
+                        | Commands::Flash { .. }
+                        | Commands::RunUntil { .. }
+                );
                 let result = execute(&mut env, command);
                 if matches!(name.as_str(), "flash" | "load") {
                     self.refresh_fdx_targets();
                 }
                 let code = result?;
+                if started_target
+                    && code == 0
+                    && let Some(panel) = &mut self.fdx_panel
+                {
+                    panel.on_target_started();
+                }
                 self.code = code;
                 if code != 0 {
                     eprintln!("{}", self.style.dim(format!("(exit code {code})")));
@@ -1082,6 +1110,114 @@ impl Session {
                 Ok(())
             }
         }
+    }
+
+    /// Modeless `@target [packet]` dispatch directly from the `rvdbg ›` command prompt.
+    fn handle_at_fdx(&mut self, line: &str) -> Flow {
+        let Some(backend) = self.backend else {
+            self.error("FDX needs a probe; plug one in, then 'reconnect'");
+            return Flow::Continue;
+        };
+        if self.ui.is_some() {
+            if !self.has_fdx_panel() {
+                let args = crate::FdxArgs {
+                    guest: None,
+                    all: !self.config.extra_elf.is_empty(),
+                    symbol: None,
+                    address: None,
+                    send: Vec::new(),
+                    expect: Vec::new(),
+                    timeout: 10.0,
+                    close: false,
+                };
+                match crate::fdx_options(&self.config, args.clone(), false) {
+                    Ok(options) => {
+                        let ui = self.ui.clone().expect("the TUI owns this panel");
+                        match crate::fdx_terminal::Panel::new(
+                            args,
+                            options,
+                            &self.history,
+                            ui,
+                            false,
+                        ) {
+                            Ok(panel) => self.fdx_panel = Some(panel),
+                            Err(error) => {
+                                self.error(&error);
+                                return Flow::Continue;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.error(&error);
+                        return Flow::Continue;
+                    }
+                }
+            }
+            self.fdx_input(line);
+            return Flow::Continue;
+        }
+        let Some(rest) = line.strip_prefix('@') else {
+            return Flow::Continue;
+        };
+        let (spec, packet) = match rest.split_once(char::is_whitespace) {
+            Some((spec, packet)) => (spec, packet.trim_start()),
+            None => (rest, ""),
+        };
+        if packet.is_empty() {
+            self.code = 2;
+            self.error("usage: @<target> <packet> (e.g. @guest0 run timer)");
+            return Flow::Continue;
+        }
+        let targets = crate::link_targets(&self.config, &self.config.fdx_symbol);
+        if targets.is_empty() {
+            self.error(&format!(
+                "no image has {}; build the images",
+                self.config.fdx_symbol
+            ));
+            return Flow::Continue;
+        }
+        let names: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
+        let indices = match rustvisor_debug::fdx::resolve_targets(spec, &names) {
+            Ok(indices) => indices,
+            Err(error) => {
+                self.code = 2;
+                self.error(&error);
+                return Flow::Continue;
+            }
+        };
+        self.powerview = None;
+        for index in indices {
+            let args = crate::FdxArgs {
+                guest: Some(targets[index].name.clone()),
+                all: false,
+                symbol: None,
+                address: None,
+                send: vec![packet.to_string()],
+                expect: Vec::new(),
+                timeout: 10.0,
+                close: false,
+            };
+            let mut env = Env {
+                config: &self.config,
+                flag: Some(backend),
+                selected: std::cell::Cell::new(Some(backend)),
+                json: self.json,
+                session: Some(SessionLink {
+                    backend,
+                    server: self.server.as_mut(),
+                    interrupted: &self.interrupted,
+                    powerview: Some(&mut self.powerview),
+                    history: Some(&mut self.history),
+                    ui: None,
+                    fdx_targets: &[],
+                }),
+            };
+            if let Err(error) = execute(&mut env, Commands::Fdx(args)) {
+                self.error(&error);
+                return Flow::Continue;
+            }
+        }
+        Flow::Continue
     }
 
     /// Where the IDE's debug server is while the session runs.
@@ -1107,6 +1243,7 @@ const SHARES_POWERVIEW: &[&str] = &[
     "go",
     "attach",
     "reset",
+    "restart",
     "down",
     "fault",
     "reg",
@@ -1121,6 +1258,8 @@ const SHARES_POWERVIEW: &[&str] = &[
     "watch",
     "do",
     "ram",
+    "cores",
+    "images",
     "fdx",
     "swtrace",
 ];
@@ -1155,6 +1294,11 @@ fn print_clap_error(error: &clap::Error, command: &str, style: Style) {
         } else {
             eprintln!("{line}");
         }
+    }
+    if command == "mem" && (text.contains("--write") || text.contains("'='")) {
+        eprintln!(
+            "hint: 'mem' is read-only; use 'ram <addr|symbol> = <value>' to write ordinary RAM"
+        );
     }
 }
 
@@ -1204,7 +1348,8 @@ pub(crate) fn load_config(
 ) -> Result<Config, String> {
     let mut config = config::load(path)?;
     if let Some(dir) = images {
-        config = config.with_images(&cwd.join(dir))?;
+        let resolved = config::resolve_images_dir(dir, cwd, &config.root)?;
+        config = config.with_images(&resolved)?;
     }
     Ok(config)
 }
@@ -1525,9 +1670,34 @@ mod tests {
         assert!(text.contains(&style.address("openocd")), "{text:?}");
         let text = color_prompt(style, "rvdbg [no probe]> ");
         assert!(text.contains(&style.bad("no probe")), "{text:?}");
-        assert_eq!(
-            color_prompt(Style::PLAIN, "rvdbg [trace32]> "),
-            "rvdbg [trace32]> "
+        let text = color_prompt(Style::PLAIN, "rvdbg [trace32]> ");
+        assert_eq!(text, "rvdbg [trace32]> ");
+    }
+
+    #[test]
+    fn modeless_at_and_restart_report_cleanly_without_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config(dir.path());
+        let mut session = Session::new(config, None, false, Style::PLAIN);
+        session.detect = nothing_found;
+        session.connect(None);
+        assert_eq!(session.handle_line("@el2 help"), Flow::Continue);
+        assert_eq!(session.code, 1);
+        assert!(
+            session
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("FDX needs a probe")
+        );
+        assert_eq!(session.handle_line("restart"), Flow::Continue);
+        assert_eq!(session.code, 1);
+        assert!(
+            session
+                .failure
+                .as_deref()
+                .unwrap()
+                .contains("restart needs a probe")
         );
     }
 }

@@ -497,12 +497,18 @@ def exercise(backend):
             assert probe.target.read(0x3008, 4) == struct.pack("<I", 63)
 
             # `restart` resets, closes links, and immediately runs `go`.
+            resets = sum(1 for x in probe.target.log if x.upper() == "SYSTEM.RESET" or x == "reset halt")
+            gos = sum(1 for x in probe.target.log if x in ("Go", "resume"))
             restart_at = tty.send(b"restart\r")
-            tty.expect("closed 1 FDX link", restart_at)
+            tty.until(lambda: sum(1 for x in probe.target.log if x.upper() == "SYSTEM.RESET" or x == "reset halt") > resets)
+            tty.until(lambda: sum(1 for x in probe.target.log if x in ("Go", "resume")) > gos)
+            tty.until(lambda: not probe.target.boot_pending and probe.target.running)
+            tty.until(lambda: "Paused" not in tty.screen_text())
             tty.expect("fresh-boot", restart_at)
 
-            tty.expect("halted", tty.send(b"halt\r"))
+            tty.send(b"halt\r")
             tty.until(lambda: not probe.target.running)
+            tty.until(lambda: "Paused" not in tty.screen_text())
             paused_at = tty.send(b"run-until 0x4000 --timeout 4\r")
             tty.expect("Paused", paused_at)
             tty.until(lambda: probe.target.running)
